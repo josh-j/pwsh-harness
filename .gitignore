@@ -1,0 +1,4 @@
+out/
+*.log
+.env
+.env.*
