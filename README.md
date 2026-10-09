@@ -1,37 +1,58 @@
 # PwshHarness
-Terminal assistant for writing Windows PowerShell 7.6 scripts through an OpenAI-compatible API.
-Status: alpha; gateway compatibility has not been validated against a live service.
-Model tool calling is disabled. Saving, copying and running code are explicit user actions.
-Install PowerShell 7.6 or newer. Git and PSScriptAnalyzer are optional; generated-test verification also requires Pester 5.
-Clone or download this repository, then copy the entire release folder (including its sibling extensions, profiles and prompts)
-into a directory on `$env:PSModulePath`, or keep it anywhere and import the manifest by its full path:
+
+Terminal assistant for writing Windows PowerShell 7.6 through an OpenAI-compatible API.
+Alpha: live gateway compatibility is unverified. Model tool calling is disabled.
+
+## Requirements
+
+PowerShell 7.6+. Git and PSScriptAnalyzer are optional; generated-test verification requires Pester 5.
+
+## Install
+
+Clone or download this repository. Keep the entire folder together, including extensions, profiles and prompts.
+You can copy it into a directory on `$env:PSModulePath`; import its nested manifest explicitly:
+
 ```powershell
 Import-Module .\PwshHarness\PwshHarness.psd1
+```
+
+## Configure
+
+```powershell
 $env:OPENAI_BASE_URL = 'https://your-gateway.example'
 $env:OPENAI_API_KEY = 'your-key'
+```
+
+The gateway must support `/v1/chat/completions` with SSE streaming. Never put API keys in config.
+Edit `profiles/gemini-3.8-flash.psd1` for your gateway's model id, or pass `-Model` to `Invoke-PwshHarness`.
+Reasoning-effort support is gateway-dependent; embeddings are off by default.
+On the Windows target, capture its installed command catalog once:
+
+```powershell
+.\tools\Export-HarnessCommandCatalog.ps1
+```
+
+## Use
+
+```powershell
 Start-PwshHarness
-```
-The API key stays in the environment. The gateway must support `/v1/chat/completions` and SSE streaming.
-The default profile is `profiles/gemini-3.8-flash.psd1`; change its model id to the id your gateway accepts,
-or use `Invoke-PwshHarness -Model 'your-model-id' -Prompt 'Write a function to report disk space'`.
-Reasoning-effort and embeddings support depend on your gateway; embeddings are off by default.
-On your Windows target, capture its command catalog once so validation reflects installed commands:
-```powershell
-.	ools\Export-HarnessCommandCatalog.ps1
-```
-Offline smoke and scripting:
-```powershell
-Invoke-PwshHarness -Provider Mock -Prompt 'Write a greeting'
-Invoke-PwshHarness -Prompt 'Write a function to list stopped services' -PassThru
 Start-PwshHarness -NoTui
+Invoke-PwshHarness -Provider Mock -Prompt 'Write a greeting'
+Invoke-PwshHarness -Prompt 'Write a function to report disk space' -PassThru
 ```
-Enter sends; Shift/Ctrl/Alt+Enter inserts a newline. Ctrl+C cancels a request; `/quit` exits.
-`/help` lists commands. Use `/model`, `/provider`, `/system`, `/config`, `/history` and `/resume` for sessions;
-`/save`, `/copy`, `/validate`, `/run` and `/whatif` for the latest code. Running requires confirmation.
-`/add`, `/drop`, `/context`, `/diff`, `/tree`, `/rag`, `/why` and `/reindex` control local project context;
-`/tokens` shows usage. Review generated code and diagnostics before running it.
-- Execution policy: follow your organization's policy; MachinePolicy/UserPolicy may prevent child script execution.
-- Legacy consoles and redirected input/output use line mode; `-NoTui` selects it explicitly.
-- If glyphs render poorly, set `Tui.Ascii` to true in your JSON configuration.
-- Config lives under APPDATA/PwshHarness on Windows or the XDG config directory elsewhere; `/config` shows settings.
-- Authentication/model errors: check the environment variables, gateway URL and model id; never put API keys in config.
+
+## Commands
+
+Enter sends; Shift/Ctrl/Alt+Enter inserts a newline. Ctrl+C cancels; `/quit` exits. `/help` lists all commands.
+Use `/model`, `/provider`, `/system`, `/config`, `/history` and `/resume` for sessions;
+`/save`, `/copy`, `/validate`, `/run` and `/whatif` for code; `/tokens` for usage.
+`/add`, `/drop`, `/context`, `/diff`, `/tree`, `/rag`, `/why` and `/reindex` control local context.
+Review generated code before running it; execution requires explicit confirmation.
+
+## Troubleshooting
+
+- Execution policy: follow your organization's policy; MachinePolicy/UserPolicy may block child scripts.
+- Legacy consoles or redirected input/output use line mode; `-NoTui` selects it explicitly.
+- Font problems: set `Tui.Ascii` to true in config.
+- Config: APPDATA/PwshHarness on Windows, XDG config directory elsewhere. `/config` shows settings.
+- Authentication/model errors: check your environment variables, gateway URL and model id.
