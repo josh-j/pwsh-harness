@@ -1,6 +1,6 @@
 function Merge-PackFunctionEdit {
     param($Context)
-    if (-not $Context.Config.FunctionEdits -or -not $Context.State.LastResult -or -not $Context.Result.CodeBlocks.Count) {
+    if (-not $Context.Config.FunctionEdits -or -not $Context.State.LastResult -or -not $Context.State.LastResult.CodeBlocks.Count -or -not $Context.Result.CodeBlocks.Count) {
         return 
     }
     $previous = $Context.State.LastResult.CodeBlocks[0].Code
@@ -61,7 +61,7 @@ function Merge-PackFunctionEdit {
 }
 function Add-PackScaffold {
     param($Request)
-    if ($Request.Config.FunctionEdits -and $Request.State.LastResult) {
+    if ($Request.Config.FunctionEdits -and $Request.State.LastResult -and $Request.State.LastResult.CodeBlocks.Count) {
         $Request.Messages[0].Content += @'
 
 When editing: return only changed/new function definitions and # remove: Name comments. Preserve other functions.
@@ -73,6 +73,9 @@ For a full replacement, include # full-script or an explicit script-body stateme
         $Request.Messages = @($messages | Select-Object -SkipLast 1) + @($current, $messages[-1])
     }
     if ($Request.Config.Scaffold -and $Request.Prompt -match '(?i)\b(function|script)\b') {
+        if ($Request.Config.Behavior -ne 'code') {
+            $Request.Messages[0].Content += "`nThe following scaffold applies only if this request calls for a PowerShell script."
+        }
         $Request.Messages[0].Content += @'
 
 Use this advanced-function shape, adapting names, types and behavior:
@@ -209,7 +212,11 @@ function Get-PackSamplingPolicy {
     }
 }
 function Register-PackAmplification {
-    foreach ($setting in @('FunctionEdits', 'BestOfN', 'GroundedRepair', 'ExampleRetrieval', 'SemanticCritics', 'Scaffold', 'VerifyWithTests')) {
+    # User JSON, environment and CLI options override these declared defaults.
+    foreach ($setting in @('ExampleRetrieval', 'SemanticCritics', 'Scaffold')) {
+        $script:Harness.Settings.Declare($setting, [bool], $true)
+    }
+    foreach ($setting in @('FunctionEdits', 'BestOfN', 'GroundedRepair', 'VerifyWithTests')) {
         $script:Harness.Settings.Declare($setting, [bool], $false)
     }
     $script:Harness.Settings.Declare('IncludeProfileAddendum', [bool], $true)

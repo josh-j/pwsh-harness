@@ -1,3 +1,5 @@
+# synopsis: Map Windows service names to status strings in a hashtable.
+# tags: Get-Service map hashtable
 #Requires -Version 7.6
 function Get-ServiceStateMap {
     [CmdletBinding()]

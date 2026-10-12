@@ -2,6 +2,7 @@
 Set-StrictMode -Version Latest
 $script:FrozenValues = @{}
 Set-Variable -Name HarnessApiVersion -Value '1.0' -Option Constant
+. (Join-Path $PSScriptRoot 'Fences.ps1')
 
 function New-HarnessFrozen {
     <#
@@ -284,7 +285,8 @@ function New-HarnessCodeBlock {
         [string]$Code = '',
         [string]$Language = '',
         [int]$Index = 0,
-        [int]$StartLine = 1
+        [int]$StartLine = 1,
+        [AllowNull()][object]$Fence
     )
     $value = [pscustomobject]@{
         PSTypeName = 'Harness.CodeBlock'
@@ -294,6 +296,9 @@ function New-HarnessCodeBlock {
         StartLine  = $StartLine
     }
     Assert-HarnessCodeBlock $value
+    if ($null -ne $Fence) {
+        $value | Add-Member -NotePropertyName Fence -NotePropertyValue $Fence
+    }
     $value
 }
 function Assert-HarnessCodeBlock {
@@ -543,7 +548,8 @@ function New-HarnessExtensionManifest {
         [string]$HarnessApiVersion = '1.0',
         [string]$EntryPoint = '',
         [string[]]$Requires = @(),
-        [string]$Description = ''
+        [string]$Description = '',
+        [string[]]$Capabilities = @()
     )
     $value = [pscustomobject]@{
         PSTypeName        = 'Harness.ExtensionManifest'
@@ -553,6 +559,7 @@ function New-HarnessExtensionManifest {
         EntryPoint        = $EntryPoint
         Requires          = $Requires
         Description       = $Description
+        Capabilities      = $Capabilities
     }
     Assert-HarnessExtensionManifest $value
     $value
@@ -571,6 +578,7 @@ function Assert-HarnessExtensionManifest {
         EntryPoint        = [string]
         Requires          = [string[]]
         Description       = [string]
+        Capabilities      = [string[]]
     }
 }
 
@@ -686,6 +694,7 @@ function Assert-HarnessChunk {
     }
 }
 Export-ModuleMember -Function @(
+    'Get-HarnessFencedBlock',
     'New-HarnessChunk', 'Assert-HarnessChunk',
     'New-HarnessFixResult',
     'Assert-HarnessFixResult',

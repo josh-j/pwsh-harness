@@ -6,6 +6,7 @@ $script:ContractsModule = Import-Module $script:ContractsManifest -PassThru
 . (Join-Path $PSScriptRoot 'Profiles.ps1')
 . (Join-Path $PSScriptRoot 'Budget.ps1')
 . (Join-Path $PSScriptRoot 'Usage.ps1')
+. (Join-Path $PSScriptRoot 'Lifecycle.ps1')
 
 function Copy-EngineSnapshot {
     param([object]$Value)
@@ -49,8 +50,15 @@ function Copy-EngineSnapshot {
 function Publish-EngineEvent {
     param($Store, [string]$EventName, [object]$Payload)
     foreach ($entry in @($Store.Points.Events.Values | Where-Object Event -EQ $EventName | Sort-Object Order, Name)) {
+        if ($Store.Config.ContainsKey('Extensions') -and $Store.Config.Extensions.Disabled -contains $entry.Extension) {
+            continue
+        }
         try {
+            $serial = $Store.FaultSerials[$entry.Extension]
             $null = & $entry.Handler (Copy-EngineSnapshot $Payload)
+            if ($EventName -notin @('ExtensionFaulted', 'ExtensionStatusChanged') -and $Store.FaultSerials[$entry.Extension] -eq $serial) {
+                $Store.FaultCounts[$entry.Extension] = 0
+            }
         }
         catch {
             Write-EngineFault $Store $entry.Extension "event/$($entry.Name)" $_
@@ -67,7 +75,16 @@ function Write-EngineFault {
         Message   = [string]$Failure
         Time      = [datetime]::UtcNow
     }
+    $Store.FaultSerials[$Extension] = 1 + $Store.FaultSerials[$Extension]
     $Store.Errors.Add($fault)
+    if ($Store.Loaded.ContainsKey($Extension) -and $Store.Loaded[$Extension].Source -eq 'generated') {
+        $Store.FaultCounts[$Extension] = 1 + $Store.FaultCounts[$Extension]
+        if ($Store.FaultCounts[$Extension] -ge 3) {
+            Set-EngineExtensionDisabled $Store $Extension $true
+            $fault.Message += ' Auto-disabled after 3 consecutive faults.'
+            Publish-EngineEvent $Store ExtensionStatusChanged $fault
+        }
+    }
     Write-Warning "Extension '$Extension' ($Point): $($fault.Message)"
     if (-not $Store.ReportingFault) {
         $Store.ReportingFault = $true
@@ -80,11 +97,27 @@ function Write-EngineFault {
     }
 }
 function Invoke-EnginePoint {
-    param($Store, $Entry, [object[]]$Arguments, [switch]$Rethrow)
+    param($Store, $Entry, [object[]]$Arguments, [switch]$Rethrow, [switch]$DeferSuccess)
+    if ($Store.Config.Extensions.Disabled -contains $Entry.Extension) {
+        return
+    }
     try {
+        $serial = $Store.FaultSerials[$Entry.Extension]
         & $Entry.Handler @Arguments
+        if (-not $DeferSuccess -and $Store.FaultSerials[$Entry.Extension] -eq $serial) {
+            $Store.FaultCounts[$Entry.Extension] = 0
+        }
     }
     catch {
+        $exception = $_.Exception
+        while ($exception) {
+            if ($exception -is [OperationCanceledException] -and $Arguments.Count -and
+                $Arguments[0].CancellationToken -is [Threading.CancellationToken] -and
+                $Arguments[0].CancellationToken.IsCancellationRequested) {
+                throw
+            }
+            $exception = $exception.InnerException
+        }
         Write-EngineFault $Store $Entry.Extension $Entry.Name $_
         if ($Rethrow) {
             throw
@@ -209,7 +242,7 @@ function Resolve-EngineSettings {
     }
     foreach ($layer in @($file, $Store.Parameters, $Parameters)) {
         foreach ($name in $layer.Keys) {
-            if ($name -match '^(ApiKey|Key|Token|Authorization)$') {
+            if ($name -match '(ApiKey|AccessToken|RefreshToken|Authorization|Password|ClientSecret|Credential|Credentials|Secret|Token|Key)$') {
                 if ($layer -eq $Parameters -and $Parameters.ContainsKey($name)) {
                     throw 'API secrets must not be passed in config.'
                 }
@@ -245,7 +278,8 @@ function Resolve-EngineSettings {
     $values
 }
 function New-EngineFacade {
-    param($Store, $Target, [string]$Extension = '<host>')
+    param($Store, $Target, [string]$Extension = '<host>', [switch]$ReadCredentials)
+    $isHost = [object]::ReferenceEquals($Store, $Target)
     $publish = ${function:Publish-EngineEvent}
     $resolve = ${function:Resolve-EngineSettings}
     $invokePoint = ${function:Invoke-EnginePoint}
@@ -253,12 +287,15 @@ function New-EngineFacade {
     $facade = [pscustomobject]@{
     }
     foreach ($category in @('Providers', 'RequestMiddleware', 'ResponseProcessors', 'Critics', 'Fixers', 'TokenEstimators', 'RepairPolicies', 'Commands', 'Actions',
-            'SamplingPolicies', 'QueryExpanders', 'Chunkers', 'Retrievers', 'Embedders', 'HistoryCompactors', 'ContextSources', 'Renderers', 'TargetProfiles')) {
+            'Examples', 'SamplingPolicies', 'QueryExpanders', 'Chunkers', 'Retrievers', 'Embedders', 'HistoryCompactors', 'ContextSources', 'Renderers', 'TargetProfiles')) {
         $endpoint = [pscustomobject]@{
         }
         $point = $category
         $endpoint | Add-Member ScriptMethod Add {
             param([string]$Name, [object]$Handler, [object]$Option = 100, [string]$Description = '', [string]$Setting = '')
+            if ($Store.Disposed) {
+                throw [ObjectDisposedException]::new('HarnessHost')
+            }
             if (-not $Name) {
                 throw 'Registration name is required.'
             }
@@ -304,6 +341,9 @@ function New-EngineFacade {
             else {
                 $entry.Order = [int]$Option
             }
+            if ($Target -ne $Store -and $Target.Points[$point].ContainsKey($Name)) {
+                throw "Duplicate $point registration '$Name'."
+            }
             $Target.Points[$point][$Name] = $entry
         }.GetNewClosure()
         $endpoint | Add-Member ScriptMethod Contains { param($Name) $Store.Points[$point].ContainsKey($Name) }.GetNewClosure()
@@ -325,8 +365,9 @@ function New-EngineFacade {
                     return
                 }
                 $entry = $Store.Points[$point][$Name]
+                $serial = $Store.FaultSerials[$entry.Extension]
                 $values = [Collections.Generic.List[object]]::new()
-                foreach ($value in @(& $invokePoint $Store $entry $Arguments)) {
+                foreach ($value in @(& $invokePoint $Store $entry $Arguments -DeferSuccess)) {
                     try {
                         if ($point -eq 'Chunkers') {
                             Assert-HarnessChunk $value
@@ -344,8 +385,28 @@ function New-EngineFacade {
                         $null = & $fault $Store $entry.Extension $entry.Name $_
                     }
                 }
+                if ($Store.FaultSerials[$entry.Extension] -eq $serial) {
+                    $Store.FaultCounts[$entry.Extension] = 0
+                }
                 return , $values.ToArray()
             }.GetNewClosure()
+        }
+        if ($category -eq 'Examples') {
+            $endpoint | Add-Member ScriptMethod Add {
+                param([string]$Name, [string]$Text, [hashtable]$Metadata = @{})
+                if (-not $Name -or (-not $Text -and -not $Metadata.Path) -or $Text.Length -gt 262144) {
+                    throw 'An example requires a name and text (at most 256 KiB) or a metadata Path to a library directory.'
+                }
+                if ($Target.Points.Examples.ContainsKey($Name)) {
+                    throw "Duplicate Examples registration '$Name'."
+                }
+                $value = New-HarnessFrozen @{ Name = $Name; Text = $Text; Metadata = $Metadata; Extension = $Extension; Revision = [guid]::NewGuid().ToString('N') }
+                $Target.Points.Examples[$Name] = @{ Name = $Name; Value = $value; Extension = $Extension; Handler = $null; Order = 100 }
+            }.GetNewClosure() -Force
+            $endpoint | Add-Member ScriptMethod List {
+                # Immutable records are shared by reference, never copied into request/event snapshots.
+                @($Store.Points.Examples.Values | Sort-Object Name | ForEach-Object { $_.Value })
+            }.GetNewClosure() -Force
         }
         if ($category -eq 'TargetProfiles') {
             $endpoint | Add-Member ScriptMethod Select {
@@ -371,10 +432,16 @@ function New-EngineFacade {
     }
     $events | Add-Member ScriptMethod Subscribe {
         param([string]$EventName, [string]$Name, [scriptblock]$Handler, [int]$Order = 100)
-        $valid = @('HistoryCompacted', 'HistoryTrimmed', 'SessionStarted', 'TurnStarted', 'RequestPrepared', 'ChunkReceived', 'ResponseReceived', 'DiagnosticsProduced',
+        if ($Store.Disposed) {
+            throw [ObjectDisposedException]::new('HarnessHost')
+        }
+        $valid = @('ExtensionStatusChanged', 'HistoryCompacted', 'HistoryTrimmed', 'SessionStarted', 'TurnStarted', 'RequestPrepared', 'ChunkReceived', 'ResponseReceived', 'DiagnosticsProduced',
             'RepairRequested', 'TurnCompleted', 'ActionRequested', 'ActionCompleted', 'SessionEnded', 'ExtensionFaulted')
         if ($EventName -notin $valid -and -not $EventName.StartsWith('ext.')) {
             throw "Unknown event '$EventName'."
+        }
+        if ($Target -ne $Store -and $Target.Points.Events.ContainsKey("$EventName/$Name")) {
+            throw 'Duplicate event registration.'
         }
         $Target.Points.Events["$EventName/$Name"] = @{
 
@@ -394,7 +461,7 @@ function New-EngineFacade {
         }
     }.GetNewClosure()
     $events | Add-Member ScriptMethod Publish { param($EventName, $Payload)
-        if ($Extension -ne '<host>' -and -not $EventName.StartsWith("ext.$Extension.", [StringComparison]::Ordinal)) {
+        if (-not $isHost -and -not $EventName.StartsWith("ext.$Extension.", [StringComparison]::Ordinal)) {
             throw 'Extensions may publish only their own ext events.'
         }
         $null = & $publish $Store $EventName $Payload }.GetNewClosure()
@@ -403,8 +470,14 @@ function New-EngineFacade {
     }
     $settings | Add-Member ScriptMethod Declare {
         param([string]$Name, [type]$Type, [object]$Default, [scriptblock]$Validator = $null, [string]$Env = '')
-        if ($Name -match '^(ApiKey|Key|Token|Authorization)$') {
+        if ($Store.Disposed) {
+            throw [ObjectDisposedException]::new('HarnessHost')
+        }
+        if ($Name -match '(ApiKey|AccessToken|RefreshToken|Authorization|Password|ClientSecret|Credential|Credentials|Secret|Token|Key)$') {
             throw 'Secret settings are prohibited.'
+        }
+        if ($Target -ne $Store -and $Target.Points.Settings.ContainsKey($Name)) {
+            throw 'Duplicate setting declaration.'
         }
         $Target.Points.Settings[$Name] = @{
 
@@ -429,7 +502,130 @@ function New-EngineFacade {
         }
         & $resolve $Store $Parameters $Path $declarations
     }.GetNewClosure()
+    $service | Add-Member ScriptMethod GetPath {
+        param([string]$Path)
+        if ($Path) {
+            return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+        }
+        $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Store.ConfigPath)
+    }.GetNewClosure()
+    if ($isHost) {
+        $service | Add-Member ScriptMethod Save {
+            param([hashtable]$Values, [string]$Path)
+            foreach ($name in $Values.Keys) {
+                if ($name -match '(ApiKey|AccessToken|RefreshToken|Authorization|Password|ClientSecret|Credential|Credentials|Secret|Token|Key)$' -or $Values[$name] -is [Security.SecureString]) {
+                    throw 'API secrets must not be passed in config.'
+                }
+            }
+            $destination = $this.GetPath($Path)
+            $file = if (Test-Path -LiteralPath $destination) {
+                Get-Content -LiteralPath $destination -Raw | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            }
+            else {
+                @{}
+            }
+            foreach ($name in @($file.Keys)) {
+                if ($name -match '(ApiKey|AccessToken|RefreshToken|Authorization|Password|ClientSecret|Credential|Credentials|Secret|Token|Key)$') {
+                    $file.Remove($name)
+                }
+            }
+            foreach ($name in $Values.Keys) {
+                $file[$name] = $Values[$name]
+            }
+            foreach ($name in $file.Keys) {
+                if ($Store.Points.Settings.ContainsKey($name) -and $Store.Points.Settings[$name].Validator) {
+                    $validation = & $Store.Points.Settings[$name].Validator $file[$name]
+                    if ($validation -is [string]) {
+                        throw $validation
+                    }
+                    if ($validation -ne $true) {
+                        throw "Setting '$name' failed validation."
+                    }
+                }
+            }
+            $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))
+            $temporary = $destination + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+            try {
+                [IO.File]::WriteAllText($temporary, ($file | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
+                [IO.File]::Move($temporary, $destination, $true)
+            }
+            finally {
+                if (Test-Path -LiteralPath $temporary) {
+                    Remove-Item -LiteralPath $temporary -Force
+                }
+            }
+        }.GetNewClosure()
+    }
     $facade | Add-Member NoteProperty ConfigService $service
+    # Credentials never enter settings, requests, events or persisted session records.
+    $credentials = [pscustomobject]@{}
+    $credentials | Add-Member ScriptMethod Get {
+        param($Session)
+        if ($null -eq $Session -or $Store.Disposed) {
+            return $null
+        }
+        $key = $null
+        if ($Store.Credentials.TryGetValue($Session, [ref]$key)) {
+            $key
+        }
+    }.GetNewClosure()
+    $credentials | Add-Member ScriptMethod GetSaved {
+        param($Session, $Config)
+        if ($Store.Disposed -or -not $Store.SavedCredentials) {
+            return $null
+        }
+        $path = ''
+        if ($Session) {
+            $null = $Store.CredentialPaths.TryGetValue($Session, [ref]$path)
+        }
+        $Store.SavedCredentials.Get($Config, $path)
+    }.GetNewClosure()
+    if ($isHost) {
+        $credentials | Add-Member ScriptMethod SetConfigPath {
+            param($Session, [string]$Path)
+            if ($Store.Disposed -or $Session.HostId -ne $Store.HostId) {
+                throw 'The credential session is unavailable or belongs to another host.'
+            }
+            $null = $Store.CredentialPaths.Remove($Session)
+            $Store.CredentialPaths.Add($Session, $Path)
+        }.GetNewClosure()
+        $credentials | Add-Member ScriptMethod Save {
+            param($Config, [Security.SecureString]$Key, [string]$Path)
+            if ($Store.Disposed) {
+                throw [ObjectDisposedException]::new('HarnessHost')
+            }
+            if (-not $Store.SavedCredentials) {
+                throw 'Credential storage is not configured by this host.'
+            }
+            $Store.SavedCredentials.Save($Config, $Key, $Path)
+        }.GetNewClosure()
+        $credentials | Add-Member ScriptMethod Remove {
+            param($Config, [string]$Path, [bool]$All)
+            if ($Store.Disposed) {
+                throw [ObjectDisposedException]::new('HarnessHost')
+            }
+            if (-not $Store.SavedCredentials) {
+                throw 'Credential storage is not configured by this host.'
+            }
+            $Store.SavedCredentials.Remove($Config, $Path, $All)
+        }.GetNewClosure()
+        $credentials | Add-Member ScriptMethod Set {
+            param($Session, [Security.SecureString]$Key)
+            if ($Store.Disposed) {
+                throw [ObjectDisposedException]::new('HarnessHost')
+            }
+            if ($Session.HostId -ne $Store.HostId) {
+                throw 'The credential session belongs to another host.'
+            }
+            $null = $Store.Credentials.Remove($Session)
+            if ($Key) {
+                $Store.Credentials.Add($Session, $Key)
+            }
+        }.GetNewClosure()
+    }
+    if ($isHost -or $ReadCredentials) {
+        $facade | Add-Member NoteProperty Credentials $credentials
+    }
     $facade | Add-Member ScriptMethod GetRegistry {
         $names = @{
         }
@@ -440,12 +636,21 @@ function New-EngineFacade {
         $names.Errors = @($Store.Errors.ToArray())
         [pscustomobject]$names
     }.GetNewClosure()
+    $facade | Add-Member ScriptMethod GetRegistrationInfo {
+        foreach ($category in $Store.Points.Keys) {
+            foreach ($entry in $Store.Points[$category].GetEnumerator()) {
+                [pscustomobject]@{ Category = $category; Name = $entry.Key; Extension = $entry.Value.Extension }
+            }
+        }
+    }.GetNewClosure()
+    $inventory = ${function:Get-EngineExtensionInfo}
+    $facade | Add-Member ScriptMethod GetExtensionInfo { & $inventory $Store }.GetNewClosure()
     $facade | Add-Member ScriptMethod ReportFault { param($Point, $Failure) $null = & $fault $Store $Extension $Point $Failure }.GetNewClosure()
     $facade | Add-Member NoteProperty ApiVersion '1.0'
     $facade
 }
 function Import-EngineExtensions {
-    param($Store, [string[]]$Paths)
+    param($Store, [string[]]$Paths, [string]$Replacing = '')
     $manifests = @{
     }
     foreach ($path in $Paths) {
@@ -468,10 +673,29 @@ function Import-EngineExtensions {
                 if (([version]$manifest.HarnessApiVersion).Major -ne 1) {
                     throw 'Incompatible HarnessApiVersion major.'
                 }
+                $builtin = Test-EngineBuiltinPath $Store $file.DirectoryName
+                if (@($manifest.Capabilities | Where-Object { $_ -ne 'ExtensionAuthoring' }).Count -or
+                    ($manifest.Capabilities -contains 'ExtensionAuthoring' -and -not $builtin)) {
+                    throw 'ExtensionAuthoring capability is restricted to the builtin directory; unknown capabilities are rejected.'
+                }
+                if ($Store.Known.ContainsKey($manifest.Name) -and
+                    -not [string]::Equals([IO.Path]::GetFullPath($Store.Known[$manifest.Name].Directory), $file.DirectoryName, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Duplicate extension name '$($manifest.Name)'."
+                }
+                $Store.Known[$manifest.Name] = @{ Directory = $file.DirectoryName; Manifest = $manifest; Source = $(if ($builtin) {
+                            'builtin'
+                        }
+                        elseif (Test-Path -LiteralPath (Join-Path $file.DirectoryName 'authoring-record.json')) {
+                            'generated'
+                        }
+                        else {
+                            'user'
+                        })
+                }
                 if ($Store.Config.Extensions.Disabled -contains $manifest.Name) {
                     continue
                 }
-                if (-not $Store.Loaded.ContainsKey($manifest.Name)) {
+                if (-not $Store.Loaded.ContainsKey($manifest.Name) -or $manifest.Name -eq $Replacing) {
                     $manifests[$manifest.Name] = @{
 
 
@@ -513,9 +737,15 @@ function Import-EngineExtensions {
                 $stage.Points[$category] = @{
                 }
             }
-            $api = New-EngineFacade $Store $stage $name
+            $api = New-EngineFacade $Store $stage $name -ReadCredentials:(Test-EngineCredentialReader $Store $record.Directory $manifest.EntryPoint)
             foreach ($method in @('CollectContext', 'TestCode', 'AddTranscript', 'GetSession', 'NewSession', 'RestoreResult')) {
                 $api | Add-Member ScriptMethod $method $Store.Host.PSObject.Methods[$method].Script
+            }
+            if ($manifest.Capabilities -contains 'ExtensionAuthoring') {
+                if (-not $Store.Authoring) {
+                    throw 'ExtensionAuthoring service is unavailable.'
+                }
+                $api | Add-Member NoteProperty ExtensionAuthoring $Store.Authoring
             }
             $api.Commands | Add-Member ScriptMethod Invoke $Store.Host.Commands.PSObject.Methods['Invoke'].Script
             $api.Actions | Add-Member ScriptMethod Invoke $Store.Host.Actions.PSObject.Methods['Invoke'].Script
@@ -529,6 +759,10 @@ function Import-EngineExtensions {
                     $relative.StartsWith('../', [StringComparison]::OrdinalIgnoreCase) -or
                     $relative.StartsWith('..\', [StringComparison]::OrdinalIgnoreCase)) {
                     throw 'Entry point leaves extension directory.'
+                }
+                if ($manifest.Capabilities -contains 'ExtensionAuthoring' -and
+                    -not (Test-EngineBuiltinPath $Store $entryPath)) {
+                    throw 'Privileged entry point must be physically inside the builtin directory.'
                 }
                 if ([IO.Path]::GetExtension($entryPath) -notin @('.ps1', '.psm1')) {
                     throw 'EntryPoint must be .ps1 or .psm1.'
@@ -555,32 +789,59 @@ function Import-EngineExtensions {
                 foreach ($category in $stage.Points.Keys) {
                     foreach ($key in $stage.Points[$category].Keys) {
                         if ($Store.Points[$category].ContainsKey($key) -and
+                            $Store.Points[$category][$key].Extension -ne $Replacing -and
                             -not ($category -eq 'Settings' -and $Store.Points.Settings[$key].Extension -eq '<engine>')) {
                             throw "Duplicate $category registration '$key'."
                         }
                     }
                 }
                 $declarations = $Store.Points.Settings.Clone()
+                if ($Replacing) {
+                    foreach ($key in @($declarations.Keys)) {
+                        if ($declarations[$key].Extension -eq $Replacing) {
+                            $declarations.Remove($key)
+                            if ($Store.BaseSettings.ContainsKey($key)) {
+                                $declarations[$key] = $Store.BaseSettings[$key]
+                            }
+                        }
+                    }
+                }
                 foreach ($key in $stage.Points.Settings.Keys) {
                     $declarations[$key] = $stage.Points.Settings[$key]
                 }
                 $config = Resolve-EngineSettings $Store @{
                 } $Store.ConfigPath $declarations
                 # Every validation happens before these assignments: no partial registry state is exposed.
+                $oldModule = $null
+                if ($Replacing -and $Store.Loaded.ContainsKey($Replacing)) {
+                    $oldModule = $Store.Loaded[$Replacing].Module
+                    Remove-EngineRegistrations $Store $Replacing
+                }
                 foreach ($category in $stage.Points.Keys) {
                     foreach ($key in $stage.Points[$category].Keys) {
                         $Store.Points[$category][$key] = $stage.Points[$category][$key]
                     }
                 }
                 $Store.Config = $config
-                $Store.SelectedTarget = $stage.SelectedTarget
+                $Store.SelectedTarget = if ($stage.SelectedTarget -and $Store.Points.TargetProfiles.ContainsKey($stage.SelectedTarget)) {
+                    $stage.SelectedTarget
+                }
+                else {
+                    ''
+                }
                 $stage.Points = $Store.Points
                 $stage.LiveStore = $Store
                 $Store.Loaded[$name] = @{
 
 
-                    Manifest = $manifest
-                    Module   = $module
+                    Manifest  = $manifest
+                    Module    = $module
+                    Directory = $record.Directory
+                    Source    = $Store.Known[$name].Source
+                }
+                $Store.FaultCounts[$name] = 0
+                if ($oldModule) {
+                    Remove-EngineModule $oldModule
                 }
             }
             catch {
@@ -652,8 +913,9 @@ function Get-EngineValidation {
     param($Store, [object]$Block, [hashtable]$Config)
     $diagnostics = [Collections.Generic.List[object]]::new()
     foreach ($critic in @($Store.Points.Critics.Values | Sort-Object Order, Name)) {
+        $serial = $Store.FaultSerials[$critic.Extension]
         $copy = New-HarnessCodeBlock -Code $Block.Code -Language $Block.Language -Index $Block.Index -StartLine $Block.StartLine
-        foreach ($diagnostic in @(Invoke-EnginePoint $Store $critic @($copy, (Copy-EngineConfigValue $Config)))) {
+        foreach ($diagnostic in @(Invoke-EnginePoint $Store $critic @($copy, (Copy-EngineConfigValue $Config)) -DeferSuccess)) {
             try {
                 Assert-HarnessDiagnostic $diagnostic
                 $diagnostics.Add($diagnostic)
@@ -661,6 +923,9 @@ function Get-EngineValidation {
             catch {
                 Write-EngineFault $Store $critic.Extension $critic.Name $_
             }
+        }
+        if ($Store.FaultSerials[$critic.Extension] -eq $serial) {
+            $Store.FaultCounts[$critic.Extension] = 0
         }
     }
     $errors = @($diagnostics | Where-Object { $_.Severity -eq 'Error' })
@@ -721,12 +986,14 @@ function Get-EngineContext {
     }
     $items = [Collections.Generic.List[object]]::new()
     foreach ($source in @($Store.Points.ContextSources.Values | Sort-Object Order, Name)) {
+        $CancellationToken.ThrowIfCancellationRequested()
         $reserved = 0
         foreach ($existing in $items) {
             $reserved += ("`n--- $($existing.Kind): $($existing.Title) ---`n$($existing.Text)`n").Length
         }
         $request.RemainingTokenBudget = [Math]::Max(0, $request.TokenBudget - [int][Math]::Ceiling($reserved / 4.0))
-        foreach ($item in @(Invoke-EnginePoint $Store $source @($request))) {
+        $serial = $Store.FaultSerials[$source.Extension]
+        foreach ($item in @(Invoke-EnginePoint $Store $source @($request) -DeferSuccess)) {
             try {
                 Assert-HarnessContextItem $item
                 $items.Add($item)
@@ -735,13 +1002,17 @@ function Get-EngineContext {
                 Write-EngineFault $Store $source.Extension $source.Name $_
             }
         }
+        if ($Store.FaultSerials[$source.Extension] -eq $serial) {
+            $Store.FaultCounts[$source.Extension] = 0
+        }
     }
+    $CancellationToken.ThrowIfCancellationRequested()
     $builder = [Text.StringBuilder]::new()
     $stable = [Text.StringBuilder]::new()
     $volatile = [Text.StringBuilder]::new()
     $sections = [Collections.Generic.List[string]]::new()
     $files = [Collections.Generic.List[string]]::new()
-    $truncated = $false
+    $truncated = [bool]$State.Context.Project.DiscoveryTruncated
     $budget = $State.Config.ContextTokenBudget * 4
     foreach ($item in @($items | Sort-Object @{ Expression = { if ($_.Stability -eq 'Stable') {
                         0
@@ -813,7 +1084,8 @@ function New-HarnessHost {
     [CmdletBinding()]
     param([string]$ConfigDirectory, [string]$DataDirectory, [string]$ConfigPath, [hashtable]$Options = @{
         },
-        [string[]]$ExtensionPaths = @(), [Parameter(Mandatory)][scriptblock]$ManifestReader, [string]$EnvironmentPrefix = 'HARNESS_', [string]$ProfileDirectory)
+        [string[]]$ExtensionPaths = @(), [Parameter(Mandatory)][scriptblock]$ManifestReader, [string]$EnvironmentPrefix = 'HARNESS_', [string]$ProfileDirectory, [string]$BuiltinDirectory,
+        [string]$TrustedReaderDirectory, [scriptblock]$AuthoringFactory, [scriptblock]$SavedCredentialFactory)
     if (-not $ConfigDirectory) {
         $ConfigDirectory = Join-Path $HOME '.config/harness'
     }
@@ -826,6 +1098,17 @@ function New-HarnessHost {
     $store = @{
 
 
+        Credentials       = [Runtime.CompilerServices.ConditionalWeakTable[object, Security.SecureString]]::new()
+        CredentialPaths   = [Runtime.CompilerServices.ConditionalWeakTable[object, string]]::new()
+        SavedCredentials  = $null
+        Disposed          = $false
+        Known             = @{}
+        FaultCounts       = @{}
+        FaultSerials      = @{}
+        Authoring         = $null
+        BuiltinDirectory  = $BuiltinDirectory
+        TrustedReader     = $TrustedReaderDirectory
+        ConfigDirectory   = $ConfigDirectory
         Calibrations      =@{}
         Profiles          =@{
         }
@@ -846,7 +1129,7 @@ function New-HarnessHost {
         HostId            =[guid]::NewGuid().ToString('N')
     }
     foreach ($category in @('Providers', 'RequestMiddleware', 'ResponseProcessors', 'Critics', 'Fixers', 'TokenEstimators', 'RepairPolicies', 'Commands', 'Actions',
-            'SamplingPolicies', 'QueryExpanders', 'Chunkers', 'Retrievers', 'Embedders', 'HistoryCompactors', 'ContextSources', 'Renderers', 'Events', 'Settings', 'TargetProfiles')) {
+            'Examples', 'SamplingPolicies', 'QueryExpanders', 'Chunkers', 'Retrievers', 'Embedders', 'HistoryCompactors', 'ContextSources', 'Renderers', 'Events', 'Settings', 'TargetProfiles')) {
         $store.Points[$category] = @{
         }
     }
@@ -912,10 +1195,41 @@ function New-HarnessHost {
     $store.Points.Settings.ContextTokenBudget.Validator = { param($v) $v -ge 0 }
     $store.Points.Settings.ContinuationAttempts.Validator = { param($v) $v -ge 0 }
     $store.Points.Settings.MaxTokens.Validator = { param($v) $v -gt 0 }
+    $store.BaseSettings = $store.Points.Settings.Clone()
     $store.Config = Resolve-EngineSettings $store
     $hostApi = New-EngineFacade $store $store
     $store.Host = $hostApi
+    if ($SavedCredentialFactory) {
+        $store.SavedCredentials = & $SavedCredentialFactory $hostApi.ConfigService
+    }
     $hostApi | Add-Member NoteProperty Id $store.HostId
+    $hostApi | Add-Member NoteProperty IsDisposed $false
+    $removeModule = ${function:Remove-EngineModule}
+    $hostApi | Add-Member ScriptMethod Dispose {
+        if ($store.Disposed) {
+            return
+        }
+        $store.Disposed = $true
+        $this.IsDisposed = $true
+        foreach ($entry in @($store.Loaded.Values)) {
+            & $removeModule $entry.Module
+        }
+        $store.Loaded.Clear()
+        foreach ($point in $store.Points.Values) {
+            $point.Clear()
+        }
+        foreach ($name in @('Known', 'FaultCounts', 'FaultSerials', 'Profiles', 'Calibrations', 'Parameters', 'Config', 'BaseSettings')) {
+            $store[$name].Clear()
+        }
+        $store.Credentials.Clear()
+        $store.CredentialPaths.Clear()
+        $store.SavedCredentials = $null
+        $store.Errors.Clear()
+        $store.Authoring = $null
+        $store.SelectedTarget = ''
+        $store.Host = $null
+        $this.PSObject.Properties.Remove('ExtensionAuthoring')
+    }.GetNewClosure()
     $load = ${function:Import-EngineExtensions}
     $run = ${function:Invoke-EngineTurnRunner}
     $collect = ${function:Get-EngineContext}
@@ -928,10 +1242,26 @@ function New-HarnessHost {
     $publish = ${function:Publish-EngineEvent}
     $loader = [pscustomobject]@{
     }
-    $loader | Add-Member ScriptMethod Load { param([string[]]$Paths) $null = & $load $store $Paths }.GetNewClosure()
+    $loader | Add-Member ScriptMethod Load { param([string[]]$Paths)
+        if ($store.Disposed) {
+            throw [ObjectDisposedException]::new('HarnessHost')
+        }
+        $null = & $load $store $Paths }.GetNewClosure()
+    $unload = ${function:Remove-EngineExtension}
+    $reload = ${function:Update-EngineExtension}
+    $disabled = ${function:Set-EngineExtensionDisabled}
+    $forget = ${function:Clear-EngineExtensionRecord}
+    $loader | Add-Member ScriptMethod Unload { param([string]$Name) & $unload $store $Name }.GetNewClosure()
+    $loader | Add-Member ScriptMethod Reload { param([string]$Name) & $reload $store $Name }.GetNewClosure()
+    $loader | Add-Member ScriptMethod Disable { param([string]$Name) & $disabled $store $Name $true }.GetNewClosure()
+    $loader | Add-Member ScriptMethod Enable { param([string]$Name) & $disabled $store $Name $false }.GetNewClosure()
+    $loader | Add-Member ScriptMethod Forget { param([string]$Name) & $forget $store $Name }.GetNewClosure()
     $hostApi | Add-Member NoteProperty ExtensionLoader $loader
     $hostApi | Add-Member ScriptMethod NewSession {
         param([hashtable]$Config, [string]$Id = ([guid]::NewGuid().ToString('N')))
+        if ($store.Disposed) {
+            throw [ObjectDisposedException]::new('HarnessHost')
+        }
         if (-not $Config) {
             $Config = $this.ConfigService.Resolve()
         }
@@ -1028,9 +1358,21 @@ function New-HarnessHost {
     }.GetNewClosure()
     $hostApi | Add-Member ScriptMethod Send {
         param($Prompt, $State, $OnToken, $Token = [Threading.CancellationToken]::None, $OnIdle = $null)
+        if ($store.Disposed) {
+            throw [ObjectDisposedException]::new('HarnessHost')
+        }
         & $run $store $Prompt $State $OnToken $Token $OnIdle
     }.GetNewClosure()
-    $hostApi | Add-Member ScriptMethod CollectContext { param($State) & $collect $store $State $State.LastPrompt }.GetNewClosure()
+    $hostApi | Add-Member ScriptMethod CollectContext {
+        param($State, [scriptblock]$Pump = $null, [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
+        if (-not $Pump) {
+            $Pump = $store.ContextPump
+        }
+        if ($CancellationToken -eq [Threading.CancellationToken]::None -and $store.ContextCancellation) {
+            $CancellationToken = $store.ContextCancellation
+        }
+        & $collect $store $State $State.LastPrompt $Pump $CancellationToken
+    }.GetNewClosure()
     $hostApi | Add-Member ScriptMethod TestCode { param($Block, $Config) & $validate $store $Block $Config }.GetNewClosure()
     $hostApi | Add-Member ScriptMethod AddTranscript {
         param($State, $Role, $Text, $Metadata = $null)
@@ -1038,7 +1380,7 @@ function New-HarnessHost {
     }.GetNewClosure()
     $hostApi | Add-Member ScriptMethod GetSession { param($Config, $Id) & $read $Config $Id }.GetNewClosure()
     $hostApi.Commands | Add-Member ScriptMethod Invoke {
-        param([string]$Line, $State, [scriptblock]$Confirm)
+        param([string]$Line, $State, [scriptblock]$Confirm, [scriptblock]$Pump = $null, [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
         if ($Line -notmatch '^/(?<name>\S+)(?:\s+(?<arguments>[\s\S]*))?$') {
             throw 'Expected a slash command.'
         }
@@ -1052,13 +1394,17 @@ function New-HarnessHost {
         if (-not $store.Points.Commands.ContainsKey($name)) {
             throw "Unknown command /$name. Use /help."
         }
-        & $invoke $store $store.Points.Commands[$name] @([pscustomobject]@{
-
-
-                State     = $State
-                Arguments = $arguments
-                Confirm   = $Confirm
-            }) -Rethrow
+        $oldPump = $store.ContextPump; $oldCancellation = $store.ContextCancellation
+        $store.ContextPump = $Pump; $store.ContextCancellation = $CancellationToken
+        try {
+            & $invoke $store $store.Points.Commands[$name] @([pscustomobject]@{
+                    State = $State; Arguments = $arguments; Confirm = $Confirm
+                    Pump = $Pump; CancellationToken = $CancellationToken
+                }) -Rethrow
+        }
+        finally {
+            $store.ContextPump = $oldPump; $store.ContextCancellation = $oldCancellation
+        }
     }.GetNewClosure()
     $hostApi.Actions | Add-Member ScriptMethod Invoke {
         param([string]$Name, $State, $Block, [string]$Arguments, [scriptblock]$Confirm)
@@ -1127,6 +1473,10 @@ function New-HarnessHost {
         }
         & $invoke $store $store.Points.Renderers[$Name] @($State, $Width, $Height)
     }.GetNewClosure()
+    if ($AuthoringFactory) {
+        $store.Authoring = & $AuthoringFactory $hostApi $ConfigDirectory $DataDirectory $BuiltinDirectory $ProfileDirectory
+        $hostApi | Add-Member NoteProperty ExtensionAuthoring $store.Authoring
+    }
     $hostApi.ExtensionLoader.Load($ExtensionPaths)
     $hostApi
 }

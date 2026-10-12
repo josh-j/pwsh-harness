@@ -1,3 +1,5 @@
+# synopsis: Test whether an identity has a directory Modify access rule.
+# tags: Get-Acl FileSystemRights permissions
 #Requires -Version 7.6
 function Test-FolderModifyAccess {
     [CmdletBinding()]

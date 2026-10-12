@@ -24,17 +24,19 @@ function New-HarnessViewState {
         StatusBar    = [pscustomobject]@{
 
 
-            Text       ='Ready'
-            Profile    =''
-            Model      =''
-            Target     =''
-            Repo       ='context:none'
-            UsageText  =''
-            IndexText  =''
-            Tokens     =0
-            Budget     =0
-            Validation ='none'
-            Ascii      =$false
+            Text            ='Ready'
+            ExtensionNotice = ''
+            Profile         =''
+            Model           =''
+            Behavior        ='auto'
+            Target          =''
+            Repo            ='context:none'
+            UsageText       =''
+            IndexText       =''
+            Tokens          =0
+            Budget          =0
+            Validation      ='none'
+            Ascii           =$false
         }
         Spinner      = [pscustomobject]@{
 
@@ -87,6 +89,7 @@ function Update-HarnessSessionView {
                     Role ='user'
                     Text =$Payload.Prompt
                 })
+            $View.StatusBar.ExtensionNotice = ''
             $View.StatusBar.Text = 'Streaming'
         }
         ChunkReceived {
@@ -116,7 +119,12 @@ function Update-HarnessSessionView {
             else {
                 'valid'
             }
-            $View.StatusBar.Text = 'Ready'
+            $View.StatusBar.Text = if ($View.StatusBar.ExtensionNotice) {
+                $View.StatusBar.ExtensionNotice
+            }
+            else {
+                'Ready'
+            }
         }
         HistoryCompacted {
             $View.StatusBar.Text = 'History compacted'
@@ -256,16 +264,18 @@ function Get-HarnessRenderModel {
     }
     foreach ($record in $records) {
         $all.Add((New-HarnessFrameRow "[$($record.Role)]" -Color Cyan))
-        $inCode = $false
-        foreach ($line in (ConvertTo-HarnessSafeText $record.Text).Split("`n")) {
-            if ($line -match '^\s*```(?:powershell|pwsh|ps1)') {
-                $inCode = $true
+        $fences = @(Get-HarnessPowerShellFencedBlock $record.Text)
+        $fenceIndex = 0
+        $lineNumber = 0
+        foreach ($line in [regex]::Split($record.Text, '\r\n|\n|\r')) {
+            $lineNumber++
+            while ($fenceIndex -lt $fences.Count -and $lineNumber -gt $fences[$fenceIndex].EndLine) {
+                $fenceIndex++
             }
+            $inCode = $fenceIndex -lt $fences.Count -and $lineNumber -ge $fences[$fenceIndex].StartLine
+            $line = ConvertTo-HarnessSafeText $line
             foreach ($part in @(Split-HarnessDisplayLine $line $Width)) {
                 $all.Add((New-HarnessFrameRow $part $inCode))
-            }
-            if ($line -match '^\s*```\s*$') {
-                $inCode = $false
             }
         }
     }
@@ -358,7 +368,7 @@ function Get-HarnessRenderModel {
     else {
         ''
     }
-    $status = "$spin $($bar.Profile)/$($bar.Model) | $($bar.Target) | $($bar.Repo)$indexText$usage | est $($bar.Tokens)/$($bar.Budget) | $($bar.Validation) | $($bar.Text)"
+    $status = "$spin $($bar.Profile)/$($bar.Model) | behavior:$($bar.Behavior) | $($bar.Target) | $($bar.Repo)$indexText$usage | est $($bar.Tokens)/$($bar.Budget) | $($bar.Validation) | $($bar.Text)"
     $status = ConvertTo-HarnessSafeText $status
     $statusRows = @(Split-HarnessStatus $status $Width | Select-Object -First 3)
     $inputRows = @(Split-HarnessEditorLines $State.Editor.Text ($Width - 2))
@@ -395,7 +405,7 @@ function Get-HarnessRenderModel {
     while ($rows.Count -lt $Height - 1) {
         $rows.Add((New-HarnessFrameRow '> '))
     }
-    $help = 'Enter send | F2 paste | F6 edits | F8 next | F9 jump | Ctrl+C cancel/clear; twice exit'
+    $help = 'Enter send | Ctrl+J newline | F2 paste | F6 edits | Ctrl+C cancel/clear; twice exit'
     $rows.Add((New-HarnessFrameRow (@(Split-HarnessDisplayLine $help $Width)[0]) -Color BrightBlack))
     [pscustomobject]@{
 
@@ -452,6 +462,15 @@ function Update-HarnessEditor {
             Action ='Quit'
             Prompt =''
         }
+    }
+    # LF is portable even when a terminal cannot distinguish modified Enter.
+    if ([int]$Key.KeyChar -eq 10 -or ($control -and $Key.Key -eq 'J')) {
+        if (-not $View.SessionView.Busy) {
+            $editor.Text = $editor.Text.Insert($editor.Cursor, "`n")
+            $editor.Cursor++
+            $View.Dirty = $true
+        }
+        return
     }
     switch ($Key.Key) {
         F2 {

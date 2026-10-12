@@ -49,7 +49,8 @@ function Invoke-EngineMiddlewareStage {
     param($Turn)
     foreach ($middleware in @($Turn.Store.Points.RequestMiddleware.Values | Sort-Object Order, Name)) {
         $warned = $false
-        foreach ($candidate in @(Invoke-EnginePoint $Turn.Store $middleware @($Turn.Request))) {
+        $serial = $Turn.Store.FaultSerials[$middleware.Extension]
+        foreach ($candidate in @(Invoke-EnginePoint $Turn.Store $middleware @($Turn.Request) -DeferSuccess)) {
             if ($candidate.PSObject.TypeNames -contains 'Harness.ChatResponse') {
                 try {
                     Assert-HarnessChatResponse $candidate
@@ -68,6 +69,9 @@ function Invoke-EngineMiddlewareStage {
                 $warned = $true
             }
         }
+        if ($Turn.Store.FaultSerials[$middleware.Extension] -eq $serial) {
+            $Turn.Store.FaultCounts[$middleware.Extension] = 0
+        }
         if ($Turn.Response) {
             break
         }
@@ -78,15 +82,31 @@ function Invoke-EngineMiddlewareStage {
 function Send-EngineRequestStage {
     # Input/output: Turn record. Sets validated ChatResponse and publishes ResponseReceived.
     param($Turn)
+    $provider = ''; $serial = 0
     if (-not $Turn.Response) {
         $provider = $Turn.Config.Provider
         if (-not $Turn.Store.Points.Providers.ContainsKey($provider)) {
             throw "Unknown provider '$provider'."
         }
+        $serial = $Turn.Store.FaultSerials[$Turn.Store.Points.Providers[$provider].Extension]
         $Turn.Response = Invoke-EnginePoint $Turn.Store $Turn.Store.Points.Providers[$provider] `
-        @($Turn.Request, $Turn.Callback, $Turn.Token) -Rethrow
+        @($Turn.Request, $Turn.Callback, $Turn.Token) -Rethrow -DeferSuccess
     }
-    Assert-HarnessChatResponse $Turn.Response
+    try {
+        Assert-HarnessChatResponse $Turn.Response
+    }
+    catch {
+        if ($provider) {
+            Write-EngineFault $Turn.Store $Turn.Store.Points.Providers[$provider].Extension $provider $_
+        }
+        throw
+    }
+    if ($provider -and $Turn.Store.Points.Providers.ContainsKey($provider)) {
+        $owner = $Turn.Store.Points.Providers[$provider].Extension
+        if ($Turn.Store.FaultSerials[$owner] -eq $serial) {
+            $Turn.Store.FaultCounts[$owner] = 0
+        }
+    }
     $estimated = Get-EngineTokenEstimate $Turn.Store ($Turn.Request.Messages.Content -join "`n") $Turn.Config -Uncalibrated
     $usage = New-EngineUsage
     Add-EngineUsage $usage $Turn.Response.Usage
@@ -127,11 +147,23 @@ function Invoke-EngineProcessResponse {
     }
     Assert-HarnessTurnResult $result
     $result.OriginalCodeBlocks = @($result.CodeBlocks | ForEach-Object {
-            New-HarnessCodeBlock -Code $_.Code -Language $_.Language -Index $_.Index -StartLine $_.StartLine
+            $fence = if ($_.PSObject.Properties['Fence']) {
+                $_.Fence
+            }
+            else {
+                $null
+            }
+            New-HarnessCodeBlock -Code $_.Code -Language $_.Language -Index $_.Index -StartLine $_.StartLine -Fence $fence
         })
     if ($Metadata -and $Metadata.PSObject.Properties['CodeBlocks']) {
         $result.CodeBlocks = @($Metadata.CodeBlocks | ForEach-Object {
-                New-HarnessCodeBlock -Code $_.Code -Language $_.Language -Index $_.Index -StartLine $_.StartLine
+                $fence = if ($_.PSObject.Properties['Fence']) {
+                    $_.Fence
+                }
+                else {
+                    $null
+                }
+                New-HarnessCodeBlock -Code $_.Code -Language $_.Language -Index $_.Index -StartLine $_.StartLine -Fence $fence
             })
         $result.Edits = @($Metadata.Edits)
     }
@@ -145,7 +177,8 @@ function Invoke-EngineProcessResponse {
             }
             $inputBlock = New-HarnessCodeBlock -Code $block.Code -Language $block.Language `
                 -Index $block.Index -StartLine $block.StartLine
-            $fixed = Invoke-EnginePoint $Store $fixer @($inputBlock, $Store.Host.TargetProfiles.Get())
+            $serial = $Store.FaultSerials[$fixer.Extension]
+            $fixed = Invoke-EnginePoint $Store $fixer @($inputBlock, $Store.Host.TargetProfiles.Get()) -DeferSuccess
             if ($fixed) {
                 try {
                     Assert-HarnessFixResult $fixed
@@ -157,6 +190,9 @@ function Invoke-EngineProcessResponse {
                 $block.Code = $fixed.Code
                 $result.Edits += @($fixed.Edits)
                 $result.Diagnostics += @($fixed.Diagnostics)
+            }
+            if ($Store.FaultSerials[$fixer.Extension] -eq $serial) {
+                $Store.FaultCounts[$fixer.Extension] = 0
             }
         }
     }

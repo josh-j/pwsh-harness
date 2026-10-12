@@ -37,7 +37,8 @@ function ConvertTo-CatalogEntry {
     if ($IsWindows -and $Layer -in @('Live', 'Captured') -and $Command.Name -in @('Set-Item', 'Set-ItemProperty')) {
         $Command = Get-Command -Name $Command.Name -ArgumentList 'HKLM:\SOFTWARE' -ErrorAction Stop
     }
-    if ($Command.CommandType -in @('Cmdlet', 'Function') -and $null -eq $Command.Parameters) {
+    $parameters = $Command.Parameters
+    if ($Command.CommandType -in @('Cmdlet', 'Function') -and $null -eq $parameters) {
         $qualifiedName = if ($Command.Source) {
             "$($Command.Source)\$($Command.Name)"
         }
@@ -45,7 +46,8 @@ function ConvertTo-CatalogEntry {
             $Command.Name
         }
         $Command = Get-Command -Name $qualifiedName -ErrorAction Stop
-        if ($null -eq $Command.Parameters) {
+        $parameters = $Command.Parameters
+        if ($null -eq $parameters) {
             throw "No executable parameter metadata for '$qualifiedName'."
         }
     }
@@ -60,8 +62,8 @@ function ConvertTo-CatalogEntry {
         Source          = $Command.Source
         Layer           = $Layer
         ParametersKnown = $true
-        Parameters      = @(if ($Command.Parameters) {
-                foreach ($parameter in $Command.Parameters.Values) {
+        Parameters      = @(if ($parameters) {
+                foreach ($parameter in $parameters.Values) {
                     @{ Name = $parameter.Name; Aliases = @($parameter.Aliases) }
                 }
             })
@@ -76,7 +78,7 @@ function Get-HostCoreCatalog {
     if ($hit) {
         $data = Get-Content -LiteralPath $cachePath -Raw | ConvertFrom-Json -AsHashtable
     }
-    if ($hit -and (-not $data.ContainsKey('CacheSchemaVersion') -or $data.CacheSchemaVersion -ne 2)) {
+    if ($hit -and (-not $data.ContainsKey('CacheSchemaVersion') -or $data.CacheSchemaVersion -ne 3)) {
         $hit = $false
     }
     if (-not $hit) {
@@ -87,15 +89,16 @@ function Get-HostCoreCatalog {
         $missing = @()
         foreach ($name in $moduleNames) {
             if ($name -ne 'Microsoft.PowerShell.Core') {
-                $available = Get-Module -ListAvailable -Name $name | Select-Object -First 1
-                if (-not $available) {
+                # HostCore is the running PowerShell distribution, not a PSModulePath search.
+                $manifest = Join-Path $PSHOME "Modules/$name/$name.psd1"
+                if (-not [IO.File]::Exists($manifest)) {
                     $missing += $name
                     continue
                 }
-                Import-Module -Name $name -ErrorAction Stop
+                Import-Module -Name $manifest -ErrorAction Stop
             }
             $modules += @{ Name = $name; Version = [string]$PSVersionTable.PSVersion }
-            foreach ($command in Get-Command -Module $name -CommandType Cmdlet, Function, Alias) {
+            foreach ($command in Get-Command -ListImported -Module $name -CommandType Cmdlet, Function, Alias) {
                 $entries[$command.Name] = ConvertTo-CatalogEntry $command 'HostCore'
             }
         }
@@ -104,7 +107,7 @@ function Get-HostCoreCatalog {
                 $entries[$alias.Name] = ConvertTo-CatalogEntry $alias 'HostCore'
             }
         }
-        $data = @{ CacheSchemaVersion = 2; Commands = $entries; Modules = $modules; MissingModules = $missing }
+        $data = @{ CacheSchemaVersion = 3; Commands = $entries; Modules = $modules; MissingModules = $missing }
         $null = [IO.Directory]::CreateDirectory($cacheDirectory)
         [IO.File]::WriteAllText($cachePath, ($data | ConvertTo-Json -Depth 15 -Compress), [Text.UTF8Encoding]::new($false))
     }
@@ -119,7 +122,7 @@ $table = $script:LazyCatalogEntries
 $script:LazyCatalogGetter = {
     $slot = $null
     if (-not $table.TryGetValue($this, [ref]$slot)) {
-        throw 'Missing lazy catalog entry.' 
+        throw 'Missing lazy catalog entry.'
     }
     if (-not $slot.Loaded) {
         $slot.Value = New-HarnessFrozen $slot.Source
@@ -135,7 +138,7 @@ function New-LazyCatalogEntry {
     $items = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($name in $Entry.Keys) {
         if ($name -ne 'Parameters') {
-            $items[$name] = $Entry[$name] 
+            $items[$name] = $Entry[$name]
         }
     }
     $items['Parameters'] = $null
@@ -149,10 +152,10 @@ function New-LazyCatalogEntry {
 function New-LayeredCatalog {
     param([object[]]$Layers, [object[]]$Modules = @(), $Cache, [scriptblock]$LiveResolver, [scriptblock]$ModuleResolver, [string]$FrozenKey)
     $cachedEntries = if ($FrozenKey) {
-        New-HarnessFrozen -Value $null -CacheKey $FrozenKey 
+        New-HarnessFrozen -Value $null -CacheKey $FrozenKey
     }
     $entries = if ($cachedEntries) {
-        $cachedEntries 
+        $cachedEntries
     }
     else {
         [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -161,7 +164,7 @@ function New-LayeredCatalog {
     foreach ($layer in $Layers) {
         $counts[$layer.Name] = $layer.Commands.Count
         if ($cachedEntries) {
-            continue 
+            continue
         }
         foreach ($name in $layer.Commands.Keys) {
             $entry = @{} + $layer.Commands[$name]
@@ -171,7 +174,7 @@ function New-LayeredCatalog {
     }
     if (-not $cachedEntries) {
         foreach ($name in @($entries.Keys)) {
-            $entries[$name] = New-LazyCatalogEntry $entries[$name] 
+            $entries[$name] = New-LazyCatalogEntry $entries[$name]
         }
         $entries = [Collections.ObjectModel.ReadOnlyDictionary[string, object]]::new($entries)
         $entries.PSObject.TypeNames.Insert(0, 'Harness.Frozen')

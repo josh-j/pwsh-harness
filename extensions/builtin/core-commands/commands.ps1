@@ -97,9 +97,8 @@ function Initialize-PackCommands {
             ConvertTo-Json -Depth 10
     } 'Display effective config (keys are never stored).'
     Add-PackCommand extensions {
-        param($c) $script:Harness.GetRegistry() |
-            ConvertTo-Json -Depth 10
-    } 'List extensions, registries and isolated errors.'
+        param($c) $script:Harness.GetExtensionInfo() | Format-Table Name, Source, Generation, State -AutoSize | Out-String
+    } 'List extensions with source, generation and state.'
     Add-PackCommand quit { param($c) [pscustomobject]@{
             Action ='Quit'
             Text   ='Goodbye.'

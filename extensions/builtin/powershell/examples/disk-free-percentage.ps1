@@ -1,3 +1,5 @@
+# synopsis: Calculate free space as a percentage of logical disk capacity.
+# tags: Win32_LogicalDisk disk FreeSpace Size
 #Requires -Version 7.6
 function Get-DiskFreePercent {
     [CmdletBinding()]

@@ -37,6 +37,7 @@ function Set-HarnessViewSnapshot {
     }
     $bar.Profile = $Snapshot.Config.ModelProfile
     $bar.Model = $Snapshot.Config.Model
+    $bar.Behavior = $Snapshot.Config.Behavior
     $bar.Ascii = $Snapshot.Config.'Tui.Ascii'
     if ($bar.Tokens -eq 0) {
         $bar.Tokens = [Math]::Ceiling((((@($Snapshot.Transcript | ForEach-Object { $_.Text }) -join '')).Length + $Snapshot.Context.Text.Length) / 4)
@@ -48,7 +49,12 @@ function Set-HarnessViewSnapshot {
     }
     if ($Snapshot.Context.ContainsKey('Index')) {
         $index = $Snapshot.Context.Index
-        $bar.IndexText = "index:$($index.Status) $($index.Files)f/$($index.Chunks)c"
+        $bar.IndexText = $(if ($index.Message) {
+                $index.Message
+            }
+            else {
+                "index:$($index.Status) $($index.Files)f/$($index.Chunks)c"
+            })
     }
     $View.Dirty = $true
 }
@@ -96,7 +102,7 @@ function Read-HarnessLine {
             $Terminal.WriteText("^C`n")
             return ''
         }
-        if ($key.Key -eq 'Enter') {
+        if ($key.Key -eq 'Enter' -or [int]$key.KeyChar -eq 10) {
             $Terminal.WriteText("`n")
         }
         elseif ([int]$key.KeyChar -ge 32) {
@@ -115,13 +121,22 @@ function Invoke-HarnessFrontendInput {
     $View.Viewport.ScrollOffset = 0
     $reader = ${function:Read-HarnessLine}
     $safeText = ${function:ConvertTo-HarnessSafeText}
-    $confirm = { param($message)
+    $confirm = { param($message, $expected = 'RUN')
         if (-not $LineMode) {
             $Terminal.Restore()
         }
         try {
-            $Terminal.WriteText("$message`n")
-            (& $reader 'Confirm> ' -Terminal $Terminal) -ceq 'RUN'
+            $Terminal.WriteText((& $safeText ($message + "`n")))
+            if ($expected -ceq '') {
+                return
+            }
+            $answer = & $reader 'Confirm> ' -Terminal $Terminal
+            if ($expected -ceq 'RUN') {
+                $answer -ceq 'RUN'
+            }
+            else {
+                $answer
+            }
         }
         finally {
             if (-not $LineMode) {
@@ -138,7 +153,16 @@ function Invoke-HarnessFrontendInput {
             }
             return
         }
-        $output = $HarnessHost.Commands.Invoke($Text, $Session, $confirm)
+        $commandCancellation = [Threading.CancellationTokenSource]::new()
+        $View.SessionView.Busy = $true
+        try {
+            $output = $HarnessHost.Commands.Invoke($Text, $Session, $confirm, { if ($Pump) {
+                        & $Pump $commandCancellation
+                    } }.GetNewClosure(), $commandCancellation.Token)
+        }
+        finally {
+            $View.SessionView.Busy = $false; $commandCancellation.Dispose()
+        }
         if ($output -and $output.PSObject.Properties['Action'] -and $output.Action -eq 'Send') {
             $Text = $output.Prompt
         }
@@ -152,7 +176,7 @@ function Invoke-HarnessFrontendInput {
                 }
                 $HarnessHost.AddTranscript($Session, 'system', $message, $null)
                 if ($LineMode) {
-                    $Terminal.WriteText("$message`n")
+                    $Terminal.WriteText((& $safeText ($message + "`n")))
                 }
             }
             Set-HarnessViewSnapshot $View ($HarnessHost.GetConversationSnapshot($Session)) -Conversation
@@ -185,7 +209,7 @@ function Invoke-HarnessFrontendInput {
         $HarnessHost.AddTranscript($Session, 'system', $message, $null)
         $View.StatusBar.Text = $message
         if ($LineMode) {
-            $Terminal.WriteText("$message`n")
+            $Terminal.WriteText((& $safeText ($message + "`n")))
         }
     }
     finally {
@@ -218,13 +242,31 @@ function Invoke-HarnessFrontend {
         $HarnessHost.Events.Subscribe($eventName, $name, { param($payload) & $update $View $eventName $payload }.GetNewClosure())
         $subscriptions.Add(@($eventName, $name))
     }
+    $statusName = 'view-extension-' + [guid]::NewGuid().ToString('N')
+    $statusSafe = ${function:ConvertTo-HarnessSafeText}
+    $HarnessHost.Events.Subscribe('ExtensionStatusChanged', $statusName, {
+            param($notice)
+            $View.StatusBar.ExtensionNotice = & $statusSafe $notice.Message
+            $View.StatusBar.Text = $View.StatusBar.ExtensionNotice
+            $HarnessHost.AddTranscript($Session, 'system', $View.StatusBar.ExtensionNotice)
+            $View.Dirty = $true
+            if ($LineMode) {
+                $Terminal.WriteText((& $statusSafe ($notice.Message + "`n")))
+            }
+        }.GetNewClosure())
+    $subscriptions.Add(@('ExtensionStatusChanged', $statusName))
     $indexName = 'view-index-' + [guid]::NewGuid().ToString('N')
     $HarnessHost.Events.Subscribe('ext.retrieval.IndexUpdated', $indexName, {
             param($index)
             if ($index.SessionId -ne $View.SessionView.SessionId) {
                 return
             }
-            $View.StatusBar.IndexText = "index:$($index.Status) $($index.Files)f/$($index.Chunks)c"
+            $View.StatusBar.IndexText = $(if ($index.Message) {
+                    $index.Message
+                }
+                else {
+                    "index:$($index.Status) $($index.Files)f/$($index.Chunks)c"
+                })
             $View.Dirty = $true
         }.GetNewClosure())
     $subscriptions.Add(@('ext.retrieval.IndexUpdated', $indexName))
@@ -339,39 +381,51 @@ function Start-PwshHarness {
     Start the event-driven terminal frontend or its line-mode fallback.
     #>
     [CmdletBinding()]
-    param($HarnessHost, [switch]$NoTui, [string]$Provider, [string]$Model, [string]$ConfigPath, [hashtable]$Options = @{
+    param($HarnessHost, [hashtable]$Config, $Session, [switch]$NoTui, [string]$Provider, [string]$Model, [string]$ConfigPath, [hashtable]$Options = @{
         }, [string]$Resume,
         [string]$Path, [string[]]$IncludeFiles = @(), [switch]$IncludeDiff, [string]$Renderer = 'Default', [switch]$NoPersist)
+    $ownsHost = -not $HarnessHost
     if (-not $HarnessHost) {
         $HarnessHost = New-HarnessHost -ConfigPath $ConfigPath -Options $Options
     }
-    $config = $HarnessHost.ConfigService.Resolve($Options, $ConfigPath)
-    if ($Provider) {
-        $config.Provider = $Provider
+    try {
+        if (-not $Config) {
+            $config = $HarnessHost.ConfigService.Resolve($Options, $ConfigPath)
+        }
+        if ($Provider) {
+            $config.Provider = $Provider
+        }
+        if ($Model) {
+            $config.Model = $Model
+        }
+        $HarnessHost.ExtensionLoader.Load($config.ExtensionPaths)
+        if (-not $Session) {
+            $session = $HarnessHost.NewSession($config)
+        }
+        $session.Persist = -not $NoPersist
+        if ($Path) {
+            $session.Context.Path = $Path
+        }
+        foreach ($file in $IncludeFiles) {
+            $session.Context.IncludeFiles.Add($file)
+        }
+        if ($IncludeDiff) {
+            $session.Context.IncludeDiff = $true
+        }
+        # Context is collected by cancellable turns/commands after the frontend is accepting input.
+        if ($Resume) {
+            $null = $HarnessHost.Commands.Invoke("/resume $Resume", $session, $null)
+        }
+        $view = New-HarnessViewState $session
+        $view.Renderer = $Renderer
+        Set-HarnessViewSnapshot $view ($HarnessHost.GetConversationSnapshot($session)) -Conversation
+        $terminal = New-HarnessTerminal
+        $lineMode = Test-HarnessLineMode $terminal $NoTui
+        Invoke-HarnessFrontend $HarnessHost $session $view $terminal -LineMode $lineMode
     }
-    if ($Model) {
-        $config.Model = $Model
+    finally {
+        if ($ownsHost) {
+            $HarnessHost.Dispose()
+        }
     }
-    $HarnessHost.ExtensionLoader.Load($config.ExtensionPaths)
-    $session = $HarnessHost.NewSession($config)
-    $session.Persist = -not $NoPersist
-    if ($Path) {
-        $session.Context.Path = $Path
-    }
-    foreach ($file in $IncludeFiles) {
-        $session.Context.IncludeFiles.Add($file)
-    }
-    if ($IncludeDiff) {
-        $session.Context.IncludeDiff = $true
-    }
-    $null = $HarnessHost.CollectContext($session)
-    if ($Resume) {
-        $null = $HarnessHost.Commands.Invoke("/resume $Resume", $session, $null)
-    }
-    $view = New-HarnessViewState $session
-    $view.Renderer = $Renderer
-    Set-HarnessViewSnapshot $view ($HarnessHost.GetConversationSnapshot($session)) -Conversation
-    $terminal = New-HarnessTerminal
-    $lineMode = Test-HarnessLineMode $terminal $NoTui
-    Invoke-HarnessFrontend $HarnessHost $session $view $terminal -LineMode $lineMode
 }

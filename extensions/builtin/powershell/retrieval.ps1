@@ -46,7 +46,7 @@ function Split-PackSource {
     $body = (-join $remainder) -replace '(?m)[ \t]+$', ''
     if ($body.Trim()) {
         New-HarnessChunk -Id "${Path}::script" -Path $Path -EndLine $ast.Extent.EndLineNumber `
-            -Kind Script -Title $Path -Text $body
+            -Kind Script -Title $Path -Text $body -Fields @{ MetadataOnly = (-not @($ast.EndBlock.Statements | Where-Object { $_ -isnot [Management.Automation.Language.FunctionDefinitionAst] }).Count -and -not $ast.BeginBlock -and -not $ast.ProcessBlock -and -not $ast.CleanBlock) }
     }
 }
 function Get-PackSyntaxContext {

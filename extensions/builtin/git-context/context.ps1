@@ -1,5 +1,6 @@
+. (Join-Path $PSScriptRoot 'discovery.ps1')
 function Invoke-HarnessGit {
-    param([string]$Path, [string[]]$Arguments)
+    param([string]$Path, [string[]]$Arguments, $Request = $script:DiscoveryRequest)
     if (-not (Get-Command git -ErrorAction Ignore)) {
         return $null
     }
@@ -25,9 +26,12 @@ function Invoke-HarnessGit {
         $null = $process.Start()
         $outputTask = $process.StandardOutput.ReadToEndAsync()
         $errorTask = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(5000)) {
-            $process.Kill($true)
-            throw 'Git context query timed out.'
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        while (-not $process.WaitForExit(25)) {
+            Invoke-DiscoveryCheckpoint $Request
+            if ($watch.ElapsedMilliseconds -ge 5000) {
+                throw 'Git context query timed out.'
+            }
         }
         $text = $outputTask.GetAwaiter().GetResult()
         $null = $errorTask.GetAwaiter().GetResult()
@@ -44,48 +48,49 @@ function Invoke-HarnessGit {
     }
 }
 function Get-HarnessFileTree {
-    param([string]$Root)
-    $pending = [Collections.Generic.Stack[string]]::new()
-    $pending.Push($Root)
-    $excluded = @('.git', '.aws', '.codex', '.agents', 'node_modules', 'vendor', 'bin', 'obj', '.venv', 'venv', 'dist', 'build', '.cache')
-    $paths = [Collections.Generic.List[string]]::new()
-    while ($pending.Count -gt 0) {
-        $directory = $pending.Pop()
-        foreach ($item in Get-ChildItem -LiteralPath $directory -Force -ErrorAction SilentlyContinue) {
-            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                continue
-            }
-            if ($item.PSIsContainer) {
-                if ($item.Name -notin $excluded) {
-                    $pending.Push($item.FullName)
-                }
-            }
-            else {
-                $relative = [IO.Path]::GetRelativePath($Root, $item.FullName).Replace('\', '/')
-                if ($relative -notmatch '(?i)(^|/)(\.env(?:\..*)?|credentials|id_rsa|id_ed25519)$|\.(pfx|p12|pem|key)$') {
-                    $paths.Add($relative)
-                }
-            }
-        }
-    }
-    @($paths.ToArray() | Sort-Object)
+    param([string]$Root, $Request)
+    $listing = Get-DiscoveryListing $Root -Request $Request
+    $script:FallbackListing = $listing
+    @($listing.Entries | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::Directory) -and
+            $_.Name -notmatch '(?i)^(\.env.*|credentials.*|\.credentials-.*|id_rsa|id_ed25519)$|\.(pfx|p12|pem|key)$' } |
+            ForEach-Object { $_.Name } | Sort-Object)
 }
 function Get-HarnessGitContext {
     param($Request)
+    $script:DiscoveryRequest = $Request
+    Invoke-DiscoveryCheckpoint $Request
     $requestedPath = [IO.Path]::GetFullPath($Request.Path)
     if (-not (Test-Path -LiteralPath $requestedPath -PathType Container)) {
         throw "Context directory not found: $requestedPath"
     }
-    $root = Invoke-HarnessGit $requestedPath @('rev-parse', '--show-toplevel')
+    $root = if (Test-DiscoveryRepositoryCandidate $requestedPath $Request) {
+        Invoke-HarnessGit $requestedPath @('rev-parse', '--show-toplevel')
+    }
     $isRepository = -not [string]::IsNullOrEmpty($root)
     if ($isRepository) {
         $root = [IO.Path]::GetFullPath($root)
     }
+    if (-not $isRepository) {
+        $root = $requestedPath
+    }
+    $reason = Get-DiscoveryRootReason $root
+    $explicit = @($Request.Config.RagPaths | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd('/', '\') -eq $root.TrimEnd('/', '\') }).Count -gt 0
+    if ($isRepository -and -not $reason -and -not $explicit) {
+        $probe = Get-DiscoveryListing $root -Limit 5001 -Depth 2 -Request $Request
+        if ($probe.Entries.Count -gt 5000) {
+            $reason = 'more than 5000 entries at the top two levels; explicit indexing required'
+        }
+        elseif ($probe.Truncated) {
+            $reason = 'directory discovery budget exceeded; explicit indexing required'
+        }
+    }
+    $autoIndexAllowed = $isRepository -and (-not $reason -or $explicit)
+    $discoveryTruncated = $false
     $branch = ''
     $head = ''
     $status = ''
     $diff = '' # Git context normalizes CRLF output to LF; working-tree EOL metadata is noted in context.
-    if ($isRepository) {
+    if ($autoIndexAllowed) {
         $branch = Invoke-HarnessGit $root @('branch', '--show-current')
         $head = Invoke-HarnessGit $root @('rev-parse', 'HEAD')
         if (-not $branch) {
@@ -96,12 +101,15 @@ function Get-HarnessGitContext {
         $files = @($tracked -split '\r?\n' |
                 Where-Object {
                     $_ -and
-                    $_ -notmatch '(?i)(^|/)(\.env(?:\..*)?|credentials|id_rsa|id_ed25519)$|\.(pfx|p12|pem|key)$'
+                    $_ -notmatch '(?i)(^|/)(\.env[^/]*|credentials[^/]*|\.credentials-[^/]*|id_rsa|id_ed25519)$|\.(pfx|p12|pem|key)$'
                 } |
                 Sort-Object -Unique)
         if ($Request.IncludeDiff) {
-            $staged = Invoke-HarnessGit $root @('diff', '--cached', '--no-ext-diff', '--no-textconv', '--')
-            $unstaged = Invoke-HarnessGit $root @('diff', '--no-ext-diff', '--no-textconv', '--')
+            $diffPaths = @('.') + @('credentials*', '.credentials-*', '.env*', 'id_rsa', 'id_ed25519', '*.pfx', '*.p12', '*.pem', '*.key' | ForEach-Object {
+                    ':(glob,icase,exclude)**/' + $_
+                })
+            $staged = Invoke-HarnessGit $root (@('diff', '--cached', '--no-ext-diff', '--no-textconv', '--') + $diffPaths)
+            $unstaged = Invoke-HarnessGit $root (@('diff', '--no-ext-diff', '--no-textconv', '--') + $diffPaths)
             $parts = [Collections.Generic.List[string]]::new()
             if ($Request.DiffMode -in @('all', 'staged')) {
                 $parts.Add("Staged changes:`n$staged")
@@ -114,9 +122,13 @@ function Get-HarnessGitContext {
     }
     else {
         $root = $requestedPath
-        $files = @(Get-HarnessFileTree $root)
+        $files = @(Get-HarnessFileTree $root $Request)
+        $discoveryTruncated = $true
     }
     $items = [Collections.Generic.List[object]]::new()
+    if ($discoveryTruncated) {
+        $items.Add([pscustomobject]@{ Name = 'Discovery'; Content = 'Context discovery truncated: depth 1, at most 200 entries, 150 ms budget.'; Priority = 0; Kind = 'Metadata'; Stability = 'Volatile' })
+    }
     $status = (@($status -split "`n") | Select-Object -First 20) -join "`n"
     $metadata = "Repository: $([IO.Path]::GetFileName($root))`nBranch: $branch`nStatus:`n$status"
     $items.Add([pscustomobject]@{
@@ -130,6 +142,7 @@ function Get-HarnessGitContext {
     $stableFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     if ($Request.AutoFiles) {
         foreach ($file in $files) {
+            Invoke-DiscoveryCheckpoint $Request
             $leaf = [IO.Path]::GetFileName($file)
             $isConvention = $leaf -in @('AGENTS.md', 'PSScriptAnalyzerSettings.psd1')
             $isReadme = $Request.Config.ContextIncludeReadme -and $leaf -match '^README(?:\.md)?$'
@@ -167,7 +180,7 @@ function Get-HarnessGitContext {
     else {
         '' 
     }
-    $queryFiles = if ($isRepository) {
+    $queryFiles = if ($autoIndexAllowed) {
         @((Invoke-HarnessGit $root @('ls-files', '--cached')) -split "`n" | Where-Object { $_ -in $files })
     }
     else {
@@ -312,13 +325,28 @@ function Get-HarnessGitContext {
             })
     }
     [pscustomobject]@{
-        Items        = $items.ToArray()
-        Root         = $root
-        IsRepository = $isRepository
-        Branch       = $branch
-        Head         = $head
-        Files        = $files
-        Included     = $included.ToArray()
+        Items                 = $items.ToArray()
+        Root                  = $root
+        IsRepository          = $isRepository
+        AutoIndexAllowed      = $autoIndexAllowed
+        DiscoveryTruncated    = $discoveryTruncated
+        DiscoveryReason       = $reason
+        DiscoveryEntries      = $(if ($discoveryTruncated) {
+                $script:FallbackListing.Entries.Count
+            }
+            else {
+                $files.Count
+            })
+        DiscoveryMilliseconds = $(if ($discoveryTruncated) {
+                $script:FallbackListing.Milliseconds
+            }
+            else {
+                0
+            })
+        Branch                = $branch
+        Head                  = $head
+        Files                 = $files
+        Included              = $included.ToArray()
     }
 }
 function Get-HarnessProjectContext {
@@ -410,7 +438,10 @@ function Initialize-HarnessContextCommands {
             "Included sections: $($context.Sections -join ', ')"
             "Included files: $included"
             "Approximate tokens: $($context.EstimatedTokens)/$($c.State.Config.ContextTokenBudget)"
-            "Truncated: $($context.Truncated)"
+            "Truncated: $($context.Truncated -or $context.Project.DiscoveryTruncated)"
+            $(if ($context.Index) {
+                    $context.Index.Message
+                })
             "Diff: $(if ($context.IncludeDiff) { $context.DiffMode } else { 'off' })"
         ) -join "`n"
     } 'List included sections/files, estimated tokens/budget, truncation, and diff mode.'
@@ -463,6 +494,9 @@ function Initialize-HarnessContextCommands {
                 } })
         @(
             "Project tree (depth $depth):"
+            $(if ($c.State.Context.Project.DiscoveryTruncated) {
+                    '[TRUNCATED: bounded depth-1 discovery]'
+                })
             ($tree | Select-Object -First 300)
             $(if ($tree.Count -gt 300) {
                     '[TRUNCATED: first 300 tree entries]'

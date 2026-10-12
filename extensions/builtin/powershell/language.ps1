@@ -1,14 +1,20 @@
+$sharedFences = Join-Path $PSScriptRoot '../../../PwshHarness/PowerShellFences.ps1'
+if (-not (Test-Path -LiteralPath $sharedFences)) {
+    # Installed packages keep extensions inside the module directory.
+    $moduleRoot = (Get-Item -LiteralPath (Join-Path $PSScriptRoot '../../..')).FullName
+    $sharedFences = Join-Path $moduleRoot 'PowerShellFences.ps1'
+}
+. $sharedFences
 function Get-HarnessCodeBlock {
     [CmdletBinding()]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [string[]]$FenceLanguages = @('powershell', 'pwsh', 'ps1'))
-    $accepted = ($FenceLanguages | ForEach-Object { [regex]::Escape($_) }) -join '|'
-    $fences = [regex]::Matches($Text,
-        "(?im)^\s*``````(?:$accepted)[ \t]*\r?\n(?<code>[\s\S]*?)^\s*``````[ \t]*(?:\r?$)",
-        [Text.RegularExpressions.RegexOptions]::Multiline)
     $index = 0
-    foreach ($match in $fences) {
-        New-HarnessCodeBlock -Code $match.Groups['code'].Value.TrimEnd("`r", "`n") -Index $index `
-            -Language powershell -StartLine (1 + ([regex]::Matches($Text.Substring(0, $match.Index), "`n")).Count)
+    foreach ($fence in @(Get-HarnessPowerShellFencedBlock $Text -FenceLanguages $FenceLanguages)) {
+        if ($fence.Language -notin $FenceLanguages) {
+            continue
+        }
+        New-HarnessCodeBlock -Code $fence.Code -Index $index -Language powershell -StartLine $fence.StartLine `
+            -Fence ($fence | Select-Object * -ExcludeProperty Code)
         $index++
     }
 }

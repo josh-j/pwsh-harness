@@ -1,7 +1,11 @@
 #Requires -Version 7.6
 Set-StrictMode -Version Latest
 Set-Variable -Name HarnessApiVersion -Value '1.0' -Option ReadOnly -Scope Script
-$script:DefaultHost = $null
+$script:ImplicitHosts = @{}
+$script:HostCacheClock = 0L
+. (Join-Path $PSScriptRoot 'HostLifecycle.ps1')
+. (Join-Path $PSScriptRoot 'CliConfiguration.ps1')
+. (Join-Path $PSScriptRoot 'CredentialStore.ps1')
 $script:Hosts = @{
 }
 function New-HarnessHost {
@@ -11,7 +15,7 @@ function New-HarnessHost {
     #>
     [CmdletBinding()]
     param([string]$ConfigPath, [hashtable]$Options = @{
-        }, [string[]]$ExtensionPaths, [string]$ProfileDirectory)
+        }, [string[]]$ExtensionPaths, [string]$ProfileDirectory, [string]$ConfigDirectory, [string]$DataDirectory)
     $project = $PSScriptRoot
     if (-not (Test-Path -LiteralPath (Join-Path $project 'extensions/builtin'))) {
         $project = Split-Path $PSScriptRoot -Parent
@@ -39,6 +43,19 @@ function New-HarnessHost {
         $configDir = Join-Path $configBase 'pwsh-harness'
         $dataDir = Join-Path $dataBase 'pwsh-harness'
     }
+    if ($ConfigDirectory) {
+        $configDir = $ConfigDirectory
+    }
+    elseif ($ConfigPath) {
+        $configDir = Split-Path ([IO.Path]::GetFullPath($ConfigPath)) -Parent
+    }
+    if ($DataDirectory) {
+        $dataDir = $DataDirectory
+    }
+    $builtinDirectory = Join-Path $project 'extensions/builtin'
+    $authoringModule = New-Module -ScriptBlock { param($p) . $p } -ArgumentList (Join-Path $builtinDirectory 'self-extend/authoring.ps1')
+    $modulePath = Join-Path $PSScriptRoot 'PwshHarness.psd1'
+    $factory = { param($h, $c, $d) & $authoringModule { param($instance, $config, $data, $manifest) New-ExtensionAuthoringService $instance $config $data $manifest } $h $c $d $modulePath }.GetNewClosure()
     if ($null -eq $ExtensionPaths) {
         $ExtensionPaths = if ($Options.ContainsKey('ExtensionPaths')) {
             $Options.ExtensionPaths
@@ -50,19 +67,63 @@ function New-HarnessHost {
     }
     $hostInstance = PwshHarness.Engine\New-HarnessHost -ConfigDirectory $configDir -DataDirectory $dataDir `
         -ConfigPath $ConfigPath -Options $Options -ExtensionPaths @() `
-        -ManifestReader { param($p) Import-PowerShellDataFile -LiteralPath $p } -EnvironmentPrefix 'PWSH_HARNESS_' -ProfileDirectory $ProfileDirectory
+        -ManifestReader { param($p) Import-PowerShellDataFile -LiteralPath $p } -EnvironmentPrefix 'PWSH_HARNESS_' -ProfileDirectory $ProfileDirectory -BuiltinDirectory $builtinDirectory `
+        -TrustedReaderDirectory (Join-Path $builtinDirectory 'openai-compatible') -AuthoringFactory $factory `
+        -SavedCredentialFactory { param($service) New-HarnessCredentialStore $service }
     $hostInstance.ExtensionLoader.Load(@(Join-Path $project 'extensions/builtin'))
     $hostInstance.Settings.Declare('Tui.Ascii', [bool], $false)
     $hostInstance.Renderers.Add('Default', (Get-Command PwshHarness.Tui\Get-HarnessRenderModel).ScriptBlock, 100)
     $hostInstance.ExtensionLoader.Load($ExtensionPaths)
-    $script:Hosts[$hostInstance.Id] = $hostInstance
-    $hostInstance
-}
-function Get-DefaultHarnessHost {
-    if (-not $script:DefaultHost) {
-        $script:DefaultHost = New-HarnessHost
+    $references = $script:Hosts
+    $cache = $script:ImplicitHosts
+    $dispose = $hostInstance.PSObject.Methods['Dispose']
+    $hostInstance | Add-Member ScriptMethod Dispose {
+        if ($this.IsDisposed) {
+            return
+        }
+        try {
+            $null = $dispose.Invoke()
+        }
+        finally {
+            $references.Remove($this.Id)
+            foreach ($key in @($cache.Keys)) {
+                if ($cache[$key].Host.Id -eq $this.Id) {
+                    $cache.Remove($key)
+                }
+            }
+            Remove-Module $authoringModule -ErrorAction Ignore
+            & $authoringModule {
+                foreach ($variable in @(Get-Variable -Scope Script)) {
+                    if (-not ($variable.Options -band [Management.Automation.ScopedItemOptions]::Constant)) {
+                        Remove-Variable -Name $variable.Name -Scope Script -Force -ErrorAction Ignore
+                    }
+                }
+            }
+        }
+    }.GetNewClosure() -Force
+    $script:Hosts[$hostInstance.Id] = [WeakReference]::new($hostInstance)
+    # The composed host needs the built-in gateway's settings even for Mock.
+    # A rejected configuration rolls its registration back; surface that cause
+    # before a frontend or turn can fail with a missing provider instead.
+    $registry = $hostInstance.GetRegistry()
+    if ($registry.Extensions -notcontains 'openai-compatible') {
+        $failure = $registry.Errors | Where-Object Extension -EQ 'openai-compatible' | Select-Object -Last 1
+        $message = if ($failure) {
+            $failure.Message
+        }
+        else {
+            'The built-in OpenAI-compatible gateway could not be loaded.'
+        }
+        $record = [Management.Automation.ErrorRecord]::new([Exception]::new($message),
+            'HarnessGatewayInitializationFailed', [Management.Automation.ErrorCategory]::InvalidArgument, $null)
+        try {
+            $hostInstance.Dispose()
+        }
+        finally {
+            $PSCmdlet.ThrowTerminatingError($record)
+        }
     }
-    $script:DefaultHost
+    $hostInstance
 }
 function Invoke-PwshHarness {
     <#
@@ -70,60 +131,81 @@ function Invoke-PwshHarness {
     Generate one response through an isolated host without executing generated code.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Prompt, [string]$Provider, [string]$Model, [switch]$NoValidate, [switch]$PassThru,
+    param([Parameter(Mandatory)][string]$Prompt, [string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey, [switch]$SaveConfig, [switch]$NoValidate, [switch]$PassThru,
         [hashtable]$Config, [string]$ConfigPath, [string]$Path, [string[]]$IncludeFiles = @(), [switch]$IncludeDiff,
         [hashtable]$Options = @{
         }, [object]$State, [object]$HarnessHost, [scriptblock]$OnToken,
         [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
-    if (-not $HarnessHost) {
-        $HarnessHost = if ($State) {
-            $script:Hosts[$State.HostId]
+    try {
+        $Options = $Options.Clone()
+        foreach ($name in @('Provider', 'Model', 'BaseUrl', 'Behavior')) {
+            if ($PSBoundParameters.ContainsKey($name)) {
+                $Options[$name] = if ($name -eq 'Behavior') {
+                    $PSBoundParameters[$name].ToLowerInvariant()
+                }
+                else {
+                    $PSBoundParameters[$name]
+                }
+            }
         }
-        elseif ($ConfigPath) {
-            New-HarnessHost -ConfigPath $ConfigPath -Options $Options
+        if (-not $HarnessHost) {
+            $HarnessHost = if ($State) {
+                $reference = $script:Hosts[$State.HostId]
+                $owner = if ($reference) {
+                    $reference.Target
+                }
+                else {
+                    $null
+                }
+                if (-not $owner -or $owner.IsDisposed) {
+                    throw 'The session host has been disposed or collected; retain its host while using the session.'
+                }
+                $owner
+            }
+            else {
+                Get-DefaultHarnessHost -ConfigPath $ConfigPath -Options $Options
+            }
+        }
+        if (-not $Config) {
+            $Config = $HarnessHost.ConfigService.Resolve($Options, $ConfigPath)
         }
         else {
-            Get-DefaultHarnessHost
-        }
-    }
-    if (-not $Config) {
-        $Config = $HarnessHost.ConfigService.Resolve($Options, $ConfigPath)
-    }
-    else {
-        $Config = $Config.Clone()
-        foreach ($name in $Options.Keys) {
-            if ($Config.ContainsKey($name)) {
+            $Config = $Config.Clone()
+            foreach ($name in $Options.Keys) {
                 $Config[$name] = $Options[$name]
             }
         }
-    }
-    if ($Provider) {
-        $Config.Provider = $Provider
-    }
-    if ($Model) {
-        $Config.Model = $Model
-    }
-    if ($NoValidate) {
-        $Config.Validate = $false
-    }
-    $HarnessHost.ExtensionLoader.Load($Config.ExtensionPaths)
-    if (-not $State) {
-        $State = $HarnessHost.NewSession($Config)
-    }
-    $State.Config = $Config
-    if ($Path) {
-        $State.Context.Path = $Path
-    }
-    foreach ($file in $IncludeFiles) {
-        if (-not $State.Context.IncludeFiles.Contains($file)) {
-            $State.Context.IncludeFiles.Add($file)
+        if ($NoValidate) {
+            $Config.Validate = $false
         }
+        $HarnessHost.ExtensionLoader.Load($Config.ExtensionPaths)
+        if (-not $State) {
+            $State = $HarnessHost.NewSession($Config)
+        }
+        Initialize-HarnessConnection $HarnessHost $State $Config -ApiKey $ApiKey -Interactive $false -SaveConfig:$SaveConfig -ConfigPath $ConfigPath -Options $Options
+        $State.Config = $Config
+        if ($Path) {
+            $State.Context.Path = $Path
+        }
+        foreach ($file in $IncludeFiles) {
+            if (-not $State.Context.IncludeFiles.Contains($file)) {
+                $State.Context.IncludeFiles.Add($file)
+            }
+        }
+        if ($IncludeDiff) {
+            $State.Context.IncludeDiff = $true
+        }
+        $result = if ($Prompt -match '^/extend(?:\s|$)') {
+            $HarnessHost.Commands.Invoke($Prompt, $State, $null)
+        }
+        else {
+            $HarnessHost.Send($Prompt, $State, $OnToken, $CancellationToken)
+        }
+        $result
     }
-    if ($IncludeDiff) {
-        $State.Context.IncludeDiff = $true
+    catch {
+        Invoke-HarnessPublicError $PSCmdlet $_
     }
-    $result = $HarnessHost.Send($Prompt, $State, $OnToken, $CancellationToken)
-    $result
 }
 function Start-PwshHarness {
     <#
@@ -131,10 +213,55 @@ function Start-PwshHarness {
     Start the terminal assistant with explicit user actions.
     #>
     [CmdletBinding()]
-    param([switch]$NoTui, [string]$Provider, [string]$Model, [string]$ConfigPath, [hashtable]$Options = @{
+    param([switch]$NoTui, [string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey, [switch]$SaveConfig, [string]$ConfigPath, [hashtable]$Options = @{
         }, [string]$Resume,
         [string]$Path, [string[]]$IncludeFiles = @(), [switch]$IncludeDiff, [string]$Renderer = 'Default', [switch]$NoPersist, [object]$HarnessHost)
-    PwshHarness.Tui\Start-PwshHarness @PSBoundParameters
+    $arguments = @{} + $PSBoundParameters
+    $connectionParameters = @{}
+    foreach ($name in @('ApiKey', 'SaveConfig', 'BaseUrl', 'Provider', 'Model', 'Behavior')) {
+        if ($name -in @('BaseUrl', 'Provider', 'Model') -and $PSBoundParameters.ContainsKey($name)) {
+            $connectionParameters[$name] = $PSBoundParameters[$name]
+        }
+        $arguments.Remove($name)
+    }
+    $Options = $Options.Clone()
+    foreach ($name in @('Provider', 'Model', 'BaseUrl', 'Behavior')) {
+        if ($PSBoundParameters.ContainsKey($name)) {
+            $Options[$name] = if ($name -eq 'Behavior') {
+                $PSBoundParameters[$name].ToLowerInvariant()
+            }
+            else {
+                $PSBoundParameters[$name]
+            }
+        }
+    }
+    $ownsHost = -not $HarnessHost
+    $session = $null
+    try {
+        if ($ownsHost) {
+            $HarnessHost = New-HarnessHost -ConfigPath $ConfigPath -Options $Options
+        }
+        $config = $HarnessHost.ConfigService.Resolve($Options, $ConfigPath)
+        $HarnessHost.ExtensionLoader.Load($config.ExtensionPaths)
+        $session = $HarnessHost.NewSession($config)
+        Initialize-HarnessConnection $HarnessHost $session $config -ApiKey $ApiKey -Interactive (Test-HarnessInteractive) -SaveConfig:$SaveConfig -ConfigPath $ConfigPath -ConnectionParameters $connectionParameters -Options $Options
+        $arguments.HarnessHost = $HarnessHost
+        $arguments.Config = $config
+        $arguments.Session = $session
+        $arguments.Options = $Options
+        PwshHarness.Tui\Start-PwshHarness @arguments
+    }
+    catch {
+        Invoke-HarnessPublicError $PSCmdlet $_
+    }
+    finally {
+        if ($session) {
+            $HarnessHost.Credentials.Set($session, $null)
+        }
+        if ($ownsHost -and $HarnessHost) {
+            $HarnessHost.Dispose()
+        }
+    }
 }
 function Get-HarnessSession {
     <#
@@ -167,5 +294,16 @@ function Test-HarnessCode {
         })
     $HarnessHost.TestCode((New-HarnessCodeBlock -Code $Code -Language powershell), $config)
 }
-Export-ModuleMember -Function New-HarnessFrozen, New-HarnessHost, Invoke-PwshHarness, Start-PwshHarness, Get-HarnessSession, Test-HarnessCode, `
+$ExecutionContext.SessionState.Module.OnRemove = {
+    foreach ($reference in @($script:Hosts.Values)) {
+        $owner = $reference.Target
+        if ($owner) {
+            $owner.Dispose()
+        }
+    }
+    $script:ImplicitHosts.Clear()
+    $script:Hosts.Clear()
+}
+Set-Alias -Name pwsh-harness -Value Start-PwshHarness
+Export-ModuleMember -Alias pwsh-harness -Function Set-PwshHarnessConfig, Remove-PwshHarnessCredential, Remove-HarnessHost, New-HarnessFrozen, New-HarnessHost, Invoke-PwshHarness, Start-PwshHarness, Get-HarnessSession, Test-HarnessCode, `
     New-Harness*, Assert-Harness* -Variable HarnessApiVersion

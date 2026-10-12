@@ -8,11 +8,12 @@
 . (Join-Path $PSScriptRoot 'catalog.ps1')
 . (Join-Path $PSScriptRoot 'windows.ps1')
 . (Join-Path $PSScriptRoot 'save.ps1')
+. (Join-Path $PSScriptRoot 'behavior.ps1')
 {
     param($Harness)
     $script:Harness = $Harness
     Register-PackAmplification
-    $Harness.ContextSources.Add('Examples', ${function:Get-PackExampleContext}, 450)
+    Register-PackExamples
     $Harness.Actions.Add('verify', ${function:Invoke-PackVerification}, $true)
     $Harness.Commands.Add('verify', { param($c) $script:Harness.Actions.Invoke('verify', $c.State, $c.State.LastResult.CodeBlocks[0], '', $c.Confirm) }, 'Generate and execute guarded tests after confirmation (VerifyWithTests opt-in).')
     $Harness.QueryExpanders.Add('AdminVocabulary', ${function:Expand-PackAdminQuery})
@@ -29,11 +30,26 @@
                 $true
             } })
     $Harness.Settings.Declare('Validate', [bool], $true)
+    $Harness.Settings.Declare('Behavior', [string], 'auto', { param($v)
+            if ($v -cin @('code', 'auto', 'chat')) {
+                $true
+            }
+            else {
+                'Behavior must be code, auto, or chat.'
+            }
+        }, 'PWSH_HARNESS_BEHAVIOR')
+    $Harness.Commands.Add('behavior', ${function:Invoke-PackBehaviorCommand}, 'Show behavior or /behavior code|auto|chat for this session.')
+    $Harness.RequestMiddleware.Add('BehaviorPrompt', ${function:Add-PackBehaviorPrompt}, 50)
     $Harness.Settings.Declare('Analyzer', [bool], $true)
     $Harness.Settings.Declare('AnalyzerRules', [string[]], @())
     $Harness.Settings.Declare('AutoRepairAttempts', [int], 2, { param($v) $v -ge 0 }, 'PWSH_HARNESS_AUTO_REPAIR')
+    $Harness.Settings.Declare('VerificationTimeoutSeconds', [int], 180, { param($v) $v -gt 0 })
     $Harness.Settings.Declare('RunTimeoutSeconds', [int], 60, { param($v) $v -gt 0 })
     $prompt = Get-Content (Join-Path $PSScriptRoot '../../../prompts/system.md') -Raw
+    $script:PackBehaviorPrompts = @{ code = $prompt.Trim() }
+    foreach ($mode in @('auto', 'chat')) {
+        $script:PackBehaviorPrompts[$mode] = (Get-Content (Join-Path $PSScriptRoot "../../../prompts/$mode.md") -Raw).Trim()
+    }
     $Harness.Settings.Declare('SystemPrompt', [string], $prompt.Trim(), $null, 'PWSH_HARNESS_SYSTEM_PROMPT')
     $Harness.Settings.Declare('Fix.Eol', [bool], $true)
     $Harness.Settings.Declare('SaveEncoding', [string], 'utf8NoBOM', { param($v) $v -in @('utf8NoBOM', 'utf8BOM') })
@@ -59,10 +75,10 @@
             $target = $script:Harness.TargetProfiles.Get()
             $diagnostics = @(Test-WindowsCode $block $config $target)
             if ($config.GroundedRepair) {
-                Add-PackGroundedHint $diagnostics $block $target 
+                Add-PackGroundedHint $diagnostics $block $target
             }
             else {
-                $diagnostics 
+                $diagnostics
             }
         }, 350)
     $Harness.ResponseProcessors.Add('Extract', ${function:Invoke-HarnessExtractProcessor}, 100)

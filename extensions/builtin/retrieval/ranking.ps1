@@ -126,11 +126,51 @@ function Initialize-RetrievalSearch {
     }
     $Index.Search
 }
+function Test-RetrievalStopword {
+    param([string]$Term)
+    $Term.Length -lt 2 -or $Term -in @('a', 'an', 'the', 'and', 'or', 'of', 'to', 'in', 'on', 'at', 'for', 'from', 'with', 'without', 'by', 'as',
+        'into', 'under', 'over', 'when', 'then', 'that', 'this', 'these', 'those', 'its', 'it', 'is', 'are', 'be', 'all',
+        'get', 'set', 'add', 'new', 'remove', 'test', 'invoke', 'read', 'write', 'show', 'list', 'display', 'find', 'run',
+        'use', 'using', 'if', 'else', 'return', 'script', 'function', 'param', 'string', 'object', 'pscustomobject',
+        'cmdletbinding', 'parameter', 'shouldprocess', 'erroraction', 'stop', 'select', 'where', 'name', 'value', 'path',
+        'literalpath', 'clean', 'ps1', 'psm1', 'true', 'false', 'null', 'please', 'powershell')
+}
+function Get-RetrievalTermGroups {
+    param([string]$Query)
+    $groups = @{}
+    foreach ($word in [regex]::Matches($Query, '[\p{L}_][\p{L}\p{Nd}_./\\:-]*').Value | Select-Object -First 64) {
+        $key = Get-RetrievalStem $word.ToLowerInvariant()
+        if (Test-RetrievalStopword $key) {
+            continue
+        }
+        $terms = @(Get-RetrievalToken $word | Where-Object { -not (Test-RetrievalStopword $_) })
+        foreach ($expander in $script:Harness.QueryExpanders.List()) {
+            foreach ($extra in @($script:Harness.QueryExpanders.Invoke($expander.Name, @($word)))) {
+                if ($extra.Term -and $extra.Weight -gt 0 -and $extra.Weight -le 1) {
+                    $terms += @(Get-RetrievalToken $extra.Term | Where-Object { -not (Test-RetrievalStopword $_) })
+                }
+            }
+        }
+        if ($terms.Count) {
+            $groups[$key] = @($terms | Sort-Object -Unique)
+        }
+    }
+    $groups
+}
 function Find-RetrievalBm25 {
     param([string]$Query, [int]$Budget)
     $search = Initialize-RetrievalSearch $script:Index
     $scores = @{}; $count = $search.Records.Count
     $terms = @(Get-RetrievalToken $Query | Select-Object -Unique -First 128)
+    $groups = if ($script:Index.Corpus -eq 'examples') {
+        Get-RetrievalTermGroups $Query
+    }
+    else {
+        @{}
+    }
+    if ($script:Index.Corpus -eq 'examples') {
+        $terms = @($terms | Where-Object { -not (Test-RetrievalStopword $_) })
+    }
     $weighted = @{}
     foreach ($term in $terms) {
         $weighted[$term] = 1.0 
@@ -141,6 +181,9 @@ function Find-RetrievalBm25 {
                 continue 
             }
             foreach ($term in (Get-RetrievalToken $extra.Term)) {
+                if ($script:Index.Corpus -eq 'examples' -and (Test-RetrievalStopword $term)) {
+                    continue
+                }
                 if (-not $weighted.ContainsKey($term)) {
                     $weighted[$term] = [double]$extra.Weight 
                 }
@@ -165,7 +208,17 @@ function Find-RetrievalBm25 {
     }
     $ranked = @($scores.GetEnumerator() | Sort-Object @{ Expression = { $_.Value }; Descending = $true },
         @{ Expression = { $search.Records[$_.Key].Chunk.Id } } | Select-Object -First ([Math]::Max(20, $script:Request.Config.RagTopK)) |
-        ForEach-Object { [pscustomobject]@{ Chunk = $search.Records[$_.Key].Chunk; Score = $_.Value; Retriever = 'BM25' } })
+        ForEach-Object {
+            $id = $_.Key
+            $matched = @(foreach ($key in $groups.Keys) {
+                    foreach ($term in $groups[$key]) {
+                        if ($search.Postings.ContainsKey($term) -and $search.Postings[$term].ContainsKey($id)) {
+                            $key; break
+                        }
+                    }
+                })
+            [pscustomobject]@{ Chunk = $search.Records[$id].Chunk; Score = $_.Value; Retriever = 'BM25'; MatchedTerms = @($matched | Sort-Object) }
+        })
     Select-RetrievalDistinctSymbol $ranked $search
 }
 function Get-RetrievalQuery {

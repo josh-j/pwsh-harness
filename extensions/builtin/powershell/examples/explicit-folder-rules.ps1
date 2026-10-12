@@ -1,3 +1,5 @@
+# synopsis: Return identities with explicit directory ACL rules.
+# tags: Get-Acl inheritance permissions
 #Requires -Version 7.6
 function Get-ExplicitFolderRule {
     [CmdletBinding()]

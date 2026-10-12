@@ -1,9 +1,10 @@
+. (Join-Path $PSScriptRoot '../git-context/discovery.ps1')
 function Get-RetrievalHash {
     param([string]$Text)
     [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Text))).ToLowerInvariant()
 }
 function Invoke-RetrievalGit {
-    param([string]$Root, [string[]]$Arguments)
+    param([string]$Root, [string[]]$Arguments, $Request)
     if (-not $script:GitPath) {
         $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $git) {
@@ -25,8 +26,12 @@ function Invoke-RetrievalGit {
     try {
         $output = $process.StandardOutput.ReadToEndAsync()
         $errorOutput = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(2000)) {
-            $process.Kill($true); throw 'Repository inventory timed out.'
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        while (-not $process.WaitForExit(25)) {
+            Invoke-DiscoveryCheckpoint $Request
+            if ($watch.ElapsedMilliseconds -ge 2000) {
+                throw 'Repository inventory timed out.'
+            }
         }
         $null = $errorOutput.GetAwaiter().GetResult()
         if ($process.ExitCode -eq 0) {
@@ -34,6 +39,9 @@ function Invoke-RetrievalGit {
         }
     }
     finally {
+        if (-not $process.HasExited) {
+            $process.Kill($true)
+        }
         $process.Dispose()
     }
 }
@@ -41,15 +49,34 @@ function Test-RetrievalSafePath {
     param([string]$Path)
     # Match the context source's sensitive files and generated/vendor folders, including nested secrets.
     $Path -notmatch '(?i)(^|/)(\.git|\.aws|\.codex|\.agents|node_modules|vendor|bin|obj|\.venv|venv|dist|build|\.cache|out)(/|$)' -and
-    $Path -notmatch '(?i)(^|/)(\.env[^/]*|credentials[^/]*|id_rsa|id_ed25519)(/|$)|\.(pfx|p12|pem|key)$'
+    $Path -notmatch '(?i)(^|/)(\.env[^/]*|credentials[^/]*|\.credentials-[^/]*|id_rsa|id_ed25519)(/|$)|\.(pfx|p12|pem|key)$'
 }
 function Get-RetrievalInventory {
-    param([string]$Root, [string]$Prefix = '')
+    param([string]$Root, [string]$Prefix = '', $Request, [switch]$Explicit)
     $revision = @{}
-    $tracked = Invoke-RetrievalGit $Root @('ls-files', '-s', '--cached', '--others', '--exclude-standard', '-z')
+    Invoke-DiscoveryCheckpoint $Request
+    if (-not $Explicit) {
+        if (Get-DiscoveryRootReason $Root) {
+            return
+        }
+        if (-not (Test-DiscoveryRepositoryCandidate $Root $Request)) {
+            return
+        }
+        if (-not (Invoke-RetrievalGit $Root @('rev-parse', '--show-toplevel') $Request)) {
+            return
+        }
+        $probe = Get-DiscoveryListing $Root -Limit 5001 -Depth 2 -Request $Request
+        if ($probe.Truncated -or $probe.Entries.Count -gt 5000) {
+            return
+        }
+    }
+    $tracked = if (Test-DiscoveryRepositoryCandidate $Root $Request) {
+        Invoke-RetrievalGit $Root @('ls-files', '-s', '--cached', '--others', '--exclude-standard', '-z') $Request
+    }
     if ($null -ne $tracked) {
         $names = [Collections.Generic.List[string]]::new()
         foreach ($record in ($tracked -split "`0")) {
+            Invoke-DiscoveryCheckpoint $Request
             if ($record -match '^\d+ ([a-f0-9]+) [0-3]\t(.+)$') {
                 $revision[$Matches[2]] = $Matches[1]; $names.Add($Matches[2])
             }
@@ -59,30 +86,43 @@ function Get-RetrievalInventory {
         }
     }
     else {
+        if (-not $Explicit) {
+            return
+        }
         $names = [Collections.Generic.List[string]]::new()
         $pending = [Collections.Generic.Stack[string]]::new(); $pending.Push($Root)
+        $options = [IO.EnumerationOptions]::new()
+        $options.IgnoreInaccessible = $true; $options.AttributesToSkip = [IO.FileAttributes]::ReparsePoint
         while ($pending.Count) {
+            Invoke-DiscoveryCheckpoint $Request
             $directory = $pending.Pop()
-            foreach ($entry in Get-ChildItem -LiteralPath $directory -Force -ErrorAction SilentlyContinue) {
-                if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                    continue
+            $iterator = [IO.DirectoryInfo]::new($directory).EnumerateFileSystemInfos('*', $options).GetEnumerator()
+            try {
+                while ($iterator.MoveNext()) {
+                    Invoke-DiscoveryCheckpoint $Request
+                    $entry = $iterator.Current
+                    $relative = [IO.Path]::GetRelativePath($Root, $entry.FullName).Replace('\', '/')
+                    if (-not (Test-RetrievalSafePath $relative)) {
+                        continue
+                    }
+                    if ($entry.Attributes -band [IO.FileAttributes]::Directory) {
+                        $pending.Push($entry.FullName)
+                    }
+                    else {
+                        $names.Add($relative)
+                    }
                 }
-                $relative = [IO.Path]::GetRelativePath($Root, $entry.FullName).Replace('\', '/')
-                if (-not (Test-RetrievalSafePath $relative)) {
-                    continue
-                }
-                if ($entry.PSIsContainer) {
-                    $pending.Push($entry.FullName)
-                }
-                else {
-                    $names.Add($relative)
-                }
+            }
+            finally {
+                $iterator.Dispose()
             }
         }
     }
+
     # In filesystem fallback honor local ignore files without requiring a repository or invoking a shell.
     $ignoreFiles = @{}
     foreach ($name in ($names | Sort-Object -Unique)) {
+        Invoke-DiscoveryCheckpoint $Request
         if (-not $name -or -not (Test-RetrievalSafePath $name)) {
             continue
         }
@@ -138,13 +178,21 @@ function Get-RetrievalInventory {
         [pscustomobject]@{ Path = $Prefix + $name; FullPath = $full; Revision = $key }
     }
 }
-function New-RetrievalIndex {
-    param($Request)
+function Get-RetrievalIndexIdentity {
+    param($Request, [string]$Corpus = 'project')
+    if ($Corpus -eq 'examples') {
+        return @{ Root = '<examples>'; Key = (Get-RetrievalHash ('examples' + "`n" + ($Request.Config.ExamplePaths -join "`n"))); Directory = 'examples' }
+    }
     $root = [IO.Path]::GetFullPath($Request.State.Context.Project.Root)
-    $key = Get-RetrievalHash ($root + "`n" + ($Request.Config.RagPaths -join "`n"))
-    $directory = Join-Path $Request.Config.DataDirectory 'retrieval'
+    @{ Root = $root; Key = (Get-RetrievalHash ($root + "`n" + ($Request.Config.RagPaths -join "`n"))); Directory = 'retrieval' }
+}
+function New-RetrievalIndex {
+    param($Request, [string]$Corpus = 'project')
+    $identity = Get-RetrievalIndexIdentity $Request $Corpus
+    $root = $identity.Root; $key = $identity.Key
+    $directory = Join-Path $Request.Config.DataDirectory $identity.Directory
     $path = Join-Path $directory "$key.json"
-    $index = @{ Schema = 1; Root = $root; Files = @{}; Vectors = @{}; Path = $path; Dirty = $false; Ready = $false }
+    $index = @{ Schema = 1; Corpus = $Corpus; Root = $root; Files = @{}; Vectors = @{}; Path = $path; Dirty = $false; Ready = $false }
     if (Test-Path -LiteralPath $path) {
         try {
             $saved = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
@@ -192,27 +240,43 @@ function Save-RetrievalIndex {
     }
 }
 function Update-RetrievalIndex {
-    param($Request, [switch]$Complete)
-    $root = $Request.State.Context.Project.Root
-    $key = Get-RetrievalHash ($root + "`n" + ($Request.Config.RagPaths -join "`n"))
+    param($Request, [switch]$Complete, [string]$Corpus = 'project')
+    $identity = Get-RetrievalIndexIdentity $Request $Corpus
+    $root = $identity.Root; $key = $identity.Key
     if (-not $script:Indexes.ContainsKey($key)) {
-        $script:Indexes[$key] = New-RetrievalIndex $Request
+        $script:Indexes[$key] = New-RetrievalIndex $Request $Corpus
     }
     $index = $script:Indexes[$key]
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $inventory = @(Get-RetrievalInventory $root)
-    $extra = 0
-    foreach ($folder in $Request.Config.RagPaths) {
-        $extra++
-        if (Test-Path -LiteralPath $folder -PathType Container) {
-            $inventory += @(Get-RetrievalInventory ([IO.Path]::GetFullPath($folder)) "library$extra/")
+    $inventory = if ($Corpus -eq 'examples') {
+        @(Get-RetrievalExampleInventory $Request)
+    }
+    else {
+        if ($Request.State.Context.Project.AutoIndexAllowed) {
+            $explicitRoot = @($Request.Config.RagPaths | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd('/', '\') -eq $root.TrimEnd('/', '\') }).Count -gt 0
+            Get-RetrievalInventory $root -Request $Request -Explicit:$explicitRoot
+        }
+        $extra = 0
+        foreach ($folder in $Request.Config.RagPaths) {
+            $extra++
+            if (Test-Path -LiteralPath $folder -PathType Container) {
+                $fullFolder = [IO.Path]::GetFullPath($folder)
+                if ($fullFolder.TrimEnd('/', '\') -eq $root.TrimEnd('/', '\')) {
+                    if (-not $Request.State.Context.Project.AutoIndexAllowed) {
+                        Get-RetrievalInventory $fullFolder -Request $Request -Explicit
+                    }
+                }
+                else {
+                    Get-RetrievalInventory $fullFolder "library$extra/" -Request $Request -Explicit
+                }
+            }
         }
     }
     $present = @{}; $pending = 0
     $cacheRoot = [IO.Path]::GetFullPath($Request.Config.DataDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     foreach ($file in $inventory) {
-        $Request.CancellationToken.ThrowIfCancellationRequested()
-        if ($file.FullPath.StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        Invoke-DiscoveryCheckpoint $Request
+        if ($file.FullPath -and $file.FullPath.StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) {
             continue
         }
         $present[$file.Path] = $true
@@ -222,19 +286,24 @@ function Update-RetrievalIndex {
         if (-not $Complete -and $watch.ElapsedMilliseconds -gt 650) {
             $pending++; continue
         }
-        $bytes = [IO.File]::ReadAllBytes($file.FullPath)
-        if ($bytes -contains 0) {
-            $index.Files.Remove($file.Path)
-            $index.Search = $null; $index.Dirty = $true
-            continue
+        if ($file.PSObject.Properties['Example']) {
+            $text = $file.Example.Text
         }
-        try {
-            $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
-        }
-        catch {
-            $index.Files.Remove($file.Path)
-            $index.Search = $null; $index.Dirty = $true
-            continue
+        else {
+            $bytes = [IO.File]::ReadAllBytes($file.FullPath)
+            if ($bytes -contains 0) {
+                $index.Files.Remove($file.Path)
+                $index.Search = $null; $index.Dirty = $true
+                continue
+            }
+            try {
+                $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+            }
+            catch {
+                $index.Files.Remove($file.Path)
+                $index.Search = $null; $index.Dirty = $true
+                continue
+            }
         }
         $suffix = [IO.Path]::GetExtension($file.Path).ToLowerInvariant()
         if (-not $script:Harness.Chunkers.Contains($suffix)) {
@@ -244,6 +313,18 @@ function Update-RetrievalIndex {
         $valid = [Collections.Generic.List[object]]::new()
         foreach ($chunk in $chunks) {
             Assert-HarnessChunk $chunk
+            if ($Corpus -eq 'examples') {
+                if ($chunk.Fields.MetadataOnly) {
+                    continue
+                }
+                $metadata = Get-RetrievalExampleMetadata $text
+                if ($file.PSObject.Properties['Example']) {
+                    $metadata.Synopsis += ' ' + $file.Example.Metadata.Synopsis
+                    $metadata.Tags += ' ' + ($file.Example.Metadata.Tags -join ' ')
+                }
+                $chunk.Fields.Synopsis += ' ' + $metadata.Synopsis + ' ' + $metadata.Tags
+                $chunk.Fields.ExampleId = $file.ExampleId
+            }
             $valid.Add($chunk)
         }
         $index.Search = $null
@@ -268,10 +349,13 @@ function Update-RetrievalIndex {
         else {
             'building'
         }
+        Message           = ''
         BuildMilliseconds = $watch.Elapsed.TotalMilliseconds
     }
-    $Request.State.Context | Add-Member NoteProperty Index $state -Force
-    $script:Harness.Events.Publish('ext.retrieval.IndexUpdated', $state)
+    if ($Corpus -eq 'project') {
+        $Request.State.Context | Add-Member NoteProperty Index $state -Force
+        $script:Harness.Events.Publish('ext.retrieval.IndexUpdated', $state)
+    }
     Save-RetrievalIndex $index
     $index
 }

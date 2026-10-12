@@ -29,7 +29,7 @@ function Find-RetrievalEmbedding {
         $missing = @($chunks | Where-Object {
                 -not $script:Index.Vectors.ContainsKey((Get-RetrievalHash ($request.Config.EmbeddingModel + "`n" + $_.Text)))
             })
-        $services = [pscustomobject]@{ Config = $request.Config; Pump = $request.Pump; CancellationToken = $request.CancellationToken }
+        $services = [pscustomobject]@{ State = $request.State; Config = $request.Config; Pump = $request.Pump; CancellationToken = $request.CancellationToken }
         # Batch pending documents; query embeddings are transient and never persisted.
         for ($start = 0; $start -lt $missing.Count; $start += 32) {
             $batch = @($missing[$start..([Math]::Min($start + 31, $missing.Count - 1))])

@@ -41,12 +41,26 @@ function New-HarnessRequestBody {
     }
     $body | ConvertTo-Json -Depth 30 -Compress
 }
+function Protect-HarnessProviderText {
+    param([string]$Text, [string[]]$Redact)
+    foreach ($value in $Redact) {
+        if ($value) {
+            $Text = $Text.Replace($value, '[REDACTED]')
+        }
+    }
+    $Text
+}
+function Get-HarnessCredentialPatterns {
+    param([string]$Value)
+    @($Value, [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value)),
+        [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Value)))
+}
 function ConvertFrom-HarnessSseEvent {
-    param([string[]]$Data)
+    param([string[]]$Data, [string[]]$Redact = @())
     if (-not $Data -or $Data.Count -eq 0) {
         return
     }
-    $payload = $Data -join "`n"
+    $payload = Protect-HarnessProviderText ($Data -join "`n") $Redact
     if ($payload.Trim() -eq '[DONE]') {
         return [pscustomobject]@{
             Done         = $true
@@ -69,6 +83,7 @@ function ConvertFrom-HarnessSseEvent {
         else {
             [string]$json.error
         }
+        $message = Protect-HarnessProviderText ([string]$message) $Redact
         throw "Provider error: $message"
     }
     $text = ''
@@ -183,7 +198,12 @@ function Invoke-HarnessHttpProvider {
     if ($uri.Scheme -notin @('http', 'https')) {
         throw 'BaseUrl must use HTTP or HTTPS.'
     }
-    $key = Get-HarnessApiKey $config
+    $key = Get-HarnessApiKey $config -SecureKey $(if (Get-Variable Credentials -Scope Script -ErrorAction Ignore) {
+            $script:Credentials.Get($Context.State)
+        }) -SavedKeyReader { if (Get-Variable Credentials -Scope Script -ErrorAction Ignore) {
+            $script:Credentials.GetSaved($Context.State, $config)
+        } }
+    $redact = Get-HarnessCredentialPatterns $key
     $client = [Net.Http.HttpClient]::new()
     $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
     $linked = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($CancellationToken)
@@ -196,7 +216,11 @@ function Invoke-HarnessHttpProvider {
     try {
         for ($attempt = 0; ; $attempt++) {
             $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, $uri)
-            $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $key)
+            $authorization = $null
+            if (-not [Net.Http.Headers.AuthenticationHeaderValue]::TryParse("Bearer $key", [ref]$authorization)) {
+                throw 'API key is not a valid HTTP Bearer credential.'
+            }
+            $request.Headers.Authorization = $authorization
             $request.Headers.Accept.ParseAdd('text/event-stream')
             $request.Content = [Net.Http.StringContent]::new((New-HarnessRequestBody $Context -DisableReasoning:$reasoningDisabled), [Text.Encoding]::UTF8, 'application/json')
             $response = Wait-HarnessTask ($client.SendAsync($request,
@@ -214,6 +238,7 @@ function Invoke-HarnessHttpProvider {
             }
             if (-not $response.IsSuccessStatusCode) {
                 $body = Wait-HarnessTask ($response.Content.ReadAsStringAsync($token)) $token $Context
+                $body = Protect-HarnessProviderText $body $redact
                 $message = $body
                 try {
                     $errorBody = $body | ConvertFrom-Json -AsHashtable
@@ -248,7 +273,7 @@ function Invoke-HarnessHttpProvider {
                     continue
                 }
                 # Replace the secret even when a faulty gateway reflects it.
-                $message = ([string]$message).Replace($key, '[REDACTED]')
+                $message = Protect-HarnessProviderText ([string]$message) $redact
                 throw "HTTP $statusCode`: $message"
             }
             break
@@ -261,7 +286,7 @@ function Invoke-HarnessHttpProvider {
         }
         if ($mediaType -eq 'application/json') {
             $body = Wait-HarnessTask ($response.Content.ReadAsStringAsync($token)) $token $Context
-            $null = ConvertFrom-HarnessSseEvent @($body)
+            $null = ConvertFrom-HarnessSseEvent @($body) -Redact $redact
             throw 'Expected an SSE stream; gateway returned JSON.'
         }
         $stream = Wait-HarnessTask ($response.Content.ReadAsStreamAsync($token)) $token $Context
@@ -276,7 +301,7 @@ function Invoke-HarnessHttpProvider {
             $line = Wait-HarnessTask ($reader.ReadLineAsync($token).AsTask()) $token $Context
             if ($null -eq $line -or $line -eq '') {
                 if ($data.Count) {
-                    $eventName = ConvertFrom-HarnessSseEvent $data.ToArray()
+                    $eventName = ConvertFrom-HarnessSseEvent $data.ToArray() -Redact $redact
                     $data.Clear()
                     if ($eventName.Usage) {
                         $usage = $eventName.Usage
@@ -319,7 +344,7 @@ function Invoke-HarnessHttpProvider {
             }
             throw [TimeoutException]::new("Provider timed out after $($config.TimeoutSeconds) seconds.")
         }
-        $safeMessage = $_.Exception.Message.Replace($key, '[REDACTED]')
+        $safeMessage = Protect-HarnessProviderText $_.Exception.Message $redact
         throw [InvalidOperationException]::new($safeMessage)
     }
     finally {
@@ -338,17 +363,47 @@ function Invoke-HarnessHttpProvider {
         $linked.Dispose()
         $client.Dispose()
         $key = $null
+        $redact = $null
     }
 }
 
 function Get-HarnessApiKey {
-    param([hashtable]$Config)
-    $key = [Environment]::GetEnvironmentVariable($Config.ApiKeyEnvironment)
-    if (-not $key -and $Config.SecretName -and (Get-Command Get-Secret -ErrorAction Ignore)) {
-        $key = Get-Secret -Name $Config.SecretName -AsPlainText -ErrorAction Stop
+    param($Config, [Security.SecureString]$SecureKey, [scriptblock]$SavedKeyReader)
+    $secretFailed = $false
+    if (-not $SecureKey -or $SecureKey.Length -eq 0) {
+        $key = [Environment]::GetEnvironmentVariable($Config.ApiKeyEnvironment)
+        if (-not $key -and $Config.SecretName -and (Get-Command Get-Secret -ErrorAction Ignore)) {
+            try {
+                $secret = Get-Secret -Name $Config.SecretName -ErrorAction Stop
+                if ($secret -is [Security.SecureString]) {
+                    $SecureKey = $secret
+                }
+                elseif ($secret -is [string]) {
+                    $key = $secret
+                }
+            }
+            catch {
+                $secretFailed = $true
+            }
+        }
+        if (-not $key -and (-not $SecureKey -or -not $SecureKey.Length) -and $SavedKeyReader) {
+            $SecureKey = & $SavedKeyReader
+        }
+    }
+    if ($SecureKey -and $SecureKey.Length -gt 0) {
+        $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureKey)
+        try {
+            $key = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+        }
+        finally {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+        }
     }
     if (-not $key) {
-        throw "Set environment variable '$($Config.ApiKeyEnvironment)' or configure SecretName with SecretManagement."
+        if ($secretFailed) {
+            throw 'Could not resolve the configured SecretName through SecretManagement and no saved credential matched.'
+        }
+        throw "Supply -ApiKey (SecureString), environment variable '$($Config.ApiKeyEnvironment)', SecretName with SecretManagement, or save a credential with Set-PwshHarnessConfig."
     }
     [string]$key
 }

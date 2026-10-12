@@ -1,3 +1,5 @@
+# synopsis: Restart a stopped service with ShouldProcess confirmation.
+# tags: Restart-Service stopped status
 #Requires -Version 7.6
 function Restart-StoppedService {
     [CmdletBinding(SupportsShouldProcess)]

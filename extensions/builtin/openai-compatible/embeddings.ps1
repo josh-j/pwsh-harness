@@ -14,8 +14,23 @@ function Invoke-HarnessEmbedding {
     $linked.CancelAfter([TimeSpan]::FromSeconds($config.TimeoutSeconds))
     $message = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, $uri)
     try {
-        $key = Get-HarnessApiKey $config
-        $message.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $key)
+        $key = Get-HarnessApiKey $config -SecureKey $(if (Get-Variable Credentials -Scope Script -ErrorAction Ignore) {
+                $script:Credentials.Get($(if ($Services.PSObject.Properties['State']) {
+                            $Services.State
+                        }))
+            }) -SavedKeyReader {
+            if (Get-Variable Credentials -Scope Script -ErrorAction Ignore) {
+                $script:Credentials.GetSaved($(if ($Services.PSObject.Properties['State']) {
+                            $Services.State
+                        }), $config)
+            }
+        }
+        $redact = Get-HarnessCredentialPatterns $key
+        $authorization = $null
+        if (-not [Net.Http.Headers.AuthenticationHeaderValue]::TryParse("Bearer $key", [ref]$authorization)) {
+            throw 'API key is not a valid HTTP Bearer credential.'
+        }
+        $message.Headers.Authorization = $authorization
         $body = @{ model = $config.EmbeddingModel; input = @($Texts); encoding_format = 'float' } | ConvertTo-Json -Compress
         $message.Content = [Net.Http.StringContent]::new($body, [Text.Encoding]::UTF8, 'application/json')
         $pending = $client.SendAsync($message, $linked.Token)
@@ -28,7 +43,7 @@ function Invoke-HarnessEmbedding {
         $response = $pending.GetAwaiter().GetResult()
         try {
             $text = $response.Content.ReadAsStringAsync($linked.Token).GetAwaiter().GetResult()
-            $data = $text | ConvertFrom-Json -AsHashtable
+            $data = (Protect-HarnessProviderText $text $redact) | ConvertFrom-Json -AsHashtable
             if (-not $response.IsSuccessStatusCode -or $data.ContainsKey('error')) {
                 throw "Embedding request failed ($([int]$response.StatusCode)): $($data.error.message)"
             }
@@ -52,6 +67,15 @@ function Invoke-HarnessEmbedding {
         finally {
             $response.Dispose()
         }
+    }
+    catch {
+        $safeMessage = if (Get-Variable redact -ErrorAction Ignore) {
+            Protect-HarnessProviderText $_.Exception.Message $redact
+        }
+        else {
+            'Embedding authentication failed.'
+        }
+        throw [InvalidOperationException]::new($safeMessage)
     }
     finally {
         $message.Dispose(); $client.Dispose(); $linked.Dispose(); $key = $null

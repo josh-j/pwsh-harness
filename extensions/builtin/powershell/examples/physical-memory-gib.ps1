@@ -1,3 +1,5 @@
+# synopsis: Express installed physical memory in GiB.
+# tags: Win32_ComputerSystem RAM memory
 #Requires -Version 7.6
 function Get-SystemMemoryGiB {
     [CmdletBinding()]

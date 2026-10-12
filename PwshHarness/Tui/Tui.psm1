@@ -1,5 +1,6 @@
 #Requires -Version 7.6
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot '../PowerShellFences.ps1')
 function ConvertTo-HarnessSafeText {
     param([AllowEmptyString()][string]$Text)
     # Model output is untrusted terminal data: remove all control chars except LF/tab.

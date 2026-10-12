@@ -1,3 +1,5 @@
+# synopsis: Collect operating system versions from remote computers.
+# tags: CIM ComputerName operating-system Version
 #Requires -Version 7.6
 function Get-RemoteOsVersion {
     [CmdletBinding()]

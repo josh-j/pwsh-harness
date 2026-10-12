@@ -12,8 +12,11 @@
     PowerShellVersion = '7.6'
     FunctionsToExport = @(
         'New-HarnessHost',
+        'Remove-HarnessHost',
         'Invoke-PwshHarness',
         'Start-PwshHarness',
+        'Set-PwshHarnessConfig',
+        'Remove-PwshHarnessCredential',
         'Get-HarnessSession',
         'Test-HarnessCode',
         'New-HarnessMessage',
@@ -44,7 +47,7 @@
     )
     VariablesToExport = @('HarnessApiVersion')
     CmdletsToExport   = @()
-    AliasesToExport   = @()
+    AliasesToExport   = @('pwsh-harness')
     PrivateData       = @{
         PSData = @{
             ProjectUri = 'https://github.com/josh-j/pwsh-harness'

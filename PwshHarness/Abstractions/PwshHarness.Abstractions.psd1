@@ -3,6 +3,7 @@
     ModuleVersion     = '1.0.0'
     PowerShellVersion = '7.6'
     FunctionsToExport = @(
+        'Get-HarnessFencedBlock'
         'Assert-HarnessContract'
         'New-HarnessMessage'
         'Assert-HarnessMessage'

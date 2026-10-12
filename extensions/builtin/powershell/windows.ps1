@@ -72,9 +72,15 @@ function Invoke-WindowsAliasExpansion {
     $edits = [Collections.Generic.List[object]]::new()
     $diagnostics = [Collections.Generic.List[object]]::new()
     $commands = @($syntax.Ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] }, $true))
+    $localFunctions = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($definition in $syntax.Ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+        $null = $localFunctions.Add($definition.Name)
+        $null = $localFunctions.Add(($definition.Name -replace '^(global|script|local|private):', ''))
+    }
     foreach ($command in $commands) {
         $name = $command.GetCommandName()
-        if (-not $name) {
+        # Preserve script-defined function calls; host lookup can trigger unrelated module discovery.
+        if (-not $name -or $localFunctions.Contains($name)) {
             continue
         }
         $resolved = $Target.CommandCatalog.Resolve($name)
