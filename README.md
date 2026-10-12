@@ -8,10 +8,12 @@ PowerShell 7.6+. Git and PSScriptAnalyzer are optional; generated-test verificat
 
 ## Install
 
-From a checkout or extracted release package:
+Install from a checkout or extract the ready-made `PwshHarness.bundle.ps1`. `package.ps1` bundles all source files, excluding Git metadata, out/, prior bundles, logs, .env files and saved configuration/credentials. Run a bundle to restore its files with hash checks; restored scripts never run automatically. Use `-Force` to overwrite existing files.
 
 ```powershell
 pwsh -NoProfile -File .\install.ps1
+pwsh -NoProfile -File .\package.ps1 -OutputPath .\out\PwshHarness.bundle.ps1
+pwsh -NoProfile -File .\PwshHarness.bundle.ps1 -Destination .\out\restored
 ```
 
 ## Configure
@@ -22,8 +24,7 @@ pwsh-harness -BaseUrl https://gw.example -Model gemini-3.8-flash
 
 Hidden input prompts for the key. For one-time setup, use `Set-PwshHarnessConfig -BaseUrl https://gw.example -Model gemini-3.8-flash`. Automation also accepts `-ApiKey` (SecureString), `OPENAI_API_KEY`, or SecretManagement `SecretName`. Precedence: defaults < JSON < environment < parameters. `-SaveConfig` saves Provider/Model/BaseUrl and explicitly supplied declared Options; a key from `-ApiKey` or the prompt is saved separately in `credentials.json`, bound to the gateway origin and provider. Windows uses DPAPI CurrentUser and an owner-only ACL; Linux/macOS use a **plaintext file protected by 0600 permissions**, with no encryption. Use `Remove-PwshHarnessCredential` or `-All` to remove saved keys.
 
-The gateway must support `/v1/chat/completions` with SSE streaming. Keep API keys out of config.json and session files. Select the gateway's model id with `-Model`.
-Reasoning-effort support is gateway-dependent; embeddings are off by default. Capture the Windows command catalog once:
+The gateway must support `/v1/chat/completions` with SSE streaming. Keep API keys out of config.json and session files. Select the model id with `-Model`; reasoning-effort support is gateway-dependent. Embeddings are off by default. Capture the Windows command catalog once:
 
 ```powershell
 .\tools\Export-HarnessCommandCatalog.ps1
@@ -33,7 +34,6 @@ Reasoning-effort support is gateway-dependent; embeddings are off by default. Ca
 
 ```powershell
 Start-PwshHarness
-Start-PwshHarness -NoTui
 Invoke-PwshHarness -Provider Mock -Prompt 'Write a greeting'
 Invoke-PwshHarness -Prompt 'Write a function to report disk space' -PassThru
 ```
