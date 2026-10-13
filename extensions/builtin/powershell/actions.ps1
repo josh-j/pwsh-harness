@@ -223,7 +223,7 @@ function Invoke-HarnessApply {
     if (-not $Confirmation) {
         throw 'An explicit confirmation callback is required.'
     }
-    $preview = "Apply full-file replacement to $full?`n--- Existing file ---`n$existing`n+++ Proposed file +++`n$code`nType APPLY to confirm."
+    $preview = "Apply full-file replacement to ${full}?`n--- Existing file ---`n$existing`n+++ Proposed file +++`n$code`nType APPLY to confirm."
     $answer = & $Confirmation $preview 'APPLY'
     if ($answer -isnot [string] -or $answer -cne 'APPLY') {
         return 'Apply cancelled.'

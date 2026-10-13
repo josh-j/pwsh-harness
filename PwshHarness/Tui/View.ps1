@@ -70,6 +70,7 @@ function New-HarnessViewState {
             Diagnostics   =@()
             Trimmed       =0
         }
+        RenderCache  = [pscustomobject]@{ Width = 0; Ascii = $false; Start = 0; Records = @() }
         Quit         =$false
         LastControlC =-2000L
         Renderer     ='Default'
@@ -277,25 +278,61 @@ function Get-HarnessRenderModel {
             Text =$State.SessionView.StreamingText
         }
     }
+    $result = $State.SessionView.LastResult
+    $hasInlineCode = $false
+    $cache = $State.RenderCache
+    $cacheStart = [Math]::Max(0, $records.Count - 64)
+    $cachedRecords = [Collections.Generic.List[object]]::new()
+    $cachedRowCount = 0
+    $recordIndex = -1
     foreach ($record in $records) {
+        $recordIndex++
         $all.Add((New-HarnessFrameRow "[$($record.Role)]" -Color Cyan))
-        $fences = @(Get-HarnessPowerShellFencedBlock $record.Text)
-        $fenceIndex = 0
-        $lineNumber = 0
-        foreach ($line in [regex]::Split($record.Text, '\r\n|\n|\r')) {
-            $lineNumber++
-            while ($fenceIndex -lt $fences.Count -and $lineNumber -gt $fences[$fenceIndex].EndLine) {
-                $fenceIndex++
+        $blocks = @()
+        if ($record.Role -eq 'assistant' -and -not $State.SessionView.Busy -and $result -and
+            (($result -is [Collections.IDictionary] -and $result.ContainsKey('Text')) -or $result.PSObject.Properties['Text']) -and $record.Text -ceq $result.Text) {
+            $blocks = @($result.CodeBlocks)
+        }
+        $blocksText = ($blocks | ForEach-Object { $_.Code }) -join "`0"
+        $cacheIndex = $recordIndex - $cache.Start
+        $cached = if ($cacheIndex -ge 0 -and $cacheIndex -lt $cache.Records.Count) {
+            $cache.Records[$cacheIndex]
+        }
+        else {
+            $null
+        }
+        $recordRows = if ($cache.Width -eq $Width -and $cache.Ascii -eq $State.StatusBar.Ascii -and $cached -and
+            $cached.Role -ceq $record.Role -and $cached.Text -ceq $record.Text -and $cached.BlocksText -ceq $blocksText) {
+            $cached.Rows
+        }
+        elseif ($record.Role -eq 'assistant') {
+            @(Get-HarnessMarkdownRows $record.Text $Width $State.StatusBar.Ascii $blocks)
+        }
+        else {
+            @(foreach ($line in [regex]::Split($record.Text, '\r\n|\n|\r')) {
+                    foreach ($part in @(Split-HarnessDisplayLine (ConvertTo-HarnessSafeText $line) $Width)) {
+                        New-HarnessFrameRow $part
+                    }
+                })
+        }
+        $recordRows = @($recordRows)
+        if ($blocks.Count) {
+            $hasInlineCode = @($recordRows | Where-Object { $_.Text -match '^--- (powershell|pwsh|ps1) #\d+ ---$' }).Count -gt 0
+        }
+        foreach ($row in $recordRows) {
+            $all.Add($row)
+        }
+        if ($recordIndex -ge $cacheStart) {
+            # Keep bounded frontend-only data; the pure renderer returns the next cache.
+            $entry = $null
+            if ($cachedRowCount + $recordRows.Count -le 8192) {
+                $entry = [pscustomobject]@{ Role = $record.Role; Text = $record.Text; BlocksText = $blocksText; Rows = $recordRows }
+                $cachedRowCount += $recordRows.Count
             }
-            $inCode = $fenceIndex -lt $fences.Count -and $lineNumber -ge $fences[$fenceIndex].StartLine
-            $line = ConvertTo-HarnessSafeText $line
-            foreach ($part in @(Split-HarnessDisplayLine $line $Width)) {
-                $all.Add((New-HarnessFrameRow $part $inCode))
-            }
+            $cachedRecords.Add($entry)
         }
     }
-    $result = $State.SessionView.LastResult
-    if ($result -and $result.CodeBlocks.Count) {
+    if (-not $State.SessionView.Busy -and $result -and $result.CodeBlocks.Count -and (-not $hasInlineCode -or $State.Panels.ShowDiff -or $State.Panels.CodeLine -gt 1)) {
         $heading = if ($State.StatusBar.Ascii) {
             '--- Fixed code ---'
         }
@@ -334,7 +371,10 @@ function Get-HarnessRenderModel {
     if ($State.Panels.ShowDiagnostics -and $State.SessionView.Diagnostics.Count) {
         $all.Add((New-HarnessFrameRow '--- Diagnostics (F8 next, F9 jump) ---' -Color Yellow))
         $index = 0
-        foreach ($diagnostic in $State.SessionView.Diagnostics) {
+        $diagnosticStart = [Math]::Max(0, [Math]::Min($State.Panels.SelectedDiagnostic - 1, $State.SessionView.Diagnostics.Count - 4))
+        $index = $diagnosticStart
+        $displayDiagnostics = @($State.SessionView.Diagnostics | Select-Object -Skip $diagnosticStart -First 4)
+        foreach ($diagnostic in $displayDiagnostics) {
             $mark = if ($index -eq $State.Panels.SelectedDiagnostic) {
                 '>'
             }
@@ -356,6 +396,12 @@ function Get-HarnessRenderModel {
                             else {
                                 'Yellow'
                             })))
+            }
+        }
+        if ($State.SessionView.Diagnostics.Count -gt $displayDiagnostics.Count) {
+            $remaining = $State.SessionView.Diagnostics.Count - $displayDiagnostics.Count
+            foreach ($part in @(Split-HarnessDisplayLine "$remaining more diagnostics | F8 next | F7 hide" $Width)) {
+                $all.Add((New-HarnessFrameRow $part -Color BrightBlack))
             }
         }
     }
@@ -383,7 +429,7 @@ function Get-HarnessRenderModel {
     else {
         ''
     }
-    $status = "$spin $($bar.Profile)/$($bar.Model) | behavior:$($bar.Behavior) | $($bar.Target) | $($bar.Repo)$indexText$usage | est $($bar.Tokens)/$($bar.Budget) | $($bar.Validation) | $($bar.Text)"
+    $status = "$spin $($bar.Model) | $($bar.Text) | $($bar.Repo) | $($bar.Validation)$usage | est $($bar.Tokens)/$($bar.Budget) | behavior:$($bar.Behavior) | $($bar.Target)$indexText"
     $status = ConvertTo-HarnessSafeText $status
     $statusRows = @(Split-HarnessStatus $status $Width | Select-Object -First 3)
     $inputRows = @(Split-HarnessEditorLines $State.Editor.Text ($Width - 2))
@@ -420,7 +466,10 @@ function Get-HarnessRenderModel {
     while ($rows.Count -lt $Height - 1) {
         $rows.Add((New-HarnessFrameRow '> '))
     }
-    $help = if ($scroll) {
+    $help = if ($State.SessionView.Busy) {
+        'Ctrl+C cancel | PgUp/PgDn scroll'
+    }
+    elseif ($scroll) {
         'PgUp/PgDn scroll | Ctrl+Home top | Ctrl+End latest | Enter send'
     }
     elseif ($result -and $result.CodeBlocks.Count) {
@@ -444,6 +493,7 @@ function Get-HarnessRenderModel {
         InputHeight  =$inputHeight
         MaxScroll    =$maxScroll
         ScrollOffset =$scroll
+        RenderCache  = [pscustomobject]@{ Width = $Width; Ascii = $State.StatusBar.Ascii; Start = $cacheStart; Records = $cachedRecords.ToArray() }
         StatusRows   = $statusRows
         Status       =$status
         Help         =$help

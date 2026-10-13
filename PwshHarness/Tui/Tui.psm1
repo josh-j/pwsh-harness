@@ -70,6 +70,7 @@ function Get-HarnessHighlightedLine {
 }
 
 . (Join-Path $PSScriptRoot 'View.ps1')
+. (Join-Path $PSScriptRoot 'Markdown.ps1')
 . (Join-Path $PSScriptRoot 'Terminal.ps1')
 . (Join-Path $PSScriptRoot 'Controller.ps1')
 Export-ModuleMember -Function Start-PwshHarness, New-HarnessViewState, Get-HarnessRenderModel, New-HarnessFakeTerminal

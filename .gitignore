@@ -1,4 +1,5 @@
 out/
+state/
 *.log
 .env
 .env.*

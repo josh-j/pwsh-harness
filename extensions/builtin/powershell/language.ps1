@@ -60,7 +60,7 @@ function Test-PackCode {
                 }
                 break
             }
-            '^Format-' {
+            '^(Format-Volume|Format-Disk)$' {
                 $risk = 'Formatting command: review target carefully (Format-Volume destroys data).'
                 break
             }

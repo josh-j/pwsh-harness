@@ -76,10 +76,11 @@ function Get-HarnessActiveRenderModel {
         }
         if ($View.Renderer -eq 'Default' -and $frame.PSObject.Properties['MaxScroll']) {
             # Keep the same output in view when new rows arrive while reading above the bottom.
-            if ($View.Viewport.ScrollOffset -gt 0 -and $View.Viewport.Width -eq $frame.Width -and $frame.MaxScroll -gt $View.Viewport.MaxScroll) {
+            if ($View.Viewport.ScrollOffset -gt 0 -and $View.Viewport.Width -eq $frame.Width -and $frame.MaxScroll -ne $View.Viewport.MaxScroll) {
                 $View.Viewport.ScrollOffset += $frame.MaxScroll - $View.Viewport.MaxScroll
                 $frame = Get-HarnessRenderModel $View $Width $Height
             }
+            $View.RenderCache = $frame.RenderCache
             $View.Viewport.MaxScroll = $frame.MaxScroll
             $View.Viewport.PaneHeight = $frame.PaneHeight
             $View.Viewport.Width = $frame.Width
@@ -164,8 +165,10 @@ function Invoke-HarnessFrontendInput {
             }
             return
         }
+        $recordsBefore = $HarnessHost.GetConversationSnapshot($Session).Transcript.Count
         $commandCancellation = [Threading.CancellationTokenSource]::new()
         $View.SessionView.Busy = $true
+        $View.StatusBar.Text = 'Running command'
         try {
             $output = $HarnessHost.Commands.Invoke($Text, $Session, $confirm, { if ($Pump) {
                         & $Pump $commandCancellation
@@ -173,6 +176,12 @@ function Invoke-HarnessFrontendInput {
         }
         finally {
             $View.SessionView.Busy = $false; $commandCancellation.Dispose()
+            $View.StatusBar.Text = if ($View.StatusBar.ExtensionNotice) {
+                $View.StatusBar.ExtensionNotice
+            }
+            else {
+                'Ready'
+            }
         }
         if ($output -and $output.PSObject.Properties['Action'] -and $output.Action -eq 'Send') {
             $Text = $output.Prompt
@@ -180,7 +189,10 @@ function Invoke-HarnessFrontendInput {
         else {
             if ($output) {
                 $message = Format-HarnessActionOutput $output
-                $HarnessHost.AddTranscript($Session, 'system', $message, $null)
+                $snapshot = $HarnessHost.GetConversationSnapshot($Session)
+                if ($snapshot.Transcript.Count -le $recordsBefore -or $snapshot.Transcript[-1].Text -cne $message) {
+                    $HarnessHost.AddTranscript($Session, 'system', $message, $null)
+                }
                 if ($LineMode) {
                     $Terminal.WriteText((& $safeText ($message + "`n")))
                 }
@@ -191,6 +203,7 @@ function Invoke-HarnessFrontendInput {
     }
     $cancellation = [Threading.CancellationTokenSource]::new()
     $View.SessionView.Busy = $true
+    $View.StatusBar.Text = 'Preparing request'
     $stream = { param($fragment, $ignored)
         if ($LineMode) {
             $Terminal.WriteText((& $safeText $fragment))
@@ -213,7 +226,12 @@ function Invoke-HarnessFrontendInput {
             $_.Exception.Message
         }
         $HarnessHost.AddTranscript($Session, 'system', $message, $null)
-        $View.StatusBar.Text = $message
+        $View.StatusBar.Text = if ($cancellation.IsCancellationRequested) {
+            'Request cancelled'
+        }
+        else {
+            'Failed; see output'
+        }
         if ($LineMode) {
             $Terminal.WriteText((& $safeText ($message + "`n")))
         }

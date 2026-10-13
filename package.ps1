@@ -32,7 +32,7 @@ $files = [Collections.Generic.List[object]]::new()
 $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 while ($directories.Count) {
     foreach ($entry in Get-ChildItem -LiteralPath $directories.Dequeue() -Force | Sort-Object Name) {
-        if ($entry.Name -in @('.git', '.hg', '.svn', 'out') -or $entry.FullName -eq $output -or
+        if ($entry.Name -in @('.git', '.hg', '.svn', 'out', 'state') -or $entry.FullName -eq $output -or
             $entry.Name -like '*.bundle.ps1' -or $entry.Name -like '*.log' -or $entry.Name -like '.env*' -or
             $entry.Name -in @('credentials.json', 'config.json')) {
             continue

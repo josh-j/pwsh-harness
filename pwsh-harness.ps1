@@ -2,7 +2,7 @@
 # PwshHarness portable launcher.
 <#
 .SYNOPSIS
-Launch or configure a portable installation with state beside the launcher.
+Launch or configure a portable checkout or unpacked bundle with state beside the launcher.
 #>
 [CmdletBinding()]
 param(
@@ -22,16 +22,21 @@ param(
     [hashtable]$Options = @{}
 )
 $ErrorActionPreference = 'Stop'
-$moduleRoot = Join-Path $PSScriptRoot 'modules/PwshHarness'
-$versions = @(Get-ChildItem -LiteralPath $moduleRoot -Directory -ErrorAction Stop | Where-Object {
-        $parsed = $null
-        [version]::TryParse($_.Name, [ref]$parsed) -and
-        (Test-Path -LiteralPath (Join-Path $_.FullName 'PwshHarness.psd1'))
-    } | Sort-Object { [version]$_.Name } -Descending)
-if (-not $versions.Count) {
-    throw 'Portable module not found. Run install.ps1 -Portable again.'
+$manifestPath = Join-Path $PSScriptRoot 'PwshHarness/PwshHarness.psd1'
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    # Accept older portable installs while checkouts and new bundles use the same layout.
+    $moduleRoot = Join-Path $PSScriptRoot 'modules/PwshHarness'
+    $versions = @(Get-ChildItem -LiteralPath $moduleRoot -Directory -ErrorAction Ignore | Where-Object {
+            $parsed = $null
+            [version]::TryParse($_.Name, [ref]$parsed) -and
+            (Test-Path -LiteralPath (Join-Path $_.FullName 'PwshHarness.psd1'))
+        } | Sort-Object { [version]$_.Name } -Descending)
+    if (-not $versions.Count) {
+        throw 'Module not found beside the launcher. Clone the complete repository or unpack the complete bundle.'
+    }
+    $manifestPath = Join-Path $versions[0].FullName 'PwshHarness.psd1'
 }
-Import-Module (Join-Path $versions[0].FullName 'PwshHarness.psd1') -Force
+Import-Module -Name $manifestPath -Force
 $stateRoot = Join-Path $PSScriptRoot state
 $parameters = @{}
 foreach ($name in @('Provider', 'Model', 'BaseUrl', 'Behavior', 'ApiKey', 'Options')) {
