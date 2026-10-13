@@ -2,7 +2,7 @@ function Initialize-PackCommands {
     Add-PackCommand help {
         param($c)
         ($script:Harness.Commands.List() | ForEach-Object { "/$($_.Name) — $($_.Description)" }) -join "`n"
-    } 'List commands. Enter sends; Alt/Shift+Enter inserts a newline; Ctrl+C cancels; Ctrl+D exits.'
+    } 'List commands. PgUp/PgDn scroll; Ctrl+Home/End top/latest; F5 run; F10 apply; Ctrl+C cancels.'
     Add-PackCommand model {
         param($c) if ($c.Arguments) {
             $c.State.Config.Model = $c.Arguments
@@ -44,10 +44,10 @@ function Initialize-PackCommands {
     Add-PackCommand tokens {
         param($c)
         $last = if ($c.State.LastResult) {
-            $c.State.LastResult.Usage 
+            $c.State.LastResult.Usage
         }
         else {
-            $null 
+            $null
         }
         [pscustomobject]@{ LastTurn = $last; Session = $c.State.Usage } | ConvertTo-Json -Depth 6
     } 'Show actual input/output, cached/reasoning counters and session totals.'
@@ -62,7 +62,32 @@ function Initialize-PackCommands {
             throw 'Usage: /save path.ps1'
         }
         Invoke-PackAction save $c
-    } 'Save primary generated code block.'
+    } 'Save generated block: /save [block-number] path.ps1.'
+    Add-PackCommand blocks {
+        param($c)
+        if (-not $c.State.LastResult -or -not $c.State.LastResult.CodeBlocks.Count) {
+            throw 'There is no generated block. Ask for a fenced powershell block.'
+        }
+        $number = 0
+        ($c.State.LastResult.CodeBlocks | ForEach-Object {
+            $number++
+            "Block $number`n$($_.Code)"
+        }) -join "`n`n"
+    } 'List generated code blocks with one-based numbers.'
+    Add-PackCommand apply {
+        param($c)
+        if (-not $c.Arguments) {
+            throw 'Usage: /apply [block-number] path.ps1'
+        }
+        Invoke-PackAction apply $c
+    } 'Preview full-file replacement and require APPLY: /apply [block-number] path.ps1.'
+    Add-PackCommand exec {
+        param($c)
+        if (-not $c.Arguments) {
+            throw 'Usage: /exec PowerShell command'
+        }
+        Invoke-PackAction run $c -Block (New-HarnessCodeBlock -Code $c.Arguments)
+    } 'Preview and run an explicitly entered PowerShell command after RUN confirmation.'
     Add-PackCommand copy { param($c) Invoke-PackAction copy $c } 'Copy primary block (Windows).'
     Add-PackCommand validate {
         param($c)
@@ -72,10 +97,10 @@ function Initialize-PackCommands {
     } 'Parse, analyze, and inspect risk patterns.'
     Add-PackCommand run {
         param($c) Invoke-PackAction run $c
-    } 'Run primary block after explicit RUN confirmation.'
+    } 'Preview and run a block after RUN confirmation: /run [block-number].'
     Add-PackCommand whatif {
         param($c) Invoke-PackAction whatif $c
-    } 'Confirm and run with -WhatIf if script supports it.'
+    } 'Confirm and run with -WhatIf if script supports it: /whatif [block-number].'
     Add-PackCommand export {
         param($c) if (-not $c.Arguments) {
             throw 'Usage: /export path.md'
@@ -132,13 +157,67 @@ function Add-PackCommand {
     param($Name, $Handler, $Description) $script:Harness.Commands.Add($Name, $Handler, $Description)
 }
 function Invoke-PackAction {
-    param($Name, $Context)
-    if (-not $Context.State.LastResult -or -not $Context.State.LastResult.CodeBlocks.Count) {
-        throw 'There is no generated block.'
+    param($Name, $Context, $Block = $null)
+    $arguments = $Context.Arguments
+    if (-not $Block) {
+        if (-not $Context.State.LastResult -or -not $Context.State.LastResult.CodeBlocks.Count) {
+            throw 'There is no generated block. Ask for a fenced powershell block.'
+        }
+        $number = 1
+        if ($Name -in @('run', 'whatif') -and $arguments) {
+            if ($arguments -notmatch '^[1-9][0-9]*$' -or -not [int]::TryParse($arguments, [ref]$number)) {
+                throw "Usage: /$Name [block-number]"
+            }
+            $arguments = ''
+        }
+        elseif ($Name -in @('save', 'apply') -and $arguments -match '^(?<number>[1-9][0-9]*)\s+(?<path>.+)$') {
+            if (-not [int]::TryParse($Matches.number, [ref]$number)) {
+                throw 'Block number is too large.'
+            }
+            $arguments = $Matches.path
+        }
+        if ($number -gt $Context.State.LastResult.CodeBlocks.Count) {
+            throw "There is no block $number. Use /blocks."
+        }
+        $Block = $Context.State.LastResult.CodeBlocks[$number - 1]
     }
-    $script:Harness.Actions.Invoke(
-        $Name, $Context.State, $Context.State.LastResult.CodeBlocks[0], $Context.Arguments.Trim('"', "'"), $Context.Confirm
-    )
+    $confirm = $Context.Confirm
+    if ($Name -in @('run', 'whatif') -and $confirm) {
+        $originalConfirm = $confirm
+        $code = $Block.Code
+        $directory = $Context.State.Config.ContextPath
+        $confirm = { param($message) & $originalConfirm ("Working directory: $directory`nCode to execute:`n$code`n`n$message") }.GetNewClosure()
+    }
+    $hadPump = [bool]$Context.State.PSObject.Properties['Pump']
+    if (-not $hadPump) {
+        $Context.State | Add-Member NoteProperty Pump $null
+    }
+    $oldPump = $Context.State.Pump
+    $oldCancellation = $Context.State.Cancellation
+    $linked = $null
+    try {
+        if ($Name -in @('run', 'whatif')) {
+            $pump = $Context.Pump
+            $Context.State.Pump = { param($state) if ($pump) {
+                    & $pump
+                } }.GetNewClosure()
+            $linked = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($Context.CancellationToken)
+            $Context.State.Cancellation = $linked
+        }
+        $script:Harness.Actions.Invoke($Name, $Context.State, $Block, $arguments.Trim('"', "'"), $confirm)
+    }
+    finally {
+        if ($hadPump) {
+            $Context.State.Pump = $oldPump
+        }
+        else {
+            $Context.State.PSObject.Properties.Remove('Pump')
+        }
+        $Context.State.Cancellation = $oldCancellation
+        if ($linked) {
+            $linked.Dispose()
+        }
+    }
 }
 function Get-HarnessSession {
     param($Id, $Config) $script:Harness.GetSession($Config, $Id)

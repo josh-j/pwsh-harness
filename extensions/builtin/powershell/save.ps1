@@ -40,7 +40,7 @@ function Invoke-SaveGitQuery {
 }
 function Get-WindowsSaveText {
     param([string]$Code, [string]$Path, $Target)
-    $full = [IO.Path]::GetFullPath($Path)
+    $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
     $directory = [IO.Path]::GetDirectoryName($full)
     $eol = ''
     if (Test-Path -LiteralPath $directory) {

@@ -74,6 +74,17 @@ function Get-HarnessActiveRenderModel {
                 }
             }
         }
+        if ($View.Renderer -eq 'Default' -and $frame.PSObject.Properties['MaxScroll']) {
+            # Keep the same output in view when new rows arrive while reading above the bottom.
+            if ($View.Viewport.ScrollOffset -gt 0 -and $View.Viewport.Width -eq $frame.Width -and $frame.MaxScroll -gt $View.Viewport.MaxScroll) {
+                $View.Viewport.ScrollOffset += $frame.MaxScroll - $View.Viewport.MaxScroll
+                $frame = Get-HarnessRenderModel $View $Width $Height
+            }
+            $View.Viewport.MaxScroll = $frame.MaxScroll
+            $View.Viewport.PaneHeight = $frame.PaneHeight
+            $View.Viewport.Width = $frame.Width
+            $View.Viewport.ScrollOffset = [Math]::Min($frame.MaxScroll, [Math]::Max(0, $View.Viewport.ScrollOffset))
+        }
         $frame
     }
     catch {
@@ -168,12 +179,7 @@ function Invoke-HarnessFrontendInput {
         }
         else {
             if ($output) {
-                $message = if ($output -is [string]) {
-                    $output
-                }
-                else {
-                    $output | Out-String
-                }
+                $message = Format-HarnessActionOutput $output
                 $HarnessHost.AddTranscript($Session, 'system', $message, $null)
                 if ($LineMode) {
                     $Terminal.WriteText((& $safeText ($message + "`n")))

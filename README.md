@@ -1,6 +1,6 @@
 # PwshHarness
 
-Terminal assistant for writing Windows PowerShell 7.6 through an OpenAI-compatible API. Alpha: live gateway compatibility is unverified. Model tool calling is disabled.
+Terminal assistant for writing Windows PowerShell 7.6 through an OpenAI-compatible API. Alpha: live gateway compatibility is unverified. API tool/function calling is always disabled; instructions use user-role messages by default.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ pwsh-harness -BaseUrl https://gw.example -Model gemini-3.8-flash
 
 Hidden input prompts for the key. For one-time setup, use `Set-PwshHarnessConfig -BaseUrl https://gw.example -Model gemini-3.8-flash`. Automation also accepts `-ApiKey` (SecureString), `OPENAI_API_KEY`, or SecretManagement `SecretName`. Precedence: defaults < JSON < environment < parameters. `-SaveConfig` saves Provider/Model/BaseUrl and explicitly supplied declared Options; a key from `-ApiKey` or the prompt is saved separately in `credentials.json`, bound to the gateway origin and provider. Windows uses DPAPI CurrentUser and an owner-only ACL; Linux/macOS use a **plaintext file protected by 0600 permissions**, with no encryption. Use `Remove-PwshHarnessCredential` or `-All` to remove saved keys.
 
-The gateway must support `/v1/chat/completions` with SSE streaming. For providers that reject system messages, use `-Options @{SystemPromptMode='user'}` (also accepted by `Set-PwshHarnessConfig`): instructions and project context travel in user messages, with no tool/function fields. Keep API keys out of config.json and session files. Select the model id with `-Model`; reasoning-effort support is gateway-dependent. Embeddings are off by default. Capture the Windows command catalog once:
+The gateway must support `/v1/chat/completions` with SSE streaming. Instructions and project context use user messages by default, with no API tool/function fields. Opt in to system-role messages with `-Options @{SystemPromptMode='system'}` (also accepted by `Set-PwshHarnessConfig`). Keep API keys out of config.json and session files. Select the model id with `-Model`; reasoning-effort support is gateway-dependent. Embeddings are off by default. Capture the Windows command catalog once:
 
 ```powershell
 .\tools\Export-HarnessCommandCatalog.ps1
@@ -40,10 +40,10 @@ Invoke-PwshHarness -Prompt 'Write a function to report disk space' -PassThru
 
 ## Commands
 
-Enter sends; Shift/Ctrl/Alt+Enter inserts a newline. Ctrl+C cancels; `/quit` exits. `/help` lists all commands.
-Use `/model`, `/provider`, `/system`, `/config`, `/history` and `/resume` for sessions; `/save`, `/copy`, `/validate`, `/run` and `/whatif` for code; `/tokens` for usage. Default `auto` behavior accepts conversation and code requests; `/behavior code` or `/behavior chat` selects either explicitly. `-Behavior` sets it at startup.
+Enter sends; Shift/Ctrl/Alt+Enter inserts a newline. PgUp/PgDn scroll a page, Ctrl+Up/Down scroll a line, Ctrl+Home/End jump to oldest/latest output. Scrolling up holds your place as output arrives. F5 reviews/runs the first block; F10 starts `/apply` so you can enter a destination. Ctrl+C cancels; `/quit` exits. `/help` lists all commands.
+Use `/model`, `/provider`, `/system`, `/config`, `/history` and `/resume` for sessions; `/blocks`, `/save`, `/apply`, `/copy`, `/validate`, `/run`, `/exec` and `/whatif` for code; `/tokens` for usage. Default `auto` behavior accepts conversation and code requests; `/behavior code` or `/behavior chat` selects either explicitly. `-Behavior` sets it at startup.
 `/add`, `/drop`, `/context`, `/diff`, `/tree`, `/rag`, `/why` and `/reindex` control local context.
-Review generated code before running it; execution requires explicit confirmation.
+`/blocks` lists numbered suggestions. `/apply 2 'file name.ps1'` previews and replaces the entire file after typing `APPLY`; omit `2` for the first block. `/run 2` previews and runs that block after `RUN`; `/exec Get-Location` runs an explicitly entered command with the same confirmation. `/save` and `/whatif` also accept a block number. Relative action paths and child commands use the session's context folder. Applying never runs code; command output/exit status enter the transcript and accompany your next prompt in bounded user-role history.
 
 ## Troubleshooting
 

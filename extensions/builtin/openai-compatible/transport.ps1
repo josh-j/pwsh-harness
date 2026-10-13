@@ -11,7 +11,7 @@ function New-HarnessRequestBody {
     else {
         $null
     }
-    if ($Context.Config['SystemPromptMode'] -eq 'user') {
+    if ($Context.Config['SystemPromptMode'] -ne 'system') {
         $compatible = [Collections.Generic.List[object]]::new()
         foreach ($message in $messages) {
             if ($message.role -eq 'system') {

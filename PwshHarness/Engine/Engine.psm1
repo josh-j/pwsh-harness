@@ -112,6 +112,7 @@ function Invoke-EnginePoint {
         $exception = $_.Exception
         while ($exception) {
             if ($exception -is [OperationCanceledException] -and $Arguments.Count -and
+                $Arguments[0].PSObject.Properties['CancellationToken'] -and
                 $Arguments[0].CancellationToken -is [Threading.CancellationToken] -and
                 $Arguments[0].CancellationToken.IsCancellationRequested) {
                 throw
@@ -1416,10 +1417,16 @@ function New-HarnessHost {
         $context = [pscustomobject]@{
 
 
-            State     = $State
-            Block     = $Block
-            Arguments = $Arguments
-            Confirm   = $Confirm
+            State             = $State
+            Block             = $Block
+            Arguments         = $Arguments
+            Confirm           = $Confirm
+            CancellationToken = $(if ($State.Cancellation) {
+                    $State.Cancellation.Token
+                }
+                else {
+                    [Threading.CancellationToken]::None
+                })
         }
         $null = & $publish $store ActionRequested @{
 

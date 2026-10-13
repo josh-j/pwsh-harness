@@ -20,6 +20,9 @@ function New-HarnessViewState {
 
 
             ScrollOffset =0
+            MaxScroll    =0
+            PaneHeight   =10
+            Width        =0
         }
         StatusBar    = [pscustomobject]@{
 
@@ -138,7 +141,7 @@ function Update-HarnessSessionView {
 
 
                     Role ='action'
-                    Text =($Payload.Result | Out-String)
+                    Text =(Format-HarnessActionOutput $Payload.Result)
                 })
         }
     }
@@ -417,7 +420,15 @@ function Get-HarnessRenderModel {
     while ($rows.Count -lt $Height - 1) {
         $rows.Add((New-HarnessFrameRow '> '))
     }
-    $help = 'Enter send | Ctrl+J newline | F2 paste | F6 edits | Ctrl+C cancel/clear; twice exit'
+    $help = if ($scroll) {
+        'PgUp/PgDn scroll | Ctrl+Home top | Ctrl+End latest | Enter send'
+    }
+    elseif ($result -and $result.CodeBlocks.Count) {
+        'Enter send | PgUp/PgDn scroll | F5 run | F10 apply | /help'
+    }
+    else {
+        'Enter send | PgUp/PgDn scroll | /help'
+    }
     $rows.Add((New-HarnessFrameRow (@(Split-HarnessDisplayLine $help $Width)[0]) -Color BrightBlack))
     [pscustomobject]@{
 
@@ -432,6 +443,7 @@ function Get-HarnessRenderModel {
         InputRows    =$display
         InputHeight  =$inputHeight
         MaxScroll    =$maxScroll
+        ScrollOffset =$scroll
         StatusRows   = $statusRows
         Status       =$status
         Help         =$help
@@ -475,6 +487,24 @@ function Update-HarnessEditor {
             Prompt =''
         }
     }
+    if ($control -and $Key.Key -in @('Home', 'End', 'UpArrow', 'DownArrow')) {
+        switch ($Key.Key) {
+            Home {
+                $View.Viewport.ScrollOffset = $View.Viewport.MaxScroll
+            }
+            End {
+                $View.Viewport.ScrollOffset = 0
+            }
+            UpArrow {
+                $View.Viewport.ScrollOffset = [Math]::Min($View.Viewport.MaxScroll, $View.Viewport.ScrollOffset + 1)
+            }
+            DownArrow {
+                $View.Viewport.ScrollOffset = [Math]::Max(0, $View.Viewport.ScrollOffset - 1)
+            }
+        }
+        $View.Dirty = $true
+        return
+    }
     # LF is portable even when a terminal cannot distinguish modified Enter.
     if ([int]$Key.KeyChar -eq 10 -or ($control -and $Key.Key -eq 'J')) {
         if (-not $View.SessionView.Busy) {
@@ -500,6 +530,17 @@ function Update-HarnessEditor {
         F4 {
             $View.Panels.CodeLine += 10
         }
+        F5 {
+            if (-not $View.SessionView.Busy -and -not $editor.Text -and $View.SessionView.LastResult -and $View.SessionView.LastResult.CodeBlocks.Count) {
+                return [pscustomobject]@{ Action = 'Send'; Prompt = '/run' }
+            }
+        }
+        F10 {
+            if (-not $View.SessionView.Busy -and -not $editor.Text -and $View.SessionView.LastResult -and $View.SessionView.LastResult.CodeBlocks.Count) {
+                $editor.Text = '/apply '
+                $editor.Cursor = $editor.Text.Length
+            }
+        }
         F6 {
             $View.Panels.ShowDiff = -not $View.Panels.ShowDiff
         }
@@ -519,10 +560,10 @@ function Update-HarnessEditor {
             }
         }
         PageUp {
-            $View.Viewport.ScrollOffset += 10
+            $View.Viewport.ScrollOffset = [Math]::Min($View.Viewport.MaxScroll, $View.Viewport.ScrollOffset + [Math]::Max(1, $View.Viewport.PaneHeight - 1))
         }
         PageDown {
-            $View.Viewport.ScrollOffset = [Math]::Max(0, $View.Viewport.ScrollOffset - 10)
+            $View.Viewport.ScrollOffset = [Math]::Max(0, $View.Viewport.ScrollOffset - [Math]::Max(1, $View.Viewport.PaneHeight - 1))
         }
         default {
             if ($View.SessionView.Busy) {
@@ -611,4 +652,15 @@ function Update-HarnessEditor {
         }
     }
     $View.Dirty = $true
+}
+
+function Format-HarnessActionOutput {
+    param($Result)
+    if ($Result -is [string]) {
+        return $Result
+    }
+    if ($Result -and $Result.PSObject.Properties['ExitCode'] -and $Result.PSObject.Properties['Output'] -and $Result.PSObject.Properties['ErrorOutput']) {
+        return "Exit code: $($Result.ExitCode)`n$($Result.Output)$($Result.ErrorOutput)"
+    }
+    $Result | Out-String
 }

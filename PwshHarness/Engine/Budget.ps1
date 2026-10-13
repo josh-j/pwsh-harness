@@ -11,7 +11,7 @@ function Get-EngineTokenEstimate {
         throw 'Token estimator must return one nonnegative number.'
     }
     if (-not $Uncalibrated) {
-        $value *= (Get-EngineCalibration $Store $Config).Ratio 
+        $value *= (Get-EngineCalibration $Store $Config).Ratio
     }
     [int][Math]::Ceiling($value)
 }
@@ -22,14 +22,22 @@ function Get-EngineBudgetedHistory {
     $exchanges = [Collections.Generic.List[object]]::new()
     $current = [Collections.Generic.List[object]]::new()
     foreach ($record in $State.Transcript) {
-        if ($record.Role -notin @('user', 'assistant')) {
-            continue
+        $role = $record.Role
+        $text = $record.Text
+        if ($role -notin @('user', 'assistant')) {
+            # Extensions may supply observations without introducing privileged API roles.
+            if (-not $record.Metadata -or -not (($record.Metadata -is [Collections.IDictionary] -and $record.Metadata.Contains('ContextText')) -or $record.Metadata.PSObject.Properties['ContextText']) -or
+                $record.Metadata.ContextText -isnot [string]) {
+                continue
+            }
+            $role = 'user'
+            $text = $record.Metadata.ContextText
         }
-        if ($record.Role -eq 'user' -and $current.Count) {
+        if ($role -eq 'user' -and $current.Count) {
             $exchanges.Add($current.ToArray())
             $current.Clear()
         }
-        $current.Add((New-HarnessMessage $record.Role $record.Text))
+        $current.Add((New-HarnessMessage $role $text))
     }
     if ($current.Count) {
         $exchanges.Add($current.ToArray())

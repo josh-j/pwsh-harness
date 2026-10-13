@@ -13,6 +13,7 @@ function Save-HarnessCode {
     [CmdletBinding(SupportsShouldProcess)]
     param([object]$State, [Parameter(Mandatory)][string]$Path, [object]$CodeBlock)
     $code = Get-HarnessLastCode $State $CodeBlock
+    $Path = Resolve-HarnessActionPath $State $Path
     $target = $script:Harness.TargetProfiles.Get()
     if ($State.Config['Fix.Eol']) {
         $code = Get-WindowsSaveText $code $Path $target
@@ -43,6 +44,10 @@ function Invoke-HarnessRun {
     [CmdletBinding()]
     param([object]$State, [switch]$WhatIf, [scriptblock]$Confirm, [object]$CodeBlock)
     $code = Get-HarnessLastCode $State $CodeBlock
+    $workingDirectory = Resolve-HarnessActionPath $State '.'
+    if (-not [IO.Directory]::Exists($workingDirectory)) {
+        throw 'The session context directory does not exist.'
+    }
     $validation = Test-PackCode $code -NoAnalyzer
     if (-not $validation.Valid) {
         throw 'Execution refused: the generated code has parse errors.'
@@ -104,6 +109,8 @@ function Invoke-HarnessRun {
         }
         [IO.File]::WriteAllText($scriptFile, $tempCode, [Text.UTF8Encoding]::new($false))
         $start = Get-WindowsChildStartInfo $scriptFile -WhatIf:$WhatIf
+        $start.WorkingDirectory = $workingDirectory
+        $State.Cancellation.Token.ThrowIfCancellationRequested()
         $process = [Diagnostics.Process]::new()
         $process.StartInfo = $start
         $null = $process.Start()
@@ -131,7 +138,12 @@ function Invoke-HarnessRun {
             ErrorOutput = $stderr.GetAwaiter().GetResult()
             WhatIf      = [bool]$WhatIf
         }
-        Add-HarnessTranscript $State run ("Exit code: $($result.ExitCode)`n$($result.Output)$($result.ErrorOutput)") $result
+        $text = "Exit code: $($result.ExitCode)`n$($result.Output)$($result.ErrorOutput)"
+        $metadata = @{
+            ExitCode = $result.ExitCode; Output = $result.Output; ErrorOutput = $result.ErrorOutput; WhatIf = $result.WhatIf
+            ContextText = "[Local PowerShell execution result]`nWorking directory: $workingDirectory`nCode:`n$code`n$text"
+        }
+        Add-HarnessTranscript $State run $text $metadata
         $result
     }
     finally {
@@ -155,4 +167,88 @@ function Invoke-HarnessRun {
 
 function Add-HarnessTranscript {
     param($State, $Role, $Text, $Metadata) $script:Harness.AddTranscript($State, $Role, $Text, $Metadata)
+}
+
+function Resolve-HarnessActionPath {
+    param($State, [string]$Path)
+    $base = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($State.Config.ContextPath)
+    $candidate = if ([IO.Path]::IsPathRooted($Path)) {
+        $Path
+    }
+    else {
+        Join-Path $base $Path
+    }
+    $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($candidate)
+}
+function Invoke-HarnessApply {
+    [CmdletBinding(SupportsShouldProcess)]
+    param($State, [Parameter(Mandatory)][string]$Path, $CodeBlock, [scriptblock]$Confirmation)
+    $code = Get-HarnessLastCode $State $CodeBlock
+    if (-not (Test-PackCode $code -NoAnalyzer).Valid) {
+        throw 'Apply refused: the generated code has parse errors.'
+    }
+    $full = Resolve-HarnessActionPath $State $Path
+    $parent = [IO.Path]::GetDirectoryName($full)
+    if (-not [IO.Directory]::Exists($parent)) {
+        throw 'Create the destination directory before applying code.'
+    }
+    # Refuse links so preview, comparison and replacement refer to the same physical file.
+    for ($item = $full; $item; $item = [IO.Path]::GetDirectoryName($item)) {
+        if (Test-Path -LiteralPath $item) {
+            $entry = Get-Item -LiteralPath $item -Force
+            if ($entry.LinkType -in @('SymbolicLink', 'Junction') -or $entry.LinkTarget) {
+                throw 'Apply refuses symbolic links and junctions.'
+            }
+        }
+    }
+    if ([IO.Directory]::Exists($full)) {
+        throw 'Apply requires a file destination.'
+    }
+    $exists = [IO.File]::Exists($full)
+    $before = if ($exists) {
+        [IO.File]::ReadAllBytes($full)
+    }
+    else {
+        [byte[]]@()
+    }
+    $existing = if ($exists) {
+        [IO.File]::ReadAllText($full)
+    }
+    else {
+        '(new file)'
+    }
+    if ($State.Config['Fix.Eol']) {
+        $code = Get-WindowsSaveText $code $full ($script:Harness.TargetProfiles.Get())
+    }
+    if (-not $Confirmation) {
+        throw 'An explicit confirmation callback is required.'
+    }
+    $preview = "Apply full-file replacement to $full?`n--- Existing file ---`n$existing`n+++ Proposed file +++`n$code`nType APPLY to confirm."
+    $answer = & $Confirmation $preview 'APPLY'
+    if ($answer -isnot [string] -or $answer -cne 'APPLY') {
+        return 'Apply cancelled.'
+    }
+    if ([IO.File]::Exists($full) -ne $exists -or
+        ($exists -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($full)) -cne [Convert]::ToBase64String($before))) {
+        throw 'Apply refused: the destination changed after the preview. Review it again.'
+    }
+    $temporary = Join-Path $parent ('.pwsh-harness-apply-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        if ($PSCmdlet.ShouldProcess($full, 'Apply generated PowerShell as full-file replacement')) {
+            [IO.File]::WriteAllText($temporary, $code, [Text.UTF8Encoding]::new($State.Config.SaveEncoding -eq 'utf8BOM'))
+            if ($exists) {
+                [IO.File]::Replace($temporary, $full, [NullString]::Value)
+            }
+            else {
+                [IO.File]::Move($temporary, $full)
+            }
+            Add-HarnessTranscript $State apply "Applied code to $full" @{ Path = $full; Code = $code; ContextText = "[Local file application result]`nReplaced complete file: $full`n$code" }
+            "Applied code to $full"
+        }
+    }
+    finally {
+        if ([IO.File]::Exists($temporary)) {
+            [IO.File]::Delete($temporary)
+        }
+    }
 }
