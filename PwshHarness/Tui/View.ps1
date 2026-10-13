@@ -164,6 +164,9 @@ function Get-HarnessGlyphWidth {
 }
 function Get-HarnessTextWidth {
     param([string]$Text)
+    if ($Text -notmatch '[^\x20-\x7E]') {
+        return $Text.Length
+    }
     $width = 0
     $enumerator = [Globalization.StringInfo]::GetTextElementEnumerator($Text)
     while ($enumerator.MoveNext()) {
@@ -173,6 +176,15 @@ function Get-HarnessTextWidth {
 }
 function Split-HarnessDisplayLine {
     param([AllowEmptyString()][string]$Text, [int]$Width)
+    if ($Text -notmatch '[^\x20-\x7E]') {
+        if (-not $Text) {
+            return ''
+        }
+        for ($offset = 0; $offset -lt $Text.Length; $offset += $Width) {
+            $Text.Substring($offset, [Math]::Min($Width, $Text.Length - $offset))
+        }
+        return
+    }
     $part = ''
     $size = 0
     $enumerator = [Globalization.StringInfo]::GetTextElementEnumerator($Text)

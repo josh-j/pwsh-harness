@@ -353,13 +353,19 @@ function Invoke-HarnessFrontend {
                     $last.Size = $dimensions
                     $View.Dirty = $false
                 }
-                if ($Terminal.Available()) {
+                # Drain queued input in bounded batches; sleeping per character
+                # made long pastes take seconds on Windows consoles.
+                $read = 0
+                while (-not $View.Quit -and $Terminal.Available() -and $read -lt 128) {
+                    $read++
                     $action = Update-HarnessEditor $View ($Terminal.ReadKey()) ($Terminal.Available()) ($Terminal.Now())
                     if ($action -and $action.Action -eq 'Send') {
                         Invoke-HarnessSafeFrontendInput $HarnessHost $Session $View $Terminal $action.Prompt $pump
                     }
                 }
-                $Terminal.Wait(10)
+                if (-not $Terminal.Available()) {
+                    $Terminal.Wait(10)
+                }
             }
         }
     }
@@ -406,6 +412,7 @@ function Start-PwshHarness {
         if ($Path) {
             $session.Context.Path = $Path
         }
+        $session.Context.Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($session.Context.Path)
         foreach ($file in $IncludeFiles) {
             $session.Context.IncludeFiles.Add($file)
         }

@@ -169,7 +169,7 @@ function Set-PwshHarnessConfig {
     #>
     [CmdletBinding()]
     param([string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey,
-        [hashtable]$Options = @{}, [string]$ConfigPath)
+        [hashtable]$Options = @{}, [string]$ConfigPath, [object]$HarnessHost)
     $Options = $Options.Clone()
     foreach ($name in @('Provider', 'Model', 'BaseUrl', 'Behavior')) {
         if ($PSBoundParameters.ContainsKey($name)) {
@@ -181,9 +181,12 @@ function Set-PwshHarnessConfig {
             }
         }
     }
-    $instance = $null
+    $instance = $HarnessHost
+    $ownsHost = -not $HarnessHost
     try {
-        $instance = New-HarnessHost -ConfigPath $ConfigPath
+        if ($ownsHost) {
+            $instance = New-HarnessHost -ConfigPath $ConfigPath
+        }
         Assert-HarnessSavedOptions $instance $Options
         $config = $instance.ConfigService.Resolve($Options, $ConfigPath)
         if (-not $PSBoundParameters.ContainsKey('ApiKey') -and (Test-HarnessInteractive)) {
@@ -198,7 +201,7 @@ function Set-PwshHarnessConfig {
         Invoke-HarnessPublicError $PSCmdlet $_
     }
     finally {
-        if ($instance) {
+        if ($ownsHost -and $instance) {
             $instance.Dispose()
         }
     }

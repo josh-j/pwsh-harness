@@ -22,7 +22,7 @@ function Get-DiscoveryRootReason {
     ''
 }
 function Get-DiscoveryListing {
-    param([string]$Root, [int]$Limit = 200, [int]$Depth = 1, [int]$Milliseconds = 150, $Request)
+    param([string]$Root, [int]$Limit = 200, [int]$Depth = 1, [int]$Milliseconds = 150, [switch]$SkipGitMetadata, $Request)
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $entries = [Collections.Generic.List[object]]::new()
     $pending = [Collections.Generic.Queue[object]]::new()
@@ -46,6 +46,9 @@ function Get-DiscoveryListing {
                     $truncated = $true; break
                 }
                 $item = $iterator.Current
+                if ($SkipGitMetadata -and $item.Name -eq '.git') {
+                    continue
+                }
                 $entries.Add($item)
                 if ($directory.Level -lt $Depth -and ($item.Attributes -band [IO.FileAttributes]::Directory)) {
                     $pending.Enqueue(@{ Path = $item.FullName; Level = $directory.Level + 1 })

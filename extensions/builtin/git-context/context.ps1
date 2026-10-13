@@ -12,7 +12,7 @@ function Invoke-HarnessGit {
     $info.StandardOutputEncoding = [Text.Encoding]::UTF8
     $info.StandardErrorEncoding = [Text.Encoding]::UTF8
     $info.Environment['GIT_TERMINAL_PROMPT'] = '0'
-    foreach ($flag in @('-c', 'core.quotepath=off', '-c', 'color.ui=never', '--no-pager')) {
+    foreach ($flag in @('-c', 'core.quotepath=off', '-c', 'core.longpaths=true', '-c', 'color.ui=never', '--no-pager')) {
         $info.ArgumentList.Add($flag)
     }
     $info.ArgumentList.Add('-C')
@@ -59,7 +59,7 @@ function Get-HarnessGitContext {
     param($Request)
     $script:DiscoveryRequest = $Request
     Invoke-DiscoveryCheckpoint $Request
-    $requestedPath = [IO.Path]::GetFullPath($Request.Path)
+    $requestedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Request.Path)
     if (-not (Test-Path -LiteralPath $requestedPath -PathType Container)) {
         throw "Context directory not found: $requestedPath"
     }
@@ -76,7 +76,7 @@ function Get-HarnessGitContext {
     $reason = Get-DiscoveryRootReason $root
     $explicit = @($Request.Config.RagPaths | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd('/', '\') -eq $root.TrimEnd('/', '\') }).Count -gt 0
     if ($isRepository -and -not $reason -and -not $explicit) {
-        $probe = Get-DiscoveryListing $root -Limit 5001 -Depth 2 -Request $Request
+        $probe = Get-DiscoveryListing $root -Limit 5001 -Depth 2 -SkipGitMetadata -Request $Request
         if ($probe.Entries.Count -gt 5000) {
             $reason = 'more than 5000 entries at the top two levels; explicit indexing required'
         }
@@ -90,12 +90,16 @@ function Get-HarnessGitContext {
     $head = ''
     $status = ''
     $diff = '' # Git context normalizes CRLF output to LF; working-tree EOL metadata is noted in context.
-    if ($autoIndexAllowed) {
+    # Reading repository identity is independent of recursive file discovery.
+    # A slow/cloud-synced or protected directory still has a branch and HEAD.
+    if ($isRepository) {
         $branch = Invoke-HarnessGit $root @('branch', '--show-current')
         $head = Invoke-HarnessGit $root @('rev-parse', 'HEAD')
         if (-not $branch) {
             $branch = '(detached)'
         }
+    }
+    if ($autoIndexAllowed) {
         $status = Invoke-HarnessGit $root @('status', '--short')
         $tracked = Invoke-HarnessGit $root @('-c', 'core.quotepath=false', 'ls-files', '--cached', '--others', '--exclude-standard')
         $files = @($tracked -split '\r?\n' |

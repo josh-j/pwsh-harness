@@ -47,7 +47,7 @@ function New-HarnessHost {
         $configDir = $ConfigDirectory
     }
     elseif ($ConfigPath) {
-        $configDir = Split-Path ([IO.Path]::GetFullPath($ConfigPath)) -Parent
+        $configDir = Split-Path ($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ConfigPath)) -Parent
     }
     if ($DataDirectory) {
         $dataDir = $DataDirectory
@@ -187,6 +187,7 @@ function Invoke-PwshHarness {
         if ($Path) {
             $State.Context.Path = $Path
         }
+        $State.Context.Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($State.Context.Path)
         foreach ($file in $IncludeFiles) {
             if (-not $State.Context.IncludeFiles.Contains($file)) {
                 $State.Context.IncludeFiles.Add($file)

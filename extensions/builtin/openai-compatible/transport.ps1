@@ -11,7 +11,23 @@ function New-HarnessRequestBody {
     else {
         $null
     }
-    if ($modelProfile -and $modelProfile.MergeSystemMessages) {
+    if ($Context.Config['SystemPromptMode'] -eq 'user') {
+        $compatible = [Collections.Generic.List[object]]::new()
+        foreach ($message in $messages) {
+            if ($message.role -eq 'system') {
+                $message.role = 'user'
+                $message.content = "[Harness instructions]`n$($message.content)"
+            }
+            if ($message.role -eq 'user' -and $compatible.Count -and $compatible[-1].role -eq 'user') {
+                $compatible[-1].content += "`n`n" + $message.content
+            }
+            else {
+                $compatible.Add($message)
+            }
+        }
+        $messages = $compatible.ToArray()
+    }
+    elseif ($modelProfile -and $modelProfile.MergeSystemMessages) {
         $systems = @($messages | Where-Object role -EQ system)
         if ($systems.Count) {
             $first = @{

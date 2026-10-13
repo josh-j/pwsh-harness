@@ -3,8 +3,18 @@ function Get-HarnessChangedRows {
     param($Previous, $Frame)
     for ($index = 0; $index -lt $Frame.Rows.Count; $index++) {
         if (-not $Previous -or $Previous.Width -ne $Frame.Width -or $Previous.Height -ne $Frame.Height -or
-            $index -ge $Previous.Rows.Count -or
-            ($Previous.Rows[$index].Segments | ConvertTo-Json -Compress) -cne ($Frame.Rows[$index].Segments | ConvertTo-Json -Compress)) {
+            $index -ge $Previous.Rows.Count) {
+            $index
+            continue
+        }
+        $before = @($Previous.Rows[$index].Segments)
+        $after = @($Frame.Rows[$index].Segments)
+        $changed = $before.Count -ne $after.Count
+        for ($segment = 0; -not $changed -and $segment -lt $after.Count; $segment++) {
+            $changed = $before[$segment].Text -cne $after[$segment].Text -or
+            $before[$segment].Color -cne $after[$segment].Color
+        }
+        if ($changed) {
             $index
         }
     }

@@ -8,7 +8,7 @@ PowerShell 7.6+. Git and PSScriptAnalyzer are optional; generated-test verificat
 
 ## Install
 
-Install from a checkout or extract the ready-made `PwshHarness.bundle.ps1`. `package.ps1` bundles all source files, excluding Git metadata, out/, prior bundles, logs, .env files and saved configuration/credentials. Run a bundle to restore its files with hash checks; restored scripts never run automatically. Use `-Force` to overwrite existing files.
+Install from a checkout or extract the ready-made `PwshHarness.bundle.ps1`. `package.ps1` bundles source files, excluding Git metadata, out/, prior bundles, logs, .env files and saved configuration/credentials. Bundles restore files with hash checks; restored scripts never run automatically (`-Force` permits overwrite). For a movable install using your existing PowerShell, run `install.ps1 -Portable -Destination '.\portable'`, then `.\portable\pwsh-harness.ps1`; add `-Configure` to save settings. Modules and state stay in that folder; profiles/PATH remain unchanged. Upgrades and `-Portable -Uninstall` preserve state. Windows saved keys retain DPAPI account protection.
 
 ```powershell
 pwsh -NoProfile -File .\install.ps1
@@ -24,7 +24,7 @@ pwsh-harness -BaseUrl https://gw.example -Model gemini-3.8-flash
 
 Hidden input prompts for the key. For one-time setup, use `Set-PwshHarnessConfig -BaseUrl https://gw.example -Model gemini-3.8-flash`. Automation also accepts `-ApiKey` (SecureString), `OPENAI_API_KEY`, or SecretManagement `SecretName`. Precedence: defaults < JSON < environment < parameters. `-SaveConfig` saves Provider/Model/BaseUrl and explicitly supplied declared Options; a key from `-ApiKey` or the prompt is saved separately in `credentials.json`, bound to the gateway origin and provider. Windows uses DPAPI CurrentUser and an owner-only ACL; Linux/macOS use a **plaintext file protected by 0600 permissions**, with no encryption. Use `Remove-PwshHarnessCredential` or `-All` to remove saved keys.
 
-The gateway must support `/v1/chat/completions` with SSE streaming. Keep API keys out of config.json and session files. Select the model id with `-Model`; reasoning-effort support is gateway-dependent. Embeddings are off by default. Capture the Windows command catalog once:
+The gateway must support `/v1/chat/completions` with SSE streaming. For providers that reject system messages, use `-Options @{SystemPromptMode='user'}` (also accepted by `Set-PwshHarnessConfig`): instructions and project context travel in user messages, with no tool/function fields. Keep API keys out of config.json and session files. Select the model id with `-Model`; reasoning-effort support is gateway-dependent. Embeddings are off by default. Capture the Windows command catalog once:
 
 ```powershell
 .\tools\Export-HarnessCommandCatalog.ps1
@@ -33,7 +33,7 @@ The gateway must support `/v1/chat/completions` with SSE streaming. Keep API key
 ## Use
 
 ```powershell
-Start-PwshHarness
+Start-PwshHarness -Path 'C:\Users\Your Name\OneDrive - Organization\project'
 Invoke-PwshHarness -Provider Mock -Prompt 'Write a greeting'
 Invoke-PwshHarness -Prompt 'Write a function to report disk space' -PassThru
 ```

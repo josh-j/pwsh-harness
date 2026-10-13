@@ -33,13 +33,16 @@ function Get-DefaultHarnessHost {
         }
         $ConfigPath = Join-Path (Join-Path $base $directory) 'config.json'
     }
-    $resolved = [IO.Path]::GetFullPath($ConfigPath)
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ConfigPath)
     if ($IsWindows) {
         $resolved = $resolved.ToUpperInvariant() 
     }
     $serialized = ConvertTo-Json -InputObject (ConvertTo-HarnessCacheValue $Options) -Depth 64 -Compress
     $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($serialized)))
-    $key = $resolved + ':' + $hash
+    # Defaults capture the launch location. A cached host from another folder
+    # must not silently reuse that folder's Git context for a new invocation.
+    $location = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath('.')
+    $key = $resolved + ':' + $hash + ':' + $location
     if ($script:ImplicitHosts.ContainsKey($key) -and -not $script:ImplicitHosts[$key].Host.IsDisposed) {
         $script:ImplicitHosts[$key].Used = ++$script:HostCacheClock
         return $script:ImplicitHosts[$key].Host

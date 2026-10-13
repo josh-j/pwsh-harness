@@ -1,10 +1,10 @@
 #Requires -Version 7.6
 <#
 .SYNOPSIS
-Install this release for the current user without changing profiles or PATH.
+Install this release for the current user or into a portable folder.
 #>
 [CmdletBinding()]
-param([string]$Destination, [switch]$Uninstall)
+param([string]$Destination, [switch]$Uninstall, [switch]$Portable)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 function Get-HarnessUserModuleRoot {
@@ -25,10 +25,10 @@ function Test-HarnessInstalledModule {
     param([string]$ManifestPath)
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = Join-Path $PSHOME $(if ($IsWindows) {
-            'pwsh.exe' 
+            'pwsh.exe'
         }
         else {
-            'pwsh' 
+            'pwsh'
         })
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
@@ -71,6 +71,10 @@ $temporary = $null
 $backup = $null
 $target = $null
 $swapped = $false
+$launcher = $null
+$launcherTemporary = $null
+$launcherPrevious = $null
+$launcherSwapped = $false
 try {
     $source = Join-Path $PSScriptRoot 'PwshHarness'
     $checkout = Test-Path -LiteralPath (Join-Path $source 'PwshHarness.psd1')
@@ -86,9 +90,20 @@ try {
     $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $source 'PwshHarness.psd1')
     $version = ([version]$manifest.ModuleVersion).ToString()
     if (-not $Destination) {
-        $Destination = Get-HarnessUserModuleRoot
+        $Destination = if ($Portable) {
+            Join-Path $PSScriptRoot 'out/PwshHarness-portable'
+        }
+        else {
+            Get-HarnessUserModuleRoot
+        }
     }
-    $moduleRoot = Join-Path ($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)) 'PwshHarness'
+    $destinationPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
+    $moduleRoot = if ($Portable) {
+        Join-Path $destinationPath 'modules/PwshHarness'
+    }
+    else {
+        Join-Path $destinationPath 'PwshHarness'
+    }
     $target = Join-Path $moduleRoot $version
     $relative = [IO.Path]::GetRelativePath($source, $target)
     if (-not [IO.Path]::IsPathRooted($relative) -and $relative -notmatch '^\.\.([/\\]|$)') {
@@ -98,7 +113,29 @@ try {
         if (Test-Path -LiteralPath $target) {
             Remove-Item -LiteralPath $target -Recurse -Force
         }
+        if ($Portable -and -not @(Get-ChildItem -LiteralPath $moduleRoot -Directory -ErrorAction Ignore | Where-Object {
+                    Test-Path -LiteralPath (Join-Path $_.FullName 'PwshHarness.psd1')
+                }).Count) {
+            $launcher = Join-Path $destinationPath 'pwsh-harness.ps1'
+            if ((Test-Path -LiteralPath $launcher -PathType Leaf) -and
+                [IO.File]::ReadAllText($launcher).Contains('# PwshHarness portable launcher.')) {
+                Remove-Item -LiteralPath $launcher -Force
+            }
+        }
         return
+    }
+    if ($Portable) {
+        $launcher = Join-Path $destinationPath 'pwsh-harness.ps1'
+        if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'portable.ps1') -PathType Leaf)) {
+            throw 'Release package is missing portable.ps1.'
+        }
+        if (Test-Path -LiteralPath $launcher) {
+            if (-not (Test-Path -LiteralPath $launcher -PathType Leaf) -or
+                -not [IO.File]::ReadAllText($launcher).Contains('# PwshHarness portable launcher.')) {
+                throw 'Portable launcher path is occupied by an unrelated file or directory.'
+            }
+            $launcherPrevious = [IO.File]::ReadAllBytes($launcher)
+        }
     }
     $null = [IO.Directory]::CreateDirectory($moduleRoot)
     $id = [guid]::NewGuid().ToString('N')
@@ -137,13 +174,33 @@ try {
     [IO.Directory]::Move($temporary, $target)
     $swapped = $true
     Test-HarnessInstalledModule (Join-Path $target 'PwshHarness.psd1')
+    if ($Portable) {
+        $launcherTemporary = Join-Path $destinationPath ".$id.launcher.tmp"
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'portable.ps1') -Destination $launcherTemporary
+        [IO.File]::Move($launcherTemporary, $launcher, $true)
+        $launcherSwapped = $true
+    }
     if (Test-Path -LiteralPath $backup) {
         Remove-Item -LiteralPath $backup -Recurse -Force
     }
-    Write-Output 'pwsh-harness -BaseUrl https://gw.example -Model gemini-3.8-flash'
-    Write-Output 'Set-PwshHarnessConfig -BaseUrl https://gw.example -Model gemini-3.8-flash'
+    if ($Portable) {
+        Write-Output "Portable launcher: $launcher"
+        Write-Output "Portable state: $(Join-Path $destinationPath 'state')"
+    }
+    else {
+        Write-Output 'pwsh-harness -BaseUrl https://gw.example -Model gemini-3.8-flash'
+        Write-Output 'Set-PwshHarnessConfig -BaseUrl https://gw.example -Model gemini-3.8-flash'
+    }
 }
 catch {
+    if ($launcherSwapped) {
+        if ($null -ne $launcherPrevious) {
+            [IO.File]::WriteAllBytes($launcher, $launcherPrevious)
+        }
+        else {
+            Remove-Item -LiteralPath $launcher -Force -ErrorAction Continue
+        }
+    }
     if ($swapped -and (Test-Path -LiteralPath $target)) {
         Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Continue
     }
@@ -154,6 +211,9 @@ catch {
     exit 1
 }
 finally {
+    if ($launcherTemporary -and (Test-Path -LiteralPath $launcherTemporary)) {
+        Remove-Item -LiteralPath $launcherTemporary -Force -ErrorAction Continue
+    }
     if ($temporary -and (Test-Path -LiteralPath $temporary)) {
         Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction Continue
     }
