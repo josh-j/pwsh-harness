@@ -9,7 +9,7 @@
     FenceLanguages      = @('powershell', 'pwsh', 'ps1')
     PromptAddendum      = @'
 Windows / PowerShell 7.6 rules:
-- Use full cmdlet names, never script aliases. Use advanced functions and SupportsShouldProcess for mutations.
+- Use full cmdlet names, never script aliases. Use advanced functions and SupportsShouldProcess for reusable mutating functions; routine commands need no function wrapper.
 - Resolve command and parameter names against the Windows catalog; spell parameters unambiguously.
 - Use -LiteralPath for literal paths and variables; use -Path only for intentional wildcard matching.
 - PowerShell uses backtick escapes (`n, `t, `r), not C/JSON backslashes. Drive paths use single backslashes.
@@ -26,7 +26,7 @@ Windows / PowerShell 7.6 rules:
 - Review cmd /c, .bat/.cmd and msiexec quoting. Avoid --% unless its literal semantics are intended.
 - Use Get-CimInstance instead of Get-WmiObject and -AsByteStream instead of -Encoding Byte.
 - Avoid Send-MailMessage and -UseBasicParsing; check availability of Out-GridView and legacy modules.
-- Preserve strings/comments when fixing syntax. Return complete fenced files with a brief explanation; identify multi-file blocks with # File: relative/path.ps1.
+- Preserve strings/comments when fixing syntax. For file changes, return complete files with a brief explanation and # File: relative/path.ps1. For routine inspection and tests, propose short inline commands.
 
 Few-shot exchange 1:
 User (bad): Get-Content -Path $file; "User: $user.Name\n"

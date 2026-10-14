@@ -126,6 +126,7 @@ function Invoke-HarnessRun {
         $State.Config.RunTimeoutSeconds -ne $runTimeoutSeconds) {
         throw 'Execution settings changed during action review. Review the working directory and timeout again before running.'
     }
+    $inline = -not $ScriptPath -and -not $WhatIf -and $code.Length -le 4096 -and $code -match '^\s*# harness-command\r?\n'
     $scriptFile = Join-Path ([IO.Path]::GetTempPath()) ("pwsh-harness-" + [guid]::NewGuid().ToString('N') + '.ps1')
     if ($ScriptPath) {
         $scriptFile = [IO.Path]::GetFullPath($ScriptPath)
@@ -155,10 +156,16 @@ function Invoke-HarnessRun {
         if ($target.EOL -eq 'CRLF') {
             $tempCode = $tempCode.Replace("`n", "`r`n")
         }
-        if (-not $ScriptPath) {
+        if (-not $ScriptPath -and -not $inline) {
             [IO.File]::WriteAllText($scriptFile, $tempCode, [Text.UTF8Encoding]::new($false))
         }
-        $start = Get-WindowsChildStartInfo $scriptFile -WhatIf:$WhatIf
+        $command = if ($inline) {
+            $code
+        }
+        else {
+            ''
+        }
+        $start = Get-WindowsChildStartInfo $scriptFile -WhatIf:$WhatIf -Command $command
         $start.WorkingDirectory = $workingDirectory
         if (-not [IO.Directory]::Exists($workingDirectory)) {
             throw 'Execution context directory does not exist.'

@@ -44,17 +44,18 @@ function New-HarnessRequestBody {
                 type     = 'function'
                 function = @{
                     name        = 'prepare_powershell'
-                    description = 'Submit complete PowerShell scripts for user review, never execute. Use one file per change; path is relative or empty for an unnamed command/script. The user must approve writes and execution.'
+                    description = 'Propose file changes and/or an inline PowerShell command for one user approval. Use command for routine shell statements, without a script file or function wrapper. files may be empty for command-only work. Never execute; the user reviews all changes, command and risks.'
                     parameters  = @{
                         type = 'object'; additionalProperties = $false; required = @('files')
                         properties = @{
-                            files = @{
-                                type = 'array'; minItems = 1; maxItems = 64
+                            files   = @{
+                                type = 'array'; minItems = 0; maxItems = 64
                                 items = @{
                                     type = 'object'; additionalProperties = $false; required = @('path', 'code')
                                     properties = @{ path = @{ type = 'string' }; code = @{ type = 'string' } }
                                 }
                             }
+                            command = @{ type = 'string'; description = 'Exact PowerShell statements to run after any approved file changes; omit when no execution is needed.' }
                         }
                     }
                 }
@@ -144,11 +145,18 @@ function ConvertFrom-HarnessToolProposals {
         catch {
             throw 'Invalid tool argument JSON; no operation prepared.'
         }
-        if ($proposalData -isnot [Collections.IDictionary] -or $proposalData.Count -ne 1 -or -not $proposalData.ContainsKey('files') -or
-            $proposalData.files -isnot [array] -or $proposalData.files.Count -lt 1 -or $proposalData.files.Count -gt 64) {
+        if ($proposalData -isnot [Collections.IDictionary] -or -not $proposalData.ContainsKey('files') -or
+            @($proposalData.Keys | Where-Object { $_ -cnotin @('files', 'command') }).Count -or
+            $proposalData.files -isnot [array] -or $proposalData.files.Count -gt 64 -or
+            ($proposalData.ContainsKey('command') -and ($proposalData.command -isnot [string] -or -not $proposalData.command.Trim())) -or
+            (-not $proposalData.files.Count -and -not $proposalData.ContainsKey('command'))) {
             throw 'Invalid proposal files.'
         }
-        foreach ($file in $proposalData.files) {
+        $proposalFiles = @($proposalData.files)
+        if ($proposalData.ContainsKey('command')) {
+            $proposalFiles += @{ path = ''; code = "# harness-command`n" + $proposalData.command }
+        }
+        foreach ($file in $proposalFiles) {
             if ($blocks.Count -ge 64 -or $file -isnot [Collections.IDictionary] -or $file.Count -ne 2 -or
                 -not $file.ContainsKey('path') -or -not $file.ContainsKey('code') -or
                 $file.path -isnot [string] -or $file.code -isnot [string] -or -not $file.code.Trim() -or

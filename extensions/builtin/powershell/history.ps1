@@ -1,4 +1,24 @@
 function Register-PackHistoryCompactors {
+    $Harness.HistoryCompactors.Add('ActionContinuations', {
+            param($history)
+            $labels = @{}
+            foreach ($record in $history.State.Transcript) {
+                if ($record.Role -eq 'continuation' -and $record.Metadata -and
+                    (Test-PackContinuationField $record.Metadata 'PromptHash')) {
+                    $labels[$record.Metadata.PromptHash] = 'Continued from captured action results (full evidence in session logs).'
+                }
+            }
+            foreach ($exchange in $history.Exchanges) {
+                foreach ($message in $exchange) {
+                    if ($message.Role -eq 'user' -and $message.Content.StartsWith("Continue the user's task from the captured action results.")) {
+                        $hash = Get-PackOperationHash $message.Content
+                        if ($labels.ContainsKey($hash)) {
+                            $message.Content = $labels[$hash]
+                        }
+                    }
+                }
+            }
+        }, 50)
     $Harness.HistoryCompactors.Add('SupersededCode', {
             param($history)
             $version = 0
@@ -6,22 +26,22 @@ function Register-PackHistoryCompactors {
             foreach ($exchange in $history.Exchanges) {
                 foreach ($message in $exchange) {
                     if ($message.Role -eq 'assistant' -and @(Get-HarnessCodeBlock $message.Content).Count) {
-                        $latest++ 
+                        $latest++
                     }
                 }
             }
             for ($index = 0; $index -lt $history.Exchanges.Count; $index++) {
                 foreach ($message in $history.Exchanges[$index]) {
                     if ($message.Role -ne 'assistant') {
-                        continue 
+                        continue
                     }
                     $blocks = @(Get-HarnessCodeBlock $message.Content)
                     if (-not $blocks.Count) {
-                        continue 
+                        continue
                     }
                     $version++
                     if ($index -ge ($history.Exchanges.Count - 2) -or $version -eq $latest) {
-                        continue 
+                        continue
                     }
                     $replacement = '```powershell' + "`n[superseded script v$version omitted; current version appears later]`n" + '```'
                     foreach ($block in @($blocks | Sort-Object { $_.Fence.StartOffset } -Descending)) {
@@ -38,7 +58,7 @@ function Register-PackHistoryCompactors {
             for ($index = 0; $index -lt ($history.Exchanges.Count - 2); $index++) {
                 foreach ($message in $history.Exchanges[$index]) {
                     if ($message.Role -ne 'assistant') {
-                        continue 
+                        continue
                     }
                     $spans = @(Get-HarnessPowerShellFencedBlock $message.Content)
                     $fences = @($spans | ForEach-Object { $message.Content.Substring($_.StartOffset, $_.Length).TrimEnd("`r", "`n") })
@@ -49,14 +69,14 @@ function Register-PackHistoryCompactors {
                     $prose = $prose.Trim()
                     $first = [regex]::Match($prose, '(?s)^.*?[.!?](?:\s|$)')
                     $sentence = if ($first.Success) {
-                        $first.Value.Trim() 
+                        $first.Value.Trim()
                     }
                     else {
-                        $prose 
+                        $prose
                     }
                     $text = (@($fences) + @($sentence) | Where-Object { $_ }) -join "`n"
                     if ($text -ne $message.Content) {
-                        $history.Counts.ProseTrim++; $message.Content = $text 
+                        $history.Counts.ProseTrim++; $message.Content = $text
                     }
                 }
             }

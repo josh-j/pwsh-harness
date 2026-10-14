@@ -42,12 +42,26 @@ function Get-EngineBudgetedHistory {
     if ($current.Count) {
         $exchanges.Add($current.ToArray())
     }
-    if (-not $modelProfile) {
-        return @($exchanges | ForEach-Object { $_ })
+    $addendum = if ($modelProfile) {
+        $modelProfile.PromptAddendum
     }
-    $reserved = Get-EngineTokenEstimate $Store ($State.Config.SystemPrompt + $modelProfile.PromptAddendum + $Prompt) $State.Config
-    $budget = [Math]::Max(0, $modelProfile.ContextWindowTokens - $modelProfile.MaxOutputTokens - $State.Config.ContextTokenBudget - $reserved)
-    $windowBudget = $budget
+    else {
+        ''
+    }
+    $reserved = Get-EngineTokenEstimate $Store ($State.Config.SystemPrompt + $addendum + $Prompt) $State.Config
+    $window = if ($modelProfile) {
+        $modelProfile.ContextWindowTokens - $State.Config.MaxTokens
+    }
+    else {
+        $State.Config.InputTokenBudget
+    }
+    $budget = [Math]::Max(0, [Math]::Min($window, $State.Config.InputTokenBudget) - $State.Config.ContextTokenBudget - $reserved)
+    $windowBudget = if ($modelProfile) {
+        [Math]::Max(0, $window - $State.Config.ContextTokenBudget - $reserved)
+    }
+    else {
+        [int]::MaxValue
+    }
     $budget = [Math]::Min($budget, $State.Config.HistoryTokenBudget)
     $estimate = ${function:Get-EngineTokenEstimate}
     $history = [pscustomobject]@{
@@ -58,6 +72,7 @@ function Get-EngineBudgetedHistory {
         RemainingTokens = 0
         Counts          = @{ SupersededCode = 0; ProseTrim = 0; DropOldest = 0 }
         EstimateTokens  = { param($text) & $estimate $Store $text $State.Config }.GetNewClosure()
+        State           = $State
     }
     foreach ($compactor in @($Store.Points.HistoryCompactors.Values | Sort-Object Order, Name)) {
         $null = Invoke-EnginePoint $Store $compactor @($history)
@@ -80,4 +95,58 @@ function Get-EngineBudgetedHistory {
         }
     }
     @($history.Exchanges | ForEach-Object { $_ })
+}
+function Limit-EngineRequest {
+    # Apply the total input bound after all middleware, including repair and continuation requests.
+    param($Turn)
+    $request = $Turn.Request
+    $limit = $request.Config.InputTokenBudget
+    if ($request.Profile) {
+        $limit = [Math]::Min($limit, $request.Profile.ContextWindowTokens - $request.Config.MaxTokens)
+    }
+    # Leave room for wire framing and the provider's proposal schema; estimates are approximate.
+    $budget = [Math]::Max(0, [int][Math]::Floor($limit * 0.9))
+    $messages = [Collections.Generic.List[object]]::new()
+    $messages.AddRange([object[]]$request.Messages)
+    $estimate = ${function:Get-EngineTokenEstimate}
+    $count = {
+        $tokens = 0
+        foreach ($message in $messages) {
+            $raw = & $estimate $Turn.Store $message.Content $request.Config -Uncalibrated
+            $tokens += [Math]::Max($raw, (& $estimate $Turn.Store $message.Content $request.Config)) + 4
+        }
+        $tokens
+    }.GetNewClosure()
+    $before = & $count
+    $groups = @($messages | Where-Object { $_.PSObject.Properties['BudgetGroup'] -and $_.BudgetGroup.StartsWith('history:') } |
+            Select-Object -ExpandProperty BudgetGroup -Unique)
+    # Preserve the most recent exchange: a follow-up such as "fix it" still needs its source.
+    if ($groups.Count) {
+        $groups = @($groups | Select-Object -SkipLast 1)
+    }
+    $groups += @('context')
+    $removed = 0
+    foreach ($group in $groups) {
+        if ((& $count) -le $budget) {
+            break
+        }
+        foreach ($message in @($messages | Where-Object { $_.PSObject.Properties['BudgetGroup'] -and $_.BudgetGroup -ceq $group })) {
+            $null = $messages.Remove($message)
+            $removed++
+        }
+    }
+    $tokens = & $count
+    if ($tokens -gt $budget) {
+        throw "The current request needs about $tokens input tokens; the input budget allows $budget. Shorten the prompt or explicitly raise InputTokenBudget for your gateway. No request was sent."
+    }
+    $request.Messages = $messages.ToArray()
+    $request | Add-Member NoteProperty InputBudget ([pscustomobject]@{
+            EstimatedTokens = $tokens; Limit = $limit; ReservedTokens = $limit - $budget; RemovedMessages = $removed
+        }) -Force
+    if ($removed) {
+        Publish-EngineEvent $Turn.Store HistoryCompacted @{
+            SessionId = $Turn.Session.SessionId; Counts = @{ RequestBudget = $removed }
+            OriginalTokens = $before; RemainingTokens = $tokens; Budget = $budget
+        }
+    }
 }

@@ -87,7 +87,7 @@ function Get-WindowsSaveText {
     $Code.Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd("`n").Replace("`n", $newline) + $newline
 }
 function Get-WindowsChildStartInfo {
-    param([string]$ScriptPath, [switch]$WhatIf)
+    param([string]$ScriptPath, [switch]$WhatIf, [string]$Command = '')
     if ($IsWindows) {
         Test-WindowsExecutionPolicies (Get-ExecutionPolicy -List)
     }
@@ -103,8 +103,18 @@ function Get-WindowsChildStartInfo {
     $info.RedirectStandardError = $true
     $info.StandardOutputEncoding = [Text.Encoding]::UTF8
     $info.StandardErrorEncoding = [Text.Encoding]::UTF8
-    foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath)) {
+    foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass')) {
         $info.ArgumentList.Add($argument)
+    }
+    if ($Command) {
+        $info.ArgumentList.Add('-OutputFormat')
+        $info.ArgumentList.Add('Text')
+        $info.ArgumentList.Add('-EncodedCommand')
+        $info.ArgumentList.Add([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command)))
+    }
+    else {
+        $info.ArgumentList.Add('-File')
+        $info.ArgumentList.Add($ScriptPath)
     }
     if ($WhatIf) {
         $info.ArgumentList.Add('-WhatIf')

@@ -102,7 +102,15 @@ function New-PackOperation {
         }
     }
     $targets = [Collections.Generic.List[object]]::new()
+    $command = $null
     foreach ($block in $blocks) {
+        if (-not $Path -and $block.Code -match '^\s*# harness-command\r?\n') {
+            if ($command) {
+                throw 'Several commands were proposed. Combine them into one command for review.'
+            }
+            $command = $block
+            continue
+        }
         $name = if ($Path) {
             ''
         }
@@ -110,6 +118,23 @@ function New-PackOperation {
             Get-PackFileHeader $block.Code $State
         }
         $targets.Add([pscustomobject]@{ Block = $block; Name = $name })
+    }
+    if ($command) {
+        $execution = Get-PackExecutionIntent $State.LastPrompt
+        if ($execution.Forbidden) {
+            throw 'Execution was excluded by the request. Ask for file changes without a command.'
+        }
+        if ($Kind -eq 'Auto') {
+            $Kind = if ($targets.Count) {
+                'Patch'
+            }
+            else {
+                'Run'
+            }
+        }
+        if ($Kind -eq 'Patch') {
+            $RunAfter = $true
+        }
     }
     if ($Kind -eq 'Auto') {
         $execution = Get-PackExecutionIntent $State.LastPrompt
@@ -148,6 +173,15 @@ function New-PackOperation {
                 [StringComparer]::Ordinal
             }))
     $risks = [Collections.Generic.List[string]]::new()
+    if ($command) {
+        $validation = Test-PackCode $command.Code -NoAnalyzer
+        if (-not $validation.Valid) {
+            throw 'Operation refused: the proposed command has parse errors.'
+        }
+        foreach ($risk in $validation.Risks) {
+            $risks.Add("Command line $($risk.Line): $($risk.Message) [$($risk.Command)]")
+        }
+    }
     foreach ($target in $targets) {
         $validation = Test-PackCode $target.Block.Code -NoAnalyzer
         if (-not $validation.Valid) {
@@ -188,7 +222,7 @@ function New-PackOperation {
         }
     }
     $entry = $null
-    if ($Kind -eq 'Patch' -and $RunAfter) {
+    if ($Kind -eq 'Patch' -and $RunAfter -and -not $command) {
         $selectedPath = ''
         if ($EntryPath) {
             $selectedPath = Resolve-PackOperationPath $State $EntryPath
@@ -220,7 +254,10 @@ function New-PackOperation {
         }
         $entry = @($entries)[0]
     }
-    [pscustomobject]@{ Kind = $Kind; RunAfter = [bool]$RunAfter; Block = $(if ($entry) {
+    [pscustomobject]@{ Kind = $Kind; RunAfter = [bool]$RunAfter; Block = $(if ($command) {
+                $command
+            }
+            elseif ($entry) {
                 $entry.Block
             }
             else {

@@ -56,7 +56,13 @@ function Initialize-PackCommands {
         else {
             $null
         }
-        [pscustomobject]@{ LastTurn = $last; Session = $c.State.Usage } | ConvertTo-Json -Depth 6
+        $budget = if ($c.State.LastResult -and $c.State.LastResult.PSObject.Properties['InputBudget']) {
+            $c.State.LastResult.InputBudget
+        }
+        else {
+            $null
+        }
+        [pscustomobject]@{ LastTurn = $last; Session = $c.State.Usage; InputBudget = $budget } | ConvertTo-Json -Depth 6
     } 'Show actual input/output, cached/reasoning counters and session totals.'
     Add-PackCommand history {
         param($c) ($c.State.Transcript |

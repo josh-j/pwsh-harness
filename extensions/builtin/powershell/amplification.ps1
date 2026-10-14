@@ -1,13 +1,13 @@
 function Merge-PackFunctionEdit {
     param($Context)
     if (-not $Context.Config.FunctionEdits -or -not $Context.State.LastResult -or -not $Context.State.LastResult.CodeBlocks.Count -or -not $Context.Result.CodeBlocks.Count) {
-        return 
+        return
     }
     $previous = $Context.State.LastResult.CodeBlocks[0].Code
     $incoming = $Context.Result.CodeBlocks[0].Code
     $old = Get-WindowsSyntax $previous; $new = Get-WindowsSyntax $incoming
     if ($old.Errors.Count -or $new.Errors.Count) {
-        return 
+        return
     }
     $oldFunctions = @($old.Ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.FunctionDefinitionAst] })
     $newFunctions = @($new.Ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.FunctionDefinitionAst] })
@@ -16,33 +16,33 @@ function Merge-PackFunctionEdit {
     $oldHasBody = @($old.Ast.EndBlock.Statements | Where-Object { $_ -isnot [Management.Automation.Language.FunctionDefinitionAst] }).Count -gt 0
     $fullMarker = @($new.Tokens | Where-Object { $_.Kind -eq 'Comment' -and $_.Text -match '^#\s*full-script\s*$' }).Count -gt 0
     if ($other.Count -or $fullMarker -or (-not $oldHasBody -and $oldFunctions.Count -gt 0 -and @($oldFunctions | Where-Object Name -NotIn $newFunctions.Name).Count -eq 0)) {
-        return 
+        return
     }
     $remove = @{}
     foreach ($token in $new.Tokens | Where-Object Kind -EQ Comment) {
         if ($token.Text -match '^#\s*remove:\s*([\w-]+)\s*$') {
-            $remove[$Matches[1]] = $true 
+            $remove[$Matches[1]] = $true
         }
     }
     if (-not $newFunctions.Count -and -not $remove.Count) {
-        return 
+        return
     }
     $replacements = @{}; $edits = [Collections.Generic.List[object]]::new()
     foreach ($function in $newFunctions) {
         if ($replacements.ContainsKey($function.Name)) {
-            throw 'Duplicate function names in edit response.' 
+            throw 'Duplicate function names in edit response.'
         }
         $replacements[$function.Name] = $function.Extent.Text
     }
     foreach ($function in $oldFunctions) {
         if ($remove.ContainsKey($function.Name)) {
-            $after = '' 
+            $after = ''
         }
         elseif ($replacements.ContainsKey($function.Name)) {
-            $after = $replacements[$function.Name] 
+            $after = $replacements[$function.Name]
         }
         else {
-            continue 
+            continue
         }
         $edits.Add((New-WindowsEdit $old $function.Extent.StartOffset ($function.Extent.EndOffset - $function.Extent.StartOffset) $after FunctionEdits))
         $replacements.Remove($function.Name)
@@ -68,11 +68,15 @@ When editing: return only changed/new function definitions and # remove: Name co
 For a full replacement, include # full-script or an explicit script-body statement.
 '@
         $code = $Request.State.LastResult.CodeBlocks[0].Code
-        $current = New-HarnessMessage user ("<current-script>" + "`n" + '```powershell' + "`n$code`n" + '```' + "`n</current-script>")
-        $messages = @($Request.Messages)
-        $Request.Messages = @($messages | Select-Object -SkipLast 1) + @($current, $messages[-1])
+        if ($Request.Prompt -notlike 'Continue the user*' -and $Request.Prompt -match '(?i)\b(edit|change|update|modify|fix|repair|replace|function)\b' -and
+            -not @($Request.Messages | Where-Object { $_.Content.Contains($code) }).Count) {
+            $current = New-HarnessMessage user ("<current-script>" + "`n" + '```powershell' + "`n$code`n" + '```' + "`n</current-script>")
+            $messages = @($Request.Messages)
+            $Request.Messages = @($messages | Select-Object -SkipLast 1) + @($current, $messages[-1])
+        }
     }
-    if ($Request.Config.Scaffold -and $Request.Prompt -match '(?i)\b(function|script)\b') {
+    if ($Request.Config.Scaffold -and $Request.Prompt -notlike 'Continue the user*' -and
+        $Request.Prompt -match '(?i)\b(write|create|generate|implement|build)\b[^\r\n]*\b(function|script)\b') {
         if ($Request.Config.Behavior -ne 'code') {
             $Request.Messages[0].Content += "`nThe following scaffold applies only if this request calls for a PowerShell script."
         }
@@ -96,10 +100,10 @@ function Get-PackEditDistance {
     $a = $Left.ToLowerInvariant(); $b = $Right.ToLowerInvariant()
     $matrix = [int[, ]]::new($a.Length + 1, $b.Length + 1)
     for ($i = 0; $i -le $a.Length; $i++) {
-        $matrix[$i, 0] = $i 
+        $matrix[$i, 0] = $i
     }
     for ($j = 0; $j -le $b.Length; $j++) {
-        $matrix[0, $j] = $j 
+        $matrix[0, $j] = $j
     }
     for ($i = 1; $i -le $a.Length; $i++) {
         for ($j = 1; $j -le $b.Length; $j++) {
@@ -119,16 +123,16 @@ function Add-PackGroundedHint {
     $commands = @($syntax.Ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] }, $true))
     foreach ($diagnostic in $Diagnostics) {
         if ($diagnostic.Code -notin @('UnknownCommand', 'UnknownParameter', 'AmbiguousParameter')) {
-            $diagnostic; continue 
+            $diagnostic; continue
         }
         $command = $commands | Where-Object { $_.Extent.StartLineNumber -le $diagnostic.Line -and $_.Extent.EndLineNumber -ge $diagnostic.Line } | Select-Object -First 1
         if (-not $command) {
-            $diagnostic; continue 
+            $diagnostic; continue
         }
         $name = $command.GetCommandName(); $catalog = $Target.CommandCatalog
         $entry = $catalog.Resolve($name)
         if ($entry.Kind -eq 'Alias') {
-            $name = $entry.Definition; $entry = $catalog.Resolve($name) 
+            $name = $entry.Definition; $entry = $catalog.Resolve($name)
         }
         if ($diagnostic.Code -eq 'UnknownCommand') {
             $candidates = @($catalog.Entries.Keys)
@@ -144,7 +148,7 @@ function Add-PackGroundedHint {
             $suggestions = @($candidates | ForEach-Object {
                     $distance = Get-PackEditDistance $needle $_
                     if ($_.StartsWith($needle, [StringComparison]::OrdinalIgnoreCase)) {
-                        $distance -= 2 
+                        $distance -= 2
                     }
                     [pscustomobject]@{ Name = $_; Distance = $distance }
                 } | Sort-Object Distance, Name | Select-Object -First 3)
@@ -156,7 +160,7 @@ function Add-PackGroundedHint {
 function Test-PackSemanticCode {
     param($Block, $Config)
     if (-not $Config.SemanticCritics) {
-        return 
+        return
     }
     $syntax = Get-WindowsSyntax $Block.Code
     foreach ($function in $syntax.Ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
@@ -202,13 +206,13 @@ function Test-PackSemanticCode {
 function Get-PackSamplingPolicy {
     param($Context)
     if (-not $Context.Config.BestOfN -or -not @($Context.Result.Diagnostics | Where-Object Severity -EQ Error).Count) {
-        return 
+        return
     }
     [pscustomobject]@{ Count = $Context.Config.BestOfNCount; TemperatureOffset = 0.3; Score = {
             param($Result)
             100 * @($Result.Diagnostics | Where-Object Severity -EQ Error).Count +
             5 * @($Result.Diagnostics | Where-Object Severity -EQ Warning).Count + @($Result.Edits).Count
-        } 
+        }
     }
 }
 function Register-PackAmplification {

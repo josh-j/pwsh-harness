@@ -521,7 +521,7 @@ function Get-HarnessRenderModel {
         'Working | Ctrl+C cancel | ' + $bar.LogText
     }
     elseif ($operation -and $operation.Status -eq 'Ready') {
-        "F5 Review & $($operation.Label.ToLowerInvariant()) | F10 Discard | F12 Logs"
+        "Enter Review & $($operation.Label.ToLowerInvariant()) | F10 Discard | F12 Logs"
     }
     elseif ($operation) {
         "$($operation.Label): $($operation.Status) | F12 Logs | $($bar.LogText)"
@@ -746,6 +746,10 @@ function Update-HarnessEditor {
             }
             switch ($Key.Key) {
                 Enter {
+                    if (-not $editor.Text -and -not $editor.Paste -and -not $MoreKeys -and $Key.Modifiers -eq 0 -and
+                        $View.SessionView.Operation -and $View.SessionView.Operation.Status -eq 'Ready') {
+                        return [pscustomobject]@{ Action = 'Review'; Prompt = '/approve' }
+                    }
                     if ($Key.Modifiers -ne 0 -or $MoreKeys -or $editor.Paste -or $editor.Text.TrimEnd().EndsWith('`')) {
                         $editor.Text = $editor.Text.Insert($editor.Cursor, "`n")
                         $editor.Cursor++

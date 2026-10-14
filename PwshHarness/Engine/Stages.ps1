@@ -15,11 +15,18 @@ function Resolve-EngineContextStage {
     if ($context.StableText) {
         $messages.Add((New-HarnessMessage user "<project-conventions>`n$($context.StableText)`n</project-conventions>"))
     }
+    $exchange = 0
     foreach ($message in @(Get-EngineBudgetedHistory $Turn.Store $Turn.Session $Turn.Prompt)) {
+        if ($message.Role -eq 'user') {
+            $exchange++
+        }
+        $message | Add-Member NoteProperty BudgetGroup "history:$exchange"
         $messages.Add($message)
     }
     if ($context.VolatileText) {
-        $messages.Add((New-HarnessMessage user "<project-context>`n$($context.VolatileText)`n</project-context>"))
+        $message = New-HarnessMessage user "<project-context>`n$($context.VolatileText)`n</project-context>"
+        $message | Add-Member NoteProperty BudgetGroup 'context'
+        $messages.Add($message)
     }
     $messages.Add((New-HarnessMessage user $Turn.Prompt))
     Add-EngineTranscript $Turn.Session user $Turn.Prompt
@@ -39,7 +46,11 @@ function Build-EngineRequestStage {
         $source = $Turn.MinimalMessages
     }
     $Turn.Request = New-HarnessChatRequest -Messages @($source | ForEach-Object {
-            New-HarnessMessage -Role $_.Role -Content $_.Content
+            $copy = New-HarnessMessage -Role $_.Role -Content $_.Content
+            if ($_.PSObject.Properties['BudgetGroup']) {
+                $copy | Add-Member NoteProperty BudgetGroup $_.BudgetGroup
+            }
+            $copy
         }) -Model $Turn.Config.Model -Config (Copy-EngineConfigValue $Turn.Config) -State $Turn.Session -Prompt $Turn.Prompt
     $modelProfile = Get-EngineProfile $Turn.Store $Turn.Config
     $Turn.Request | Add-Member NoteProperty RepairAttempt $Turn.Repairs
@@ -84,6 +95,7 @@ function Invoke-EngineMiddlewareStage {
         }
     }
     Assert-HarnessChatRequest $Turn.Request
+    Limit-EngineRequest $Turn
     Publish-EngineEvent $Turn.Store RequestPrepared $Turn.Request
 }
 function Send-EngineRequestStage {
@@ -124,6 +136,7 @@ function Send-EngineRequestStage {
             Usage                 = $usage
             EstimatedPromptTokens = $estimated
             FinishReason          = $Turn.Response.FinishReason
+            InputBudget           = $Turn.Request.InputBudget
         })
     Add-EngineUsage $Turn.Usage $usage
     Update-EngineCalibration $Turn.Store $Turn.Config $usage.prompt_tokens $estimated
@@ -268,6 +281,7 @@ function Add-EngineCommitStage {
             }) -join "`n")
     $Turn.Result.Usage = $Turn.Usage
     $Turn.Result.Requests = $Turn.Requests.ToArray()
+    $Turn.Result | Add-Member NoteProperty InputBudget $Turn.Request.InputBudget
     Add-EngineUsage $Turn.Session.Usage $Turn.Usage
     $Turn.UsageAccounted = $true
     $Turn.Session.LastResult = $Turn.Result

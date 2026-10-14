@@ -77,10 +77,16 @@ function Set-HarnessViewSnapshot {
     $bar.Model = $Snapshot.Config.Model
     $bar.Behavior = $Snapshot.Config.Behavior
     $bar.Ascii = $Snapshot.Config.'Tui.Ascii'
-    if ($bar.Tokens -eq 0) {
+    if ($Snapshot.LastResult -and $Snapshot.LastResult.PSObject.Properties['InputBudget']) {
+        $bar.Tokens = $Snapshot.LastResult.InputBudget.EstimatedTokens
+    }
+    elseif ($bar.Tokens -eq 0) {
         $bar.Tokens = [Math]::Ceiling((((@($Snapshot.Transcript | ForEach-Object { $_.Text }) -join '')).Length + $Snapshot.Context.Text.Length) / 4)
     }
-    $bar.Budget = $Snapshot.Profile.ContextWindowTokens - $Snapshot.Profile.MaxOutputTokens
+    $bar.Budget = $Snapshot.Config.InputTokenBudget
+    if ($Snapshot.Profile) {
+        $bar.Budget = [Math]::Min($bar.Budget, $Snapshot.Profile.ContextWindowTokens - $Snapshot.Config.MaxTokens)
+    }
     $bar.Target = "$($Snapshot.Target.OS) $($Snapshot.Target.PSVersion) catalog:$($Snapshot.Catalog)"
     if ($Snapshot.Context.Project) {
         $bar.Repo = "$([IO.Path]::GetFileName($Snapshot.Context.Project.Root))/$($Snapshot.Context.Project.Branch) files:$($Snapshot.Context.Project.Included.Count)"

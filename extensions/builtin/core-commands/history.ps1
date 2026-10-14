@@ -7,7 +7,7 @@ function Register-CoreHistoryCompactor {
             }
             $history.OriginalTokens = $tokens
             # Recent exchanges survive soft compaction; the provider's hard window remains authoritative.
-            while ($history.Exchanges.Count -and $tokens -gt $history.Budget -and
+            while ($history.Exchanges.Count -gt 1 -and $tokens -gt $history.Budget -and
                 ($history.Exchanges.Count -gt 2 -or $tokens -gt $history.WindowBudget)) {
                 $tokens -= & $history.EstimateTokens ($history.Exchanges[0].Content -join "`n")
                 $history.Exchanges.RemoveAt(0)

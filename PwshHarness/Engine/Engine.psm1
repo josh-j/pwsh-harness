@@ -1297,6 +1297,7 @@ function New-HarnessHost {
         ContextPath          =(Get-Location).ProviderPath
         RepairMode           ='Minimal'
         HistoryTokenBudget   =12000
+        InputTokenBudget     =8192
         ContextTokenBudget   =2000
         ContextAutoFiles     =$false
         ContextIncludeDiff   =$false
@@ -1329,6 +1330,7 @@ function New-HarnessHost {
         } }
     $store.Points.Settings.RepairMode.Validator = { param($v) $v -in @('Minimal', 'Full') }
     $store.Points.Settings.HistoryTokenBudget.Validator = { param($v) $v -ge 0 }
+    $store.Points.Settings.InputTokenBudget.Validator = { param($v) $v -gt 0 }
     $store.Points.Settings.ContextTokenBudget.Validator = { param($v) $v -ge 0 }
     $store.Points.Settings.ContinuationAttempts.Validator = { param($v) $v -ge 0 }
     $store.Points.Settings.MaxTokens.Validator = { param($v) $v -gt 0 }
