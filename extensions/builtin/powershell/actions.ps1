@@ -251,6 +251,7 @@ function Invoke-HarnessRun {
                 ''
             })
         WhatIf      = [bool]$WhatIf
+        Cancelled   = [bool]($failure -and $failure.Exception.GetBaseException() -is [OperationCanceledException])
     }
     $outcome = "Exit code: $exitCode"
     if ($failure) {

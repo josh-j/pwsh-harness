@@ -1483,6 +1483,7 @@ function New-HarnessHost {
                 Target     =$target
                 Catalog    =$catalog
                 Persist    =$Session.Persist
+                SessionId  =$Session.SessionId
             })
     }.GetNewClosure()
     $hostApi | Add-Member ScriptMethod RestoreResult {

@@ -72,6 +72,8 @@ function New-HarnessHost {
         -SavedCredentialFactory { param($service) New-HarnessCredentialStore $service }
     $hostInstance.ExtensionLoader.Load(@(Join-Path $project 'extensions/builtin'))
     $hostInstance.Settings.Declare('Tui.Ascii', [bool], $false)
+    $hostInstance.Settings.Declare('Tui.Inline', [bool], $true)
+    $hostInstance.Settings.Declare('Tui.ContinueAfterAction', [bool], $true)
     $hostInstance.Renderers.Add('Default', (Get-Command PwshHarness.Tui\Get-HarnessRenderModel).ScriptBlock, 100)
     $hostInstance.ExtensionLoader.Load($ExtensionPaths)
     $references = $script:Hosts

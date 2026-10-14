@@ -754,10 +754,12 @@ function Invoke-PackFixCommand {
 }
 function Register-PackOperations {
     $script:PackOperations = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
+    $script:PackContinuations = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
     $script:PackOperationStates = [Collections.Generic.Dictionary[string, WeakReference]]::new()
     $script:Harness.Commands.Add('patch', { param($context) Invoke-PackPrepareCommand $context }, 'Prepare generated file changes; infer the block, path and entry script when possible. /patch [--run [--entry path]] [--block N] [path]')
     $script:Harness.Commands.Add('approve', ${function:Invoke-PackApproveCommand}, 'Complete the latest displayed operation with one approval; infer the current block and path.')
     $script:Harness.Commands.Add('cancel', ${function:Invoke-PackCancelCommand}, 'Discard the pending patch/run operation.')
+    $script:Harness.Commands.Add('continue', ${function:Invoke-PackContinueCommand}, 'Continue the task from the latest captured apply/run results; each new operation needs approval.')
     $script:Harness.Commands.Add('fix', ${function:Invoke-PackFixCommand}, 'Repair all generated files: /fix all. Review the new files, then /apply all or /approve.')
     $script:Harness.Actions.Add('apply', { param($context) Invoke-PackApplyAction $context }, $false)
     $script:Harness.Actions.Add('apply-all', { param($context) Invoke-PackApplyAction $context -All }, $false)
@@ -795,6 +797,7 @@ function Register-PackOperations {
                 $state = $script:PackOperationStates[$notice.SessionId].Target
                 if ($state) {
                     $null = $script:PackOperations.Remove($state)
+                    $null = $script:PackContinuations.Remove($state)
                 }
                 $null = $script:PackOperationStates.Remove($notice.SessionId)
             }

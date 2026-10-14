@@ -11,10 +11,24 @@ function Get-HarnessFrontendErrorMessage {
 function Set-HarnessViewSnapshot {
     param($View, $Snapshot, [switch]$Conversation)
     if ($Conversation) {
+        $View.SessionView.SessionId = $Snapshot.SessionId
         $View.SessionView.Operation = $null
         $View.SessionView.Records.Clear()
+        $previousRecord = $null
         foreach ($record in $Snapshot.Transcript) {
-            $View.SessionView.Records.Add($record)
+            $display = $record
+            if ($record.Role -eq 'user' -and $previousRecord -and $previousRecord.Role -eq 'continuation' -and $previousRecord.Metadata) {
+                $metadata = $previousRecord.Metadata
+                $tagged = (Test-HarnessRecordProperty $metadata 'PromptHash') -and (Test-HarnessRecordProperty $metadata 'DisplayText')
+                if ($tagged -and $metadata.DisplayText -is [string]) {
+                    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($record.Text)))
+                    if ($hash -ceq $metadata.PromptHash) {
+                        $display = [pscustomobject]@{ Role = 'user'; Text = $metadata.DisplayText }
+                    }
+                }
+            }
+            $View.SessionView.Records.Add($display)
+            $previousRecord = $record
         }
         $View.SessionView.LastResult = $Snapshot.LastResult
         if ($Snapshot.LastResult) {
@@ -33,6 +47,8 @@ function Set-HarnessViewSnapshot {
     }
     $View.Editor.HistoryIndex = $View.Editor.History.Count
     $bar = $View.StatusBar
+    $bar.Inline = $Snapshot.Config.'Tui.Inline'
+    $bar.ContinueAfterAction = $Snapshot.Config.'Tui.ContinueAfterAction'
     $bar.LogText = if ($Snapshot.Persist) {
         'log:saved (F12)'
     }
@@ -152,7 +168,14 @@ function Get-HarnessActiveRenderModel {
             $frame.Status -isnot [string] -or $frame.Width -ne [Math]::Max(20, $Width) -or $frame.Height -ne [Math]::Max(8, $Height) -or $frame.CursorRow -lt 0 -or $frame.CursorRow -ge $frame.Height -or $frame.CursorColumn -lt 0 -or $frame.CursorColumn -ge $frame.Width) {
             throw 'Renderer returned an invalid frame.'
         }
-        foreach ($row in $frame.Rows) {
+        $validateRows = @($frame.Rows)
+        if ($frame.PSObject.Properties['AllTranscript']) {
+            $validateRows += @($frame.AllTranscript)
+        }
+        foreach ($row in $validateRows) {
+            if ((Get-HarnessTextWidth ($row.Segments.Text -join '')) -gt $frame.Width) {
+                throw 'Renderer returned an oversized row.'
+            }
             foreach ($segment in $row.Segments) {
                 if ($segment.Text -isnot [string] -or $segment.Color -notin @('Default', 'Black', 'Red', 'Green', 'Yellow', 'Blue', 'Magenta', 'Cyan', 'White', 'BrightBlack', 'BrightRed', 'BrightGreen', 'BrightYellow', 'BrightBlue', 'BrightMagenta', 'BrightCyan', 'BrightWhite') -or
                     ($segment.Text.Contains("`n") -or $segment.Text -cne (ConvertTo-HarnessSafeText $segment.Text))) {
@@ -255,7 +278,7 @@ function Invoke-HarnessFrontendInput {
         }
         finally {
             if (-not $LineMode) {
-                $Terminal.Enter()
+                $Terminal.Enter(-not $View.StatusBar.Inline)
                 $Terminal.Previous = $null
             }
         }
@@ -288,6 +311,12 @@ function Invoke-HarnessFrontendInput {
         }
         if ($output -and $output.PSObject.Properties['Action'] -and $output.Action -eq 'Send') {
             $Text = $output.Prompt
+            if ($output.PSObject.Properties['DisplayPrompt']) {
+                $View.SessionView.NextPromptSummary = $output.DisplayPrompt
+                if ($LineMode) {
+                    $Terminal.WriteText(($output.DisplayPrompt + "`n"))
+                }
+            }
         }
         else {
             if ($output) {
@@ -345,12 +374,15 @@ function Invoke-HarnessFrontendInput {
     }
     finally {
         $View.SessionView.Busy = $false
+        $View.SessionView.NextPromptSummary = ''
         $cancellation.Dispose()
         Set-HarnessViewSnapshot $View ($HarnessHost.GetConversationSnapshot($Session)) -Conversation
     }
 }
 function Invoke-HarnessSafeFrontendInput {
     param($HarnessHost, $Session, $View, $Terminal, [string]$Text, [scriptblock]$Pump, [bool]$LineMode = $false, $ReviewedOperation = $null)
+    $beforeCount = $Session.Transcript.Count
+    $beforeId = $Session.SessionId
     try {
         Invoke-HarnessFrontendInput $HarnessHost $Session $View $Terminal $Text $Pump $LineMode $ReviewedOperation
     }
@@ -372,6 +404,11 @@ function Invoke-HarnessSafeFrontendInput {
         if ($LineMode) {
             $Terminal.WriteText("Error: $message`n")
         }
+    }
+    if ($Text.StartsWith('/') -and $View.StatusBar.ContinueAfterAction -and -not $View.Quit -and
+        [string]::Equals($beforeId, $Session.SessionId, [StringComparison]::Ordinal) -and $HarnessHost.Commands.Contains('continue') -and
+        @($Session.Transcript | Select-Object -Skip $beforeCount | Where-Object Role -In @('run', 'patch', 'patch-rollback')).Count) {
+        Invoke-HarnessSafeFrontendInput $HarnessHost $Session $View $Terminal '/continue --auto' $Pump $LineMode
     }
 }
 function Invoke-HarnessFrontend {
@@ -475,7 +512,8 @@ function Invoke-HarnessFrontend {
             }
         }
         else {
-            $Terminal.Enter()
+            $Terminal.Inline = $View.StatusBar.Inline
+            $Terminal.Enter(-not $View.StatusBar.Inline)
             while (-not $View.Quit) {
                 $size = $Terminal.GetSize()
                 $dimensions = "$($size.Width)x$($size.Height)"

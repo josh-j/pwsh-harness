@@ -51,6 +51,7 @@ function New-HarnessFakeTerminal {
         InputEncoding           ='original-input'
         PipeEncoding            ='original-pipe'
         Saved                   =$null
+        Inline                  =$false
     }
     $terminal | Add-Member ScriptMethod GetSize { $this.Size }
     $terminal | Add-Member ScriptMethod Available {
@@ -233,6 +234,28 @@ function Set-HarnessTerminalState {
 }
 function Restore-HarnessTerminalState {
     param($Terminal)
+    if ($Terminal.InlineActive) {
+        try {
+            $down = if ($Terminal.InlineState) {
+                $Terminal.InlineState.Rows.Count - 1 - $Terminal.InlineState.CursorRow
+            }
+            else {
+                0
+            }
+            $move = if ($down -gt 0) {
+                "`e[$($down)B"
+            }
+            else {
+                ''
+            }
+            $Terminal.Api.Write($move + "`r`n`e[0m`e[?25h")
+        }
+        catch {
+            Write-Verbose "Could not restore inline terminal: $_"
+        }
+        $Terminal.InlineActive = $false
+        $Terminal.InlineState = $null
+    }
     if ($Terminal.Entered) {
         try {
             $Terminal.Api.Write("`e[0m`e[?25h`e[?1049l")
@@ -270,6 +293,7 @@ function New-HarnessStreamTerminal {
         Kind = 'Stream'; Api = $ConsoleApi; Capabilities = $Capabilities
         Interactive = $false; SupportsVirtualTerminal = $false
         Previous = $null; Changed = [ordered]@{}; Entered = $false
+        Inline = $false; InlineActive = $false; InlineState = $null
     }
     $terminal | Add-Member ScriptMethod Available { $false }
     $terminal | Add-Member ScriptMethod GetSize { [pscustomobject]@{ Width = 80; Height = 24 } }
@@ -306,6 +330,7 @@ function New-HarnessConsoleTerminal {
         Kind = 'Console'; Api = $ConsoleApi; Capabilities = $Capabilities
         SupportsVirtualTerminal = $Capabilities.SupportsVT; Interactive = $true
         Previous = $null; Changed = [ordered]@{}; Entered = $false
+        Inline = $false; InlineActive = $false; InlineState = $null
     }
     $terminal | Add-Member ScriptMethod GetSize { [pscustomobject]@{
             Width  = [Math]::Max(20, $this.Api.Get('WindowWidth'))
@@ -324,19 +349,33 @@ function New-HarnessConsoleTerminal {
             & $setState $this $name $utf8
         }
         & $setState $this 'Control' $true
-        if ($UseAlternate) {
+        if ($UseAlternate -or $this.Inline) {
             & $setState $this 'Rendering' 'Ansi'
             if ($this.Capabilities.CursorObservable) {
                 & $setState $this 'Cursor' $false
             }
-            $this.Api.Write("`e[?1049h`e[H")
-            $this.Entered = $true
+            if ($UseAlternate) {
+                $this.Api.Write("`e[?1049h`e[H")
+                $this.Entered = $true
+            }
+            else {
+                $this.Api.Write("`r`n")
+                $this.InlineActive = $true
+            }
         }
     }.GetNewClosure()
     $terminal | Add-Member ScriptMethod Restore { & $restoreState $this }.GetNewClosure()
     $changedRows = ${function:Get-HarnessChangedRows}
+    $inlineDraw = ${function:Get-HarnessInlineDraw}
     $terminal | Add-Member ScriptMethod Draw {
         param($Frame)
+        if ($this.Inline) {
+            $draw = & $inlineDraw $this.InlineState $Frame
+            $this.Api.Write($draw.Text)
+            $this.InlineState = $draw.State
+            $this.Previous = $Frame
+            return
+        }
         $builder = [Text.StringBuilder]::new()
         $null = $builder.Append("`e[?25l")
         foreach ($index in @(& $changedRows $this.Previous $Frame)) {

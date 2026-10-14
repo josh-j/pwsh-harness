@@ -6,6 +6,7 @@
 . (Join-Path $PSScriptRoot 'language.ps1')
 . (Join-Path $PSScriptRoot 'actions.ps1')
 . (Join-Path $PSScriptRoot 'operations.ps1')
+. (Join-Path $PSScriptRoot 'continuation.ps1')
 . (Join-Path $PSScriptRoot 'catalog.ps1')
 . (Join-Path $PSScriptRoot 'windows.ps1')
 . (Join-Path $PSScriptRoot 'save.ps1')
