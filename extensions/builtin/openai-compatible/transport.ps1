@@ -1,6 +1,6 @@
 function New-HarnessRequestBody {
-    param([object]$Context, [switch]$DisableReasoning)
-    # Deliberately enumerate a closed allowlist. Tool/function calling is unavailable.
+    param([object]$Context, [switch]$DisableReasoning, [switch]$DisableTools)
+    # Deliberately enumerate a closed allowlist, including only the proposal tool.
     $messages = @($Context.Messages | ForEach-Object { @{
                 role    = $_.Role
                 content = $_.Content
@@ -11,23 +11,7 @@ function New-HarnessRequestBody {
     else {
         $null
     }
-    if ($Context.Config['SystemPromptMode'] -ne 'system') {
-        $compatible = [Collections.Generic.List[object]]::new()
-        foreach ($message in $messages) {
-            if ($message.role -eq 'system') {
-                $message.role = 'user'
-                $message.content = "[Harness instructions]`n$($message.content)"
-            }
-            if ($message.role -eq 'user' -and $compatible.Count -and $compatible[-1].role -eq 'user') {
-                $compatible[-1].content += "`n`n" + $message.content
-            }
-            else {
-                $compatible.Add($message)
-            }
-        }
-        $messages = $compatible.ToArray()
-    }
-    elseif ($modelProfile -and $modelProfile.MergeSystemMessages) {
+    if ($modelProfile -and $modelProfile.MergeSystemMessages) {
         $systems = @($messages | Where-Object role -EQ system)
         if ($systems.Count) {
             $first = @{
@@ -55,7 +39,136 @@ function New-HarnessRequestBody {
     if (-not $DisableReasoning -and $modelProfile -and $null -ne $modelProfile.ReasoningEffort) {
         $body.reasoning_effort = $modelProfile.ReasoningEffort
     }
+    if ($Context.Config.UseToolsApi -and -not $DisableTools) {
+        $body.tools = @(@{
+                type     = 'function'
+                function = @{
+                    name        = 'prepare_powershell'
+                    description = 'Submit complete PowerShell scripts for user review, never execute. Use one file per change; path is relative or empty for an unnamed command/script. The user must approve writes and execution.'
+                    parameters  = @{
+                        type = 'object'; additionalProperties = $false; required = @('files')
+                        properties = @{
+                            files = @{
+                                type = 'array'; minItems = 1; maxItems = 64
+                                items = @{
+                                    type = 'object'; additionalProperties = $false; required = @('path', 'code')
+                                    properties = @{ path = @{ type = 'string' }; code = @{ type = 'string' } }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+        $body.tool_choice = 'auto'
+    }
     $body | ConvertTo-Json -Depth 30 -Compress
+}
+function Add-HarnessToolDeltas {
+    param([hashtable]$Calls, $StreamEvent, [bool]$Enabled)
+    if (-not $StreamEvent.Raw -or -not $StreamEvent.Raw.ContainsKey('choices')) {
+        return
+    }
+    foreach ($choice in $StreamEvent.Raw.choices) {
+        if ($choice.ContainsKey('index') -and $choice.index -ne 0) {
+            continue
+        }
+        if (-not $choice.ContainsKey('delta') -or -not $choice.delta) {
+            continue
+        }
+        if ($choice.delta.ContainsKey('function_call')) {
+            throw 'Legacy function calls are unsupported.'
+        }
+        if (-not $choice.delta.ContainsKey('tool_calls')) {
+            continue
+        }
+        if (-not $Enabled) {
+            throw 'Gateway returned tool calls while UseToolsApi is disabled.'
+        }
+        foreach ($delta in $choice.delta.tool_calls) {
+            if ($delta -isnot [Collections.IDictionary] -or -not $delta.ContainsKey('index') -or
+                $delta.index -isnot [long] -and $delta.index -isnot [int] -or $delta.index -lt 0 -or $delta.index -ge 64) {
+                throw 'Invalid tool call index.'
+            }
+            $index = [int]$delta.index
+            if (-not $Calls.ContainsKey($index)) {
+                $Calls[$index] = @{ Name = ''; Arguments = [Text.StringBuilder]::new() }
+            }
+            if ($delta.ContainsKey('type') -and $delta.type -ne 'function') {
+                throw 'Unsupported tool call type.'
+            }
+            if ($delta.ContainsKey('function') -and $delta.function) {
+                $function = $delta.function
+                if ($function.ContainsKey('name') -and $function.name) {
+                    if ($Calls[$index].Name -and $Calls[$index].Name -cne $function.name) {
+                        throw 'Tool call name changed.'
+                    }
+                    $Calls[$index].Name = [string]$function.name
+                }
+                if ($function.ContainsKey('arguments')) {
+                    if ($function.arguments -isnot [string]) {
+                        throw 'Invalid tool arguments.'
+                    }
+                    $total = $function.arguments.Length
+                    foreach ($call in $Calls.Values) {
+                        $total += $call.Arguments.Length
+                    }
+                    if ($total -gt 1048576) {
+                        throw 'Tool arguments exceed the size limit.'
+                    }
+                    $null = $Calls[$index].Arguments.Append($function.arguments)
+                }
+            }
+        }
+    }
+}
+function ConvertFrom-HarnessToolProposals {
+    param([hashtable]$Calls, [string]$FinishReason, [string[]]$Redact)
+    if (-not $Calls.Count) {
+        if ($FinishReason -ceq 'tool_calls') {
+            throw 'Incomplete tool call response; no operation prepared.'
+        }
+        return ''
+    }
+    if ($FinishReason -cne 'tool_calls') {
+        throw 'Incomplete tool call response; no operation prepared.'
+    }
+    $blocks = [Collections.Generic.List[string]]::new()
+    foreach ($index in @($Calls.Keys | Sort-Object)) {
+        $call = $Calls[$index]
+        if ($call.Name -cne 'prepare_powershell') {
+            throw 'Unsupported model tool; no operation prepared.'
+        }
+        try {
+            $proposalData = $call.Arguments.ToString() | ConvertFrom-Json -AsHashtable -Depth 30 -ErrorAction Stop
+        }
+        catch {
+            throw 'Invalid tool argument JSON; no operation prepared.'
+        }
+        if ($proposalData -isnot [Collections.IDictionary] -or $proposalData.Count -ne 1 -or -not $proposalData.ContainsKey('files') -or
+            $proposalData.files -isnot [array] -or $proposalData.files.Count -lt 1 -or $proposalData.files.Count -gt 64) {
+            throw 'Invalid proposal files.'
+        }
+        foreach ($file in $proposalData.files) {
+            if ($blocks.Count -ge 64 -or $file -isnot [Collections.IDictionary] -or $file.Count -ne 2 -or
+                -not $file.ContainsKey('path') -or -not $file.ContainsKey('code') -or
+                $file.path -isnot [string] -or $file.code -isnot [string] -or -not $file.code.Trim() -or
+                $file.path -match '[\x00-\x1f\x7f]') {
+                throw 'Invalid PowerShell proposal.'
+            }
+            $code = Protect-HarnessProviderText $file.code $Redact
+            $path = Protect-HarnessProviderText $file.path $Redact
+            if ($path) {
+                $code = '# File: ' + $path + "`n" + $code
+            }
+            $length = 3
+            foreach ($match in [regex]::Matches($code, '(?m)^\s*(`{3,})')) {
+                $length = [Math]::Max($length, $match.Groups[1].Length + 1)
+            }
+            $fence = [string]::new([char]96, $length)
+            $blocks.Add($fence + "powershell`n" + $code + "`n" + $fence)
+        }
+    }
+    $blocks -join "`n`n"
 }
 function Protect-HarnessProviderText {
     param([string]$Text, [string[]]$Redact)
@@ -341,6 +454,10 @@ function Invoke-HarnessHttpProvider {
         throw 'Configure BaseUrl or OPENAI_BASE_URL.'
     }
     $uri = [uri]($config.BaseUrl.TrimEnd('/') + '/v1/chat/completions')
+    $toolScope = $uri.AbsoluteUri + '|' + $Context.Model
+    $toolsDisabled = -not $config.UseToolsApi -or ($Context.State -and
+        $Context.State.PSObject.Properties['ToolsApiUnsupportedFor'] -and
+        $Context.State.ToolsApiUnsupportedFor -ceq $toolScope)
     if ($uri.Scheme -notin @('http', 'https')) {
         throw 'BaseUrl must use HTTP or HTTPS.'
     }
@@ -368,7 +485,7 @@ function Invoke-HarnessHttpProvider {
             }
             $request.Headers.Authorization = $authorization
             $request.Headers.Accept.ParseAdd('text/event-stream')
-            $request.Content = [Net.Http.StringContent]::new((New-HarnessRequestBody $Context -DisableReasoning:$reasoningDisabled), [Text.Encoding]::UTF8, 'application/json')
+            $request.Content = [Net.Http.StringContent]::new((New-HarnessRequestBody $Context -DisableReasoning:$reasoningDisabled -DisableTools:$toolsDisabled), [Text.Encoding]::UTF8, 'application/json')
             $response = Wait-HarnessTask ($client.SendAsync($request,
                     [Net.Http.HttpCompletionOption]::ResponseHeadersRead,
                     $token)) $token $Context
@@ -399,6 +516,21 @@ function Invoke-HarnessHttpProvider {
                 }
                 catch {
                     $message = Protect-HarnessProviderText $body $redact
+                }
+                if ($statusCode -in @(400, 404, 422) -and -not $toolsDisabled -and
+                    [string]$message -match '(?i)\b(tools?|tool_choice|function calling)\b' -and
+                    [string]$message -match '(?i)(unsupported|not supported|not support|disabled|not enabled|unknown|not allowed|unrecognized|unexpected)') {
+                    $toolsDisabled = $true
+                    if ($Context.State) {
+                        $Context.State | Add-Member NoteProperty ToolsApiUnsupportedFor $toolScope -Force
+                    }
+                    Write-Warning 'Gateway rejected native tools; using the text workflow for this endpoint/model in this session.'
+                    $response.Dispose()
+                    $response = $null
+                    $request.Dispose()
+                    $request = $null
+                    $attempt--
+                    continue
                 }
                 if ($statusCode -in @(400, 422) -and -not $reasoningDisabled -and
                     $Context.PSObject.Properties['Profile'] -and $Context.Profile -and $Context.Profile.ReasoningEffort -and
@@ -444,12 +576,14 @@ function Invoke-HarnessHttpProvider {
         $usage = $null
         $done = $false
         $finishReason = ''
+        $toolCalls = @{}
         while (-not $done) {
             $line = Wait-HarnessTask ($reader.ReadLineAsync($token).AsTask()) $token $Context
             if ($null -eq $line -or $line -eq '') {
                 if ($data.Count) {
                     $eventName = ConvertFrom-HarnessSseEvent $data.ToArray() -Redact $redact
                     $data.Clear()
+                    Add-HarnessToolDeltas $toolCalls $eventName (-not $toolsDisabled)
                     if ($eventName.Usage) {
                         $usage = $eventName.Usage
                     }
@@ -487,6 +621,15 @@ function Invoke-HarnessHttpProvider {
             if ($OnToken) {
                 $null = & $OnToken $fragment $Context.State
             }
+        }
+        $proposal = ConvertFrom-HarnessToolProposals $toolCalls $finishReason $redact
+        if ($proposal) {
+            $null = $text.Append("`n`n" + $proposal)
+            $Context.State.StreamingText = $text.ToString()
+            if ($OnToken) {
+                $null = & $OnToken ("`n`n" + $proposal) $Context.State
+            }
+            $finishReason = 'stop'
         }
         [pscustomobject]@{
             Text         = $text.ToString()

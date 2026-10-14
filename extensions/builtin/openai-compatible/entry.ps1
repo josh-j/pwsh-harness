@@ -22,6 +22,7 @@
     $Harness.Settings.Declare('SecretName', [string], '')
     $Harness.Settings.Declare('TimeoutSeconds', [int], 120, { param($v) $v -gt 0 }, 'PWSH_HARNESS_TIMEOUT')
     $Harness.Settings.Declare('RetryCount', [int], 3, { param($v) $v -ge 0 })
+    $Harness.Settings.Declare('UseToolsApi', [bool], $true)
     $Harness.Settings.Declare('RetryBaseSeconds', [double], 1.0, { param($v) $v -ge 0 })
     $Harness.Settings.Declare('RetryMaxSeconds', [double], 30.0, { param($v) $v -ge 0 })
     $Harness.Providers.Add('OpenAICompatible', {

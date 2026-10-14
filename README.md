@@ -1,6 +1,6 @@
 # PwshHarness
 
-Terminal assistant for writing Windows PowerShell 7.6 through an OpenAI-compatible API. Alpha: exercised with a live OpenAI-compatible gateway. API tool/function calling is always disabled; instructions use user-role messages by default.
+Terminal assistant for writing Windows PowerShell 7.6 through an OpenAI-compatible API. Alpha: exercised with a live OpenAI-compatible gateway. Native PowerShell proposals default enabled; instructions use user-role messages by default.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ pwsh -NoProfile -File .\PwshHarness.bundle.ps1 -Destination .\out\restored
 
 Hidden input prompts for the key. For one-time setup, use `.\pwsh-harness.ps1 -Configure -BaseUrl https://gw.example -Model gemini-3.8-flash`. Automation also accepts `-ApiKey` (SecureString), `OPENAI_API_KEY`, or SecretManagement `SecretName`. Precedence: defaults < JSON < environment < parameters. `-SaveConfig` saves Provider/Model/BaseUrl and explicitly supplied declared Options; a key from `-ApiKey` or the prompt is saved separately in `credentials.json`, bound to the gateway origin and provider. Windows uses DPAPI CurrentUser and an owner-only ACL; Linux/macOS use a **plaintext file protected by 0600 permissions**, with no encryption. Use `Remove-PwshHarnessCredential` or `-All` to remove saved keys.
 
-The gateway must support `/v1/chat/completions` with SSE streaming. Instructions and project context use user messages by default, with no API tool/function fields. Opt in to system-role messages with `-Options @{SystemPromptMode='system'}` (also accepted by `Set-PwshHarnessConfig`). Keep API keys out of config.json and session files. Select the model id with `-Model`; reasoning-effort support is gateway-dependent. Embeddings are off by default. Capture the Windows command catalog once:
+The gateway must support `/v1/chat/completions` with SSE streaming. Instructions and project context use user messages by default, with native `prepare_powershell` proposal calls enabled by default. Set `"UseToolsApi": false` in config.json or `-Options @{ UseToolsApi = $false }` for text fences. Gateways rejecting tools automatically fall back for that endpoint/model in the session; malformed calls fail before preparation. All writes and execution still require user approval. Opt in to system-role messages with `-Options @{SystemPromptMode='system'}` (also accepted by `Set-PwshHarnessConfig`). Keep API keys out of config.json and session files. Select the model id with `-Model`; reasoning-effort support is gateway-dependent. Embeddings are off by default. Capture the Windows command catalog once:
 
 ```powershell
 .\tools\Export-HarnessCommandCatalog.ps1
