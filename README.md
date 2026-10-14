@@ -45,6 +45,8 @@ Use `/model`, `/provider`, `/system`, `/config`, `/history` and `/resume` for se
 `/add`, `/drop`, `/context`, `/diff`, `/tree`, `/rag`, `/why` and `/reindex` control local context.
 `/blocks` lists numbered suggestions. `/apply 2 'file name.ps1'` previews and replaces the entire file after typing `APPLY`; omit `2` for the first block. `/run 2` previews and runs that block after `RUN`; `/exec Get-Location` runs an explicitly entered command with the same confirmation. `/save` and `/whatif` also accept a block number. Relative action paths and child commands use the session's context folder. Applying never runs code; command output/exit status enter the transcript and accompany your next prompt in bounded user-role history.
 
+Generated operations are reviewed automatically. Use bare `/approve` once to apply the displayed patches and run the command when your request asks for execution. Block numbers and script paths are needed only when the selection is ambiguous. Review shows the target files, command, and risks. `SystemPromptMode=User` supports the same workflow; `/cancel` cancels generation or execution. Commands run with bounded timeouts and captured output.
+
 ## Troubleshooting
 
 - Execution policy: follow your organization's policy; MachinePolicy/UserPolicy may block child scripts.

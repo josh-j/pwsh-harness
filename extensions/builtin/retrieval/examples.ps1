@@ -14,10 +14,21 @@ function Get-RetrievalExampleMetadata {
 }
 function Get-RetrievalSourceStamp {
     param([string[]]$Paths)
-    @($Paths | Sort-Object -Unique | ForEach-Object {
-            $item = Get-Item -LiteralPath $_ -Force -ErrorAction Ignore
+    @(Select-DiscoveryUniquePath $Paths | ForEach-Object {
+            $item = if ([IO.File]::Exists($_)) {
+                [IO.FileInfo]::new($_)
+            }
+            elseif ([IO.Directory]::Exists($_)) {
+                [IO.DirectoryInfo]::new($_)
+            }
             if ($item) {
-                "$_|$($item.LastWriteTimeUtc.Ticks)|$($item.Length)"
+                $length = if ($item -is [IO.FileInfo]) {
+                    $item.Length
+                }
+                else {
+                    0
+                }
+                "$_|$($item.LastWriteTimeUtc.Ticks)|$length"
             }
             else {
                 "$_|missing"
@@ -56,8 +67,8 @@ function Get-RetrievalExampleInventory {
     foreach ($source in $folders) {
         $folder = $source.Path
         $number++; $watch.Add($folder)
-        $root = Get-Item -LiteralPath $folder -Force -ErrorAction Ignore
-        if (-not $root -or -not $root.PSIsContainer -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        $root = [IO.DirectoryInfo]::new($folder)
+        if (-not $root.Exists -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             $missing++; continue
         }
         # Inventory and exclusion rules are shared with repository retrieval, including linked/sensitive files.
@@ -72,7 +83,7 @@ function Get-RetrievalExampleInventory {
             if ([IO.Path]::GetExtension($file.Path) -notin @('.ps1', '.psm1', '.md', '.txt')) {
                 continue
             }
-            $id = $source.Prefix + $file.Path.Substring(0, $file.Path.Length - [IO.Path]::GetExtension($file.Path).Length).Replace('\', '/')
+            $id = $source.Prefix + $file.Path.Substring(0, $file.Path.Length - [IO.Path]::GetExtension($file.Path).Length)
             # A reloaded folder descriptor can change identity without changing the source file's stat data.
             $revision = Get-RetrievalHash ($file.FullPath + "`0" + $id + "`0" + $file.Revision)
             $files.Add([pscustomobject]@{ Path = "library$number/$($file.Path)"; FullPath = $file.FullPath; Revision = $revision; ExampleId = $id })

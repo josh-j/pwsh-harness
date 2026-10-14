@@ -59,12 +59,106 @@ function New-HarnessRequestBody {
 }
 function Protect-HarnessProviderText {
     param([string]$Text, [string[]]$Redact)
+    $marker = '[REDACTED]'
+    foreach ($candidate in @('[REDACTED]', '***', '???', '###', [string][char]0x2588)) {
+        if (-not @($Redact | Where-Object {
+                    $_ -and ($candidate.Contains($_) -or $_.Contains($candidate[0]) -or $_.Contains($candidate[-1]))
+                }).Count) {
+            $marker = $candidate
+            break
+        }
+    }
     foreach ($value in $Redact) {
         if ($value) {
-            $Text = $Text.Replace($value, '[REDACTED]')
+            $Text = $Text.Replace($value, $marker)
         }
     }
     $Text
+}
+function Protect-HarnessProviderData {
+    param($Value, [string[]]$Redact, [switch]$PropertyNames, [string[]]$PreserveNames = @())
+    if ($Value -is [string]) {
+        return Protect-HarnessProviderText $Value $Redact
+    }
+    if ($Value -is [Collections.IDictionary]) {
+        if ($PropertyNames) {
+            $names = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+            $reserved = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($name in @($Value.psbase.Keys)) {
+                $safeName = if ($name -cin $PreserveNames) {
+                    $name
+                }
+                else {
+                    Protect-HarnessProviderText $name $Redact
+                }
+                $names[$name] = $safeName
+                if ($safeName -ceq $name) {
+                    $null = $reserved.Add($name)
+                }
+            }
+            $copy = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+            $pattern = @($Redact | Where-Object { $_ } | Select-Object -First 1)
+            $suffix = if ($pattern.Count) {
+                Protect-HarnessProviderText $pattern[0] $Redact
+            }
+            else {
+                ''
+            }
+            foreach ($name in @($Value.psbase.Keys)) {
+                $safeName = $names[$name]
+                if ($safeName -cne $name) {
+                    while ($reserved.Contains($safeName)) {
+                        $safeName += $suffix
+                    }
+                    $null = $reserved.Add($safeName)
+                }
+                $childNames = @()
+                if ($name -cin $PreserveNames) {
+                    if ($name -ceq 'prompt_tokens_details') {
+                        $childNames = @('cached_tokens')
+                    }
+                    elseif ($name -ceq 'completion_tokens_details') {
+                        $childNames = @('reasoning_tokens')
+                    }
+                }
+                $copy[$safeName] = Protect-HarnessProviderData $Value[$name] $Redact -PropertyNames -PreserveNames $childNames
+            }
+            return , $copy
+        }
+        foreach ($name in @($Value.psbase.Keys)) {
+            $Value[$name] = Protect-HarnessProviderData $Value[$name] $Redact
+        }
+    }
+    elseif ($Value -is [Collections.IList]) {
+        if ($PropertyNames) {
+            $copy = @(foreach ($item in $Value) {
+                    Protect-HarnessProviderData $item $Redact -PropertyNames -PreserveNames $PreserveNames
+                })
+            return , $copy
+        }
+        for ($i = 0; $i -lt $Value.Count; $i++) {
+            $Value[$i] = Protect-HarnessProviderData $Value[$i] $Redact
+        }
+    }
+    return , $Value
+}
+function Protect-HarnessStreamingText {
+    param([hashtable]$Redaction, [string]$Text, [switch]$Final)
+    $safe = Protect-HarnessProviderText ($Redaction.Pending + $Text) $Redaction.Patterns
+    $held = 0
+    if (-not $Final) {
+        foreach ($pattern in $Redaction.Patterns) {
+            for ($length = [Math]::Min($safe.Length, $pattern.Length - 1); $length -gt $held; $length--) {
+                if ($safe.EndsWith($pattern.Substring(0, $length), [StringComparison]::Ordinal)) {
+                    $held = $length
+                    break
+                }
+            }
+        }
+    }
+    # Hold only a possible credential prefix; complete matches are already replaced.
+    $Redaction.Pending = $safe.Substring($safe.Length - $held)
+    $safe.Substring(0, $safe.Length - $held)
 }
 function Get-HarnessCredentialPatterns {
     param([string]$Value)
@@ -76,7 +170,7 @@ function ConvertFrom-HarnessSseEvent {
     if (-not $Data -or $Data.Count -eq 0) {
         return
     }
-    $payload = Protect-HarnessProviderText ($Data -join "`n") $Redact
+    $payload = $Data -join "`n"
     if ($payload.Trim() -eq '[DONE]') {
         return [pscustomobject]@{
             Done         = $true
@@ -90,7 +184,10 @@ function ConvertFrom-HarnessSseEvent {
         $json = $payload | ConvertFrom-Json -AsHashtable -ErrorAction Stop
     }
     catch {
-        throw "Invalid SSE JSON event: $($_.Exception.Message)"
+        throw 'Invalid SSE JSON event.'
+    }
+    if ($Redact.Count) {
+        $json = Protect-HarnessProviderData $json $Redact
     }
     if ($json.ContainsKey('error')) {
         $message = if ($json.error -is [System.Collections.IDictionary]) {
@@ -120,17 +217,24 @@ function ConvertFrom-HarnessSseEvent {
             }
         }
     }
+    $usage = if ($json.ContainsKey('usage')) {
+        # These counter names are protocol constants, independent of credential data.
+        Protect-HarnessProviderData $json.usage $Redact -PropertyNames -PreserveNames @(
+            'prompt_tokens', 'completion_tokens', 'total_tokens', 'prompt_tokens_details',
+            'completion_tokens_details')
+    }
+    $raw = if ($Redact.Count) {
+        Protect-HarnessProviderData $json $Redact -PropertyNames
+    }
+    else {
+        $json
+    }
     [pscustomobject]@{
         Done         = $false
         Text         = $text
-        Usage        = $(if ($json.ContainsKey('usage')) {
-                $json.usage
-            }
-            else {
-                $null
-            })
+        Usage        = $usage
         FinishReason = $finishReason
-        Raw          = $json
+        Raw          = $raw
     }
 }
 function ConvertFrom-HarnessSse {
@@ -254,10 +358,10 @@ function Invoke-HarnessHttpProvider {
             }
             if (-not $response.IsSuccessStatusCode) {
                 $body = Wait-HarnessTask ($response.Content.ReadAsStringAsync($token)) $token $Context
-                $body = Protect-HarnessProviderText $body $redact
-                $message = $body
+                $message = Protect-HarnessProviderText $body $redact
                 try {
-                    $errorBody = $body | ConvertFrom-Json -AsHashtable
+                    $errorBody = Protect-HarnessProviderData ($body | ConvertFrom-Json -AsHashtable) $redact
+                    $message = Protect-HarnessProviderData $errorBody $redact -PropertyNames | ConvertTo-Json -Depth 30 -Compress
                     if ($errorBody.ContainsKey('error')) {
                         $message = if ($errorBody.error -is [System.Collections.IDictionary]) {
                             $errorBody.error.message
@@ -268,7 +372,7 @@ function Invoke-HarnessHttpProvider {
                     }
                 }
                 catch {
-                    $message = $body
+                    $message = Protect-HarnessProviderText $body $redact
                 }
                 if ($statusCode -in @(400, 422) -and -not $reasoningDisabled -and
                     $Context.PSObject.Properties['Profile'] -and $Context.Profile -and $Context.Profile.ReasoningEffort -and
@@ -310,6 +414,7 @@ function Invoke-HarnessHttpProvider {
         $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true), $true, 4096, $true)
         $data = [Collections.Generic.List[string]]::new()
         $text = [Text.StringBuilder]::new()
+        $redaction = @{ Pending = ''; Patterns = @($redact | Where-Object { $_ }) }
         $usage = $null
         $done = $false
         $finishReason = ''
@@ -326,10 +431,13 @@ function Invoke-HarnessHttpProvider {
                         $finishReason = $eventName.FinishReason
                     }
                     if ($eventName.Text) {
-                        $null = $text.Append($eventName.Text)
-                        $Context.State.StreamingText = $text.ToString()
-                        if ($OnToken) {
-                            $null = & $OnToken $eventName.Text $Context.State
+                        $fragment = Protect-HarnessStreamingText $redaction $eventName.Text
+                        if ($fragment) {
+                            $null = $text.Append($fragment)
+                            $Context.State.StreamingText = $text.ToString()
+                            if ($OnToken) {
+                                $null = & $OnToken $fragment $Context.State
+                            }
                         }
                     }
                     $done = $eventName.Done
@@ -344,6 +452,14 @@ function Invoke-HarnessHttpProvider {
                     $value = $value.Substring(1)
                 }
                 $data.Add($value)
+            }
+        }
+        $fragment = Protect-HarnessStreamingText $redaction '' -Final
+        if ($fragment) {
+            $null = $text.Append($fragment)
+            $Context.State.StreamingText = $text.ToString()
+            if ($OnToken) {
+                $null = & $OnToken $fragment $Context.State
             }
         }
         [pscustomobject]@{

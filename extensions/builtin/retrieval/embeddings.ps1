@@ -25,7 +25,7 @@ function Find-RetrievalEmbedding {
         if (-not $script:Harness.Embedders.Contains($request.Config.EmbeddingProvider)) {
             throw 'No embedder is registered.'
         }
-        $chunks = @($script:Index.Files.Values.Chunks | Sort-Object Id)
+        $chunks = @($script:Index.Files.psbase.Values.Chunks | Sort-Object Id)
         $missing = @($chunks | Where-Object {
                 -not $script:Index.Vectors.ContainsKey((Get-RetrievalHash ($request.Config.EmbeddingModel + "`n" + $_.Text)))
             })
@@ -58,6 +58,7 @@ function Find-RetrievalEmbedding {
         }
     }
     catch {
+        $request.CancellationToken.ThrowIfCancellationRequested()
         $request.State.Context | Add-Member NoteProperty EmbeddingUnavailable $true -Force
         Write-Warning "Embeddings unavailable; continuing with BM25 for this session: $($_.Exception.Message)"
     }

@@ -1,4 +1,41 @@
 #Requires -Version 7.6
+function ConvertTo-DiscoveryPath {
+    param([string]$Path)
+    $Path.Replace([IO.Path]::DirectorySeparatorChar, [char]'/')
+}
+function Get-DiscoveryPathComparison {
+    # Match .NET path resolution: Windows folds case; Unix paths preserve it.
+    if ($IsWindows) {
+        [StringComparison]::OrdinalIgnoreCase
+    }
+    else {
+        [StringComparison]::Ordinal
+    }
+}
+function Resolve-DiscoveryPathArgument {
+    param([string]$Root, [string]$Argument)
+    # An existing native path takes priority over optional command quoting.
+    $literal = [IO.Path]::Combine($Root, $Argument)
+    if ([IO.File]::Exists($literal) -or [IO.Directory]::Exists($literal)) {
+        return $Argument
+    }
+    if ($Argument.Length -ge 2 -and ($Argument[0] -eq '"' -or $Argument[0] -eq "'") -and $Argument[-1] -eq $Argument[0]) {
+        return $Argument.Substring(1, $Argument.Length - 2)
+    }
+    $Argument
+}
+function New-DiscoveryPathTable {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseLiteralInitializerForHashtable', '', Justification = 'Literal hashtables fold case; file and chunk identity keys require ordinal equality to preserve distinct paths.')]
+    [CmdletBinding()]
+    param()
+    [hashtable]::new([StringComparer]::Ordinal)
+}
+function Select-DiscoveryUniquePath {
+    param([string[]]$Paths)
+    # File identities must not fold case or canonically equivalent Unicode names.
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $Paths | Where-Object { $seen.Add($_) } | Sort-Object -CaseSensitive
+}
 function Invoke-DiscoveryCheckpoint {
     param($Request)
     if ($Request -and $Request.Pump) {
@@ -10,9 +47,10 @@ function Invoke-DiscoveryCheckpoint {
 }
 function Get-DiscoveryRootReason {
     param([string]$Root)
+    $comparison = Get-DiscoveryPathComparison
     $full = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     foreach ($protected in @($HOME, [IO.Path]::GetPathRoot($Root), [Environment]::GetFolderPath('Windows'), $env:SystemRoot)) {
-        if ($protected -and $full -eq [IO.Path]::GetFullPath($protected).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)) {
+        if ($protected -and $full.Equals([IO.Path]::GetFullPath($protected).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $comparison)) {
             return 'protected root; explicit indexing required'
         }
     }

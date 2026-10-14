@@ -20,7 +20,6 @@
         }, 'OPENAI_BASE_URL')
     $Harness.Settings.Declare('ApiKeyEnvironment', [string], 'OPENAI_API_KEY', $null, 'PWSH_HARNESS_API_KEY_ENV')
     $Harness.Settings.Declare('SecretName', [string], '')
-    $Harness.Settings.Declare('SystemPromptMode', [string], 'user', { param($v) $v -cin @('system', 'user') })
     $Harness.Settings.Declare('TimeoutSeconds', [int], 120, { param($v) $v -gt 0 }, 'PWSH_HARNESS_TIMEOUT')
     $Harness.Settings.Declare('RetryCount', [int], 3, { param($v) $v -ge 0 })
     $Harness.Settings.Declare('RetryBaseSeconds', [double], 1.0, { param($v) $v -ge 0 })

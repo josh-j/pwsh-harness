@@ -24,27 +24,108 @@ function New-HarnessFrozen {
     }
     return , $frozen
 }
+function New-HarnessFrozenDictionary {
+    param([Collections.IDictionary]$Value)
+    $type = $Value.GetType()
+    $property = $type.GetProperty('Comparer', [Reflection.BindingFlags]'Instance,Public')
+    $comparer = $null
+    if ($property) {
+        $comparer = $property.GetValue($Value)
+    }
+    elseif ($Value -is [Collections.Hashtable]) {
+        $property = [Collections.Hashtable].GetProperty('EqualityComparer', [Reflection.BindingFlags]'Instance,NonPublic')
+        $comparer = $property.GetValue($Value)
+    }
+    elseif ($Value -is [Collections.Specialized.OrderedDictionary]) {
+        $field = [Collections.Specialized.OrderedDictionary].GetField('_comparer', [Reflection.BindingFlags]'Instance,NonPublic')
+        $comparer = $field.GetValue($Value)
+    }
+    else {
+        $base = $type
+        while ($base -and (-not $base.IsGenericType -or $base.GetGenericTypeDefinition().FullName -ne 'System.Collections.ObjectModel.ReadOnlyDictionary`2')) {
+            $base = $base.BaseType
+        }
+        if (-not $base) {
+            throw "Cannot preserve frozen dictionary lookup for type '$($type.FullName)'."
+        }
+        $property = $base.GetProperty('Dictionary', [Reflection.BindingFlags]'Instance,NonPublic')
+        return , (New-HarnessFrozenDictionary $property.GetValue($Value))
+    }
+    if ($null -eq $comparer) {
+        $comparer = [StringComparer]::Ordinal
+    }
+    if ($comparer -is [Collections.Generic.IEqualityComparer[string]]) {
+        return , ([Collections.Generic.Dictionary[string, object]]::new($comparer))
+    }
+    if ($comparer -is [Collections.Generic.IComparer[string]]) {
+        return , ([Collections.Generic.SortedDictionary[string, object]]::new($comparer))
+    }
+    if ($comparer -is [Collections.IEqualityComparer]) {
+        $equals = [Func[string, string, bool]] {
+            param($left, $right)
+            $comparer.Equals($left, $right)
+        }.GetNewClosure()
+        $hash = [Func[string, int]] {
+            param($key)
+            $comparer.GetHashCode($key)
+        }.GetNewClosure()
+        $adapter = [Collections.Generic.EqualityComparer[string]]::Create($equals, $hash)
+        return , ([Collections.Generic.Dictionary[string, object]]::new($adapter))
+    }
+    throw "Cannot preserve frozen dictionary comparer for type '$($type.FullName)'."
+}
 function Copy-HarnessFrozenData {
-    param($Value)
-    if ($null -eq $Value -or $Value -is [string] -or $Value -is [version] -or $Value.GetType().IsValueType) {
+    param($Value, [Collections.Generic.Dictionary[object, object]]$Copies)
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [version]) {
+        return $Value
+    }
+    $type = $Value.GetType()
+    if ($type.IsValueType -and ($type.IsPrimitive -or $type.IsEnum -or $type.FullName -in @(
+                'System.Decimal', 'System.DateTime', 'System.DateTimeOffset', 'System.TimeSpan', 'System.Guid',
+                'System.DateOnly', 'System.TimeOnly', 'System.Index', 'System.Range', 'System.Half',
+                'System.Int128', 'System.UInt128', 'System.Text.Rune', 'System.Numerics.BigInteger', 'System.Numerics.Complex'))) {
         return $Value
     }
     if ($Value.PSObject.TypeNames -contains 'Harness.Frozen') {
         return , $Value
     }
-    $isRecord = $Value -is [pscustomobject]
+    if ($null -eq $Copies) {
+        $Copies = [Collections.Generic.Dictionary[object, object]]::new([Collections.Generic.ReferenceEqualityComparer]::Instance)
+    }
+    $existing = $null
+    if ($Copies.TryGetValue($Value, [ref]$existing)) {
+        return , $existing
+    }
+    $isRecord = $Value -is [pscustomobject] -or $type.IsValueType
     if ($Value -is [Collections.IDictionary] -or $isRecord) {
-        $items = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
-        $names = if ($Value -is [Collections.IDictionary]) {
-            $Value.Keys
+        if ($Value -is [Collections.IDictionary]) {
+            foreach ($name in @($Value.psbase.Keys)) {
+                if ($name -isnot [string]) {
+                    throw 'Frozen dictionary keys must be strings.'
+                }
+            }
+            $items = New-HarnessFrozenDictionary $Value
         }
         else {
-            $Value.PSObject.Properties.Name
-        }
-        foreach ($name in $names) {
-            $items[[string]$name] = Copy-HarnessFrozenData $Value.$name
+            $items = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
         }
         $frozen = [Collections.ObjectModel.ReadOnlyDictionary[string, object]]::new($items)
+        $Copies.Add($Value, $frozen)
+        $names = if ($Value -is [Collections.IDictionary]) {
+            @($Value.psbase.Keys)
+        }
+        else {
+            @($Value.PSObject.Properties.Name)
+        }
+        foreach ($name in $names) {
+            if ($Value -is [Collections.IDictionary]) {
+                $entry = $Value[$name]
+            }
+            else {
+                $entry = $Value.$name
+            }
+            $items[[string]$name] = Copy-HarnessFrozenData $entry $Copies
+        }
         # Cmdlets such as Sort-Object inspect PSObject properties, not dictionary adaptation.
         # Constant variable properties expose read-only fields without classes or compiled getters.
         foreach ($name in $names) {
@@ -69,10 +150,11 @@ function Copy-HarnessFrozenData {
     }
     elseif ($Value -is [Collections.IEnumerable]) {
         $items = [Collections.Generic.List[object]]::new()
-        foreach ($item in $Value) {
-            $items.Add((Copy-HarnessFrozenData $item))
-        }
         $frozen = $items.AsReadOnly()
+        $Copies.Add($Value, $frozen)
+        foreach ($item in $Value) {
+            $items.Add((Copy-HarnessFrozenData $item $Copies))
+        }
     }
     else {
         throw "Cannot freeze mutable type '$($Value.GetType().FullName)'."

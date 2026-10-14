@@ -9,6 +9,9 @@ function Set-HarnessViewSnapshot {
         $View.SessionView.LastResult = $Snapshot.LastResult
         if ($Snapshot.LastResult) {
             $View.SessionView.Diagnostics = @($Snapshot.LastResult.Diagnostics)
+            if ($Snapshot.LastResult.ContainsKey('OperationReview')) {
+                $View.SessionView.Records.Add([pscustomobject]@{ Role = 'operation'; Text = $Snapshot.LastResult.OperationReview })
+            }
         }
     }
     $View.Editor.History.Clear()
@@ -216,6 +219,10 @@ function Invoke-HarnessFrontendInput {
         $null = $HarnessHost.Send($Text, $Session, $stream, $cancellation.Token, { & $Pump $cancellation }.GetNewClosure())
         if ($LineMode) {
             $Terminal.WriteText("`n")
+            $snapshot = $HarnessHost.GetConversationSnapshot($Session)
+            if ($snapshot.LastResult -and $snapshot.LastResult.ContainsKey('OperationReview')) {
+                $Terminal.WriteText((& $safeText ($snapshot.LastResult.OperationReview + "`n")))
+            }
         }
     }
     catch {
@@ -261,7 +268,7 @@ function Invoke-HarnessFrontend {
     param($HarnessHost, $Session, $View, $Terminal, [scriptblock]$RendererOverride, [bool]$LineMode = $false)
     $subscriptions = [Collections.Generic.List[object]]::new()
     $update = ${function:Update-HarnessSessionView}
-    foreach ($eventName in @('TurnStarted', 'ChunkReceived', 'TurnCompleted', 'DiagnosticsProduced', 'HistoryTrimmed', 'HistoryCompacted', 'ActionCompleted')) {
+    foreach ($eventName in @('TurnStarted', 'ChunkReceived', 'TurnCompleted', 'DiagnosticsProduced', 'HistoryTrimmed', 'HistoryCompacted', 'ActionCompleted', 'ext.powershell.OperationPrepared')) {
         $name = 'view-' + [guid]::NewGuid().ToString('N')
         $HarnessHost.Events.Subscribe($eventName, $name, { param($payload) & $update $View $eventName $payload }.GetNewClosure())
         $subscriptions.Add(@($eventName, $name))

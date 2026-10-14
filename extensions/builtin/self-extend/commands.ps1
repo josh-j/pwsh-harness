@@ -12,25 +12,60 @@ function Get-AuthoringApprovals {
     if (-not $Confirmation) {
         return , @()
     }
-    $approvals = [Collections.Generic.List[string]]::new()
     $required = @('APPROVE') + @($Preview.Capabilities.Capability | Sort-Object -Unique | Where-Object { $_ -in @('network', 'process', 'registry', 'Invoke-Expression', 'Add-Type', 'secret-env', 'dynamic') } | ForEach-Object { 'APPROVE ' + $_ })
-    foreach ($word in $required) {
-        $message = if ($word -eq 'APPROVE') {
-            (Format-AuthoringReview $Preview) + "`nType $word to authorize this exact source for child dry-load/tests and installation if they pass."
-        }
-        else {
-            "Sensitive capability: $word. Type exactly $word to approve."
-        }
-        $response = & $Confirmation $message $word
-        if ($response -isnot [string] -or $response -cne $word) {
-            return , @()
-        }
-        $approvals.Add($response)
+    $message = (Format-AuthoringReview $Preview) + "`nThis approval includes: $($required -join ', ').`nType APPROVE to authorize this exact source for child dry-load/tests and installation if they pass."
+    $response = & $Confirmation $message 'APPROVE'
+    if ($response -isnot [string] -or $response -cne 'APPROVE') {
+        return , @()
     }
-    , $approvals.ToArray()
+    , $required
+}
+function Invoke-ApproveExtensionOperation {
+    param($Context)
+    $pending = $null
+    if (-not $script:PendingAuthoring.TryGetValue($Context.State, [ref]$pending)) {
+        return $null
+    }
+    $preview = $pending.Preview
+    if (-not $preview.Valid) {
+        throw 'The staged extension is no longer valid. Request a repair before approving it.'
+    }
+    $preview | Add-Member NoteProperty ReferenceInfo $pending.ReferenceInfo -Force
+    if ($Context.Confirm) {
+        $null = & $Context.Confirm (Format-AuthoringReview $preview) ''
+    }
+    $approvals = Get-AuthoringApprovals $preview { param($message, $expected) 'APPROVE' }
+    $null = $script:Authoring.Approve($preview.Id, $approvals)
+    $preview = $script:Authoring.DryLoad($preview.Id, $Context.State.Config.RunTimeoutSeconds, $Context.Pump, $Context.CancellationToken)
+    $preview | Add-Member NoteProperty ReferenceInfo $pending.ReferenceInfo -Force
+    $pending.Preview = $preview
+    if (-not $preview.DryLoaded) {
+        for ($attempt = $pending.Attempt + 1; $attempt -le $Context.State.Config.AutoRepairAttempts; $attempt++) {
+            $errors = @($preview.Diagnostics | Where-Object Severity -EQ Error | ForEach-Object Message) -join "`n"
+            $prompt = "$($pending.Prompt)`nRepair the following failures, preserving intent. Return all complete files.`n$errors`nPrevious response:`n$($pending.Text)"
+            $generated = $script:Authoring.Generate($prompt, $Context.State, $attempt)
+            $preview = $script:Authoring.Stage($generated.Text, $pending.Edit)
+            $preview = $script:Authoring.Validate($preview.Id, $Context.State.Config)
+            $preview | Add-Member NoteProperty ReferenceInfo $pending.ReferenceInfo -Force
+            $pending = [pscustomobject]@{ Id = $preview.Id; Preview = $preview; ReferenceInfo = $pending.ReferenceInfo
+                Prompt = $prompt; Text = $generated.Text; Edit = $pending.Edit; Attempt = $attempt
+            }
+            $null = $script:PendingAuthoring.Remove($Context.State)
+            $script:PendingAuthoring.Add($Context.State, $pending)
+            if ($preview.Valid) {
+                return (Format-AuthoringReview $preview) + "`nDry-load failed; nothing installed. A revised extension is staged. Use /approve to authorize this revised source."
+            }
+        }
+        return (Format-AuthoringReview $preview) + "`nDry-load failed; nothing installed. Repair limit reached."
+    }
+    $installed = $script:Authoring.Install($preview.Id, $approvals)
+    $null = $script:PendingAuthoring.Remove($Context.State)
+    $installed
 }
 function Invoke-SelfExtend {
     param($Context)
+    $null = $script:PendingAuthoring.Remove($Context.State)
+    $script:AuthoringStates[$Context.State.SessionId] = [WeakReference]::new($Context.State)
     if (-not $Context.Arguments) {
         throw 'Usage: /extend description or /extend --edit name change'
     }
@@ -70,15 +105,19 @@ function Invoke-SelfExtend {
         $preview = $script:Authoring.Validate($preview.Id, $Context.State.Config)
         $preview | Add-Member NoteProperty ReferenceInfo $referenceInfo -Force
         if ($preview.Valid) {
+            $null = $script:PendingAuthoring.Remove($Context.State)
+            $script:PendingAuthoring.Add($Context.State, [pscustomobject]@{ Id = $preview.Id; ReferenceInfo = $referenceInfo; Preview = $preview
+                    Prompt = $prompt; Text = $generated.Text; Edit = $edit; Attempt = $attempt
+                })
             if (-not $Context.Confirm) {
-                return "$(Format-AuthoringReview $preview)`nStaged $($preview.Id). Non-interactive authoring never installs or dry-loads; static validation only."
+                return "$(Format-AuthoringReview $preview)`nStaged $($preview.Id). Non-interactive authoring never installs or dry-loads; static validation only. Use /approve to authorize and complete this operation."
             }
             $approvals = Get-AuthoringApprovals $preview $Context.Confirm
             if (-not $approvals.Count) {
                 return 'Installation cancelled.'
             }
             $null = $script:Authoring.Approve($preview.Id, $approvals)
-            $preview = $script:Authoring.DryLoad($preview.Id, $Context.State.Config.RunTimeoutSeconds)
+            $preview = $script:Authoring.DryLoad($preview.Id, $Context.State.Config.RunTimeoutSeconds, $Context.Pump, $Context.CancellationToken)
             $preview | Add-Member NoteProperty ReferenceInfo $referenceInfo -Force
             # An empty expected response displays a result without prompting in either frontend.
             $null = & $Context.Confirm ("Dry-load " + $(if ($preview.DryLoaded) {
@@ -88,13 +127,8 @@ function Invoke-SelfExtend {
                         'failed.'
                     }) + "`n" + (Format-AuthoringReview $preview)) ''
             if ($preview.DryLoaded) {
+                $null = $script:PendingAuthoring.Remove($Context.State)
                 return $script:Authoring.Install($preview.Id, $approvals)
-            }
-            if ($attempt -lt $Context.State.Config.AutoRepairAttempts) {
-                $repair = & $Context.Confirm 'Dry-load failed; nothing installed. Type REPAIR to request a revised version, which needs a new approval.' 'REPAIR'
-                if ($repair -isnot [string] -or $repair -cne 'REPAIR') {
-                    return 'Repair cancelled; nothing installed.'
-                }
             }
         }
         $errors = @($preview.Diagnostics | Where-Object Severity -EQ Error | ForEach-Object { "line $($_.Line): $($_.Message)" }) -join "`n"
@@ -147,7 +181,7 @@ function Invoke-ExtensionLifecycle {
         return 'Rollback cancelled.'
     }
     $null = $script:Authoring.Approve($preview.Id, $approvals)
-    $preview = $script:Authoring.DryLoad($preview.Id, $Context.State.Config.RunTimeoutSeconds)
+    $preview = $script:Authoring.DryLoad($preview.Id, $Context.State.Config.RunTimeoutSeconds, $Context.Pump, $Context.CancellationToken)
     $null = & $Context.Confirm ("Dry-load " + $(if ($preview.DryLoaded) {
                 'passed.'
             }

@@ -46,16 +46,20 @@ function Register-RetrievalCommands {
     $script:Harness.Commands.Add('reindex', {
             param($command)
             if ($command.Arguments) {
-                $folder = [IO.Path]::GetFullPath($command.Arguments.Trim('"', "'"), $command.State.Context.Path)
-                if (-not (Test-Path -LiteralPath $folder -PathType Container)) {
+                $argument = Resolve-DiscoveryPathArgument $command.State.Context.Path $command.Arguments
+                $folder = [IO.Path]::GetFullPath($argument, $command.State.Context.Path)
+                if (-not [IO.Directory]::Exists($folder)) {
                     throw 'Usage: /reindex [existing-directory]'
                 }
-                $command.State.Config.RagPaths = @(@($command.State.Config.RagPaths) + $folder | Sort-Object -Unique)
+                $comparison = Get-DiscoveryPathComparison
+                if (-not @($command.State.Config.RagPaths | Where-Object { $_.Equals($folder, $comparison) }).Count) {
+                    $command.State.Config.RagPaths = @(@($command.State.Config.RagPaths) + $folder | Sort-Object -CaseSensitive)
+                }
             }
             $script:ExampleInventories = @{}
             foreach ($key in @($script:Indexes.Keys)) {
                 if ($script:Indexes[$key].Corpus -eq 'examples') {
-                    $script:Indexes[$key].Files = @{}; $script:Indexes[$key].Search = $null; $script:Indexes[$key].Dirty = $true
+                    $script:Indexes[$key].Files = New-DiscoveryPathTable; $script:Indexes[$key].Search = $null; $script:Indexes[$key].Dirty = $true
                 }
             }
             $null = $script:Harness.CollectContext($command.State)
@@ -66,7 +70,7 @@ function Register-RetrievalCommands {
                 return $command.State.Context.Index.Message
             }
             $index = New-RetrievalIndex $request
-            $index.Files = @{}; $index.Dirty = $true
+            $index.Files = New-DiscoveryPathTable; $index.Dirty = $true
             $key = Get-RetrievalHash ($index.Root + "`n" + ($request.Config.RagPaths -join "`n"))
             $script:Indexes[$key] = $index
             $script:Index = Update-RetrievalIndex $request -Complete

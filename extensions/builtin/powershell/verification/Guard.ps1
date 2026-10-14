@@ -137,7 +137,7 @@ function global:Assert-BenchmarkWritePath {
 function Resolve-BenchmarkWritePath {
     param([AllowNull()][object]$Path)
     if ($null -eq $Path) {
-        return $null 
+        return $null
     }
     try {
         Assert-BenchmarkWritePath $Path
@@ -296,13 +296,13 @@ function ConvertTo-BenchmarkGuardedCandidate {
             $member.Expression.TypeName.FullName -match '^(System\.)?Diagnostics\.Process$' -and $name -in @('new', 'Start')) {
             $arguments = @($member.Arguments)
             $replacement = if ($name -eq 'new') {
-                '(New-BenchmarkNativeProcess)' 
+                '(New-BenchmarkNativeProcess)'
             }
             elseif ($arguments.Count -eq 1) {
-                '(New-BenchmarkNativeProcess -StartInfo (' + $arguments[0].Extent.Text + ') -Start)' 
+                '(New-BenchmarkNativeProcess -StartInfo (' + $arguments[0].Extent.Text + ') -Start)'
             }
             else {
-                throw 'GuardRefused: use ProcessStartInfo for simulated native execution.' 
+                throw 'GuardRefused: use ProcessStartInfo for simulated native execution.'
             }
         }
         elseif ($member.Static -and $member.Expression -is [Management.Automation.Language.TypeExpressionAst] -and

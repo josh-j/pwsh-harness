@@ -37,7 +37,14 @@ function Initialize-PackCommands {
         "Temperature: $($c.State.Config.Temperature)"
     } 'Get/set temperature (0–2).'
     Add-PackCommand clear {
-        param($c) $c.State.Transcript.Clear()
+        param($c)
+        if ($c.State.Busy) {
+            throw 'Cannot clear the conversation while an operation is running. Cancel it and wait for it to finish.'
+        }
+        $script:Harness.Events.Publish('ext.core-commands.ConversationReset', @{ SessionId = $c.State.SessionId })
+        $c.State.Transcript.Clear()
+        $c.State.History.Clear()
+        $c.State.LastPrompt = ''
         $c.State.LastResult = $null
         'Conversation cleared (saved session log retained).'
     } 'Clear current conversation context.'
@@ -96,8 +103,20 @@ function Initialize-PackCommands {
         $validation | ConvertTo-Json -Depth 10
     } 'Parse, analyze, and inspect risk patterns.'
     Add-PackCommand run {
-        param($c) Invoke-PackAction run $c
-    } 'Preview and run a block after RUN confirmation: /run [block-number].'
+        param($c)
+        if ($c.Arguments -match '^--block\s+(?<index>\d+)\s*$') {
+            $index = [int]$Matches.index
+            $block = @($c.State.LastResult.CodeBlocks | Where-Object Index -EQ $index)
+            if ($block.Count -ne 1) {
+                throw 'The selected generated block does not exist.'
+            }
+            return $script:Harness.Actions.Invoke('run', $c.State, $block[0], '', $c.Confirm)
+        }
+        if ($c.Arguments -and $c.Arguments -notmatch '^[1-9][0-9]*$') {
+            throw 'Usage: /run [block-number | --block N]'
+        }
+        Invoke-PackAction run $c
+    } 'Run primary block after explicit RUN confirmation.'
     Add-PackCommand whatif {
         param($c) Invoke-PackAction whatif $c
     } 'Confirm and run with -WhatIf if script supports it: /whatif [block-number].'
@@ -133,9 +152,14 @@ function Initialize-PackCommands {
         if (-not $c.Arguments) {
             return (Get-HarnessSession -Config $c.State.Config | Out-String)
         }
+        if ($c.State.Busy) {
+            throw 'Cannot resume another conversation while an operation is running. Cancel it and wait for it to finish.'
+        }
         $entries = @(Get-HarnessSession -Id $c.Arguments -Config $c.State.Config)
+        $script:Harness.Events.Publish('ext.core-commands.ConversationReset', @{ SessionId = $c.State.SessionId })
         $c.State.Transcript.Clear()
         $c.State.History.Clear()
+        $c.State.LastPrompt = ''
         foreach ($entry in $entries) {
             $c.State.Transcript.Add($entry)
             if ($entry.Role -eq 'user') {
@@ -149,6 +173,7 @@ function Initialize-PackCommands {
         if ($last) {
             $c.State.LastResult = $script:Harness.RestoreResult($last.Text, $c.State.Config, $c.State, $last.Metadata)
         }
+        $script:Harness.Events.Publish('ext.core-commands.ConversationRestored', @{ SessionId = $c.State.SessionId })
         "Resumed $($c.Arguments)."
     } 'List sessions or /resume session-id.'
 }
@@ -158,7 +183,12 @@ function Add-PackCommand {
 }
 function Invoke-PackAction {
     param($Name, $Context, $Block = $null)
-    $arguments = $Context.Arguments
+    $arguments = if ($Block -and $Name -eq 'run') {
+        ''
+    }
+    else {
+        $Context.Arguments
+    }
     if (-not $Block) {
         if (-not $Context.State.LastResult -or -not $Context.State.LastResult.CodeBlocks.Count) {
             throw 'There is no generated block. Ask for a fenced powershell block.'
@@ -181,44 +211,9 @@ function Invoke-PackAction {
         }
         $Block = $Context.State.LastResult.CodeBlocks[$number - 1]
     }
-    $confirm = $Context.Confirm
-    if ($Name -in @('run', 'whatif') -and $confirm) {
-        $originalConfirm = $confirm
-        $code = $Block.Code
-        $directory = $Context.State.Config.ContextPath
-        $confirm = { param($message) & $originalConfirm ("Working directory: $directory`nCode to execute:`n$code`n`n$message") }.GetNewClosure()
-    }
-    $hadPump = [bool]$Context.State.PSObject.Properties['Pump']
-    if (-not $hadPump) {
-        $Context.State | Add-Member NoteProperty Pump $null
-    }
-    $oldPump = $Context.State.Pump
-    $oldCancellation = $Context.State.Cancellation
-    $linked = $null
-    try {
-        if ($Name -in @('run', 'whatif')) {
-            $pump = $Context.Pump
-            $Context.State.Pump = { param($state) if ($pump) {
-                    & $pump
-                } }.GetNewClosure()
-            $linked = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($Context.CancellationToken)
-            $Context.State.Cancellation = $linked
-        }
-        $script:Harness.Actions.Invoke($Name, $Context.State, $Block, $arguments.Trim('"', "'"), $confirm)
-    }
-    finally {
-        if ($hadPump) {
-            $Context.State.Pump = $oldPump
-        }
-        else {
-            $Context.State.PSObject.Properties.Remove('Pump')
-        }
-        $Context.State.Cancellation = $oldCancellation
-        if ($linked) {
-            $linked.Dispose()
-        }
-    }
+    $script:Harness.Actions.Invoke($Name, $Context.State, $Block, $arguments.Trim('"', "'"), $Context.Confirm)
 }
+
 function Get-HarnessSession {
     param($Id, $Config) $script:Harness.GetSession($Config, $Id)
 }

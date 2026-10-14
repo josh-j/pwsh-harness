@@ -53,7 +53,7 @@ function Test-RetrievalSafePath {
 }
 function Get-RetrievalInventory {
     param([string]$Root, [string]$Prefix = '', $Request, [switch]$Explicit)
-    $revision = @{}
+    $revision = New-DiscoveryPathTable
     Invoke-DiscoveryCheckpoint $Request
     if (-not $Explicit) {
         if (Get-DiscoveryRootReason $Root) {
@@ -77,7 +77,7 @@ function Get-RetrievalInventory {
         $names = [Collections.Generic.List[string]]::new()
         foreach ($record in ($tracked -split "`0")) {
             Invoke-DiscoveryCheckpoint $Request
-            if ($record -match '^\d+ ([a-f0-9]+) [0-3]\t(.+)$') {
+            if ($record -match '(?s)^\d+ ([a-f0-9]+) [0-3]\t(.+)$') {
                 $revision[$Matches[2]] = $Matches[1]; $names.Add($Matches[2])
             }
             elseif ($record) {
@@ -101,7 +101,7 @@ function Get-RetrievalInventory {
                 while ($iterator.MoveNext()) {
                     Invoke-DiscoveryCheckpoint $Request
                     $entry = $iterator.Current
-                    $relative = [IO.Path]::GetRelativePath($Root, $entry.FullName).Replace('\', '/')
+                    $relative = ConvertTo-DiscoveryPath ([IO.Path]::GetRelativePath($Root, $entry.FullName))
                     if (-not (Test-RetrievalSafePath $relative)) {
                         continue
                     }
@@ -120,16 +120,15 @@ function Get-RetrievalInventory {
     }
 
     # In filesystem fallback honor local ignore files without requiring a repository or invoking a shell.
-    $ignoreFiles = @{}
-    foreach ($name in ($names | Sort-Object -Unique)) {
+    $ignoreFiles = New-DiscoveryPathTable
+    foreach ($name in (Select-DiscoveryUniquePath $names)) {
         Invoke-DiscoveryCheckpoint $Request
         if (-not $name -or -not (Test-RetrievalSafePath $name)) {
             continue
         }
-        $full = [IO.Path]::GetFullPath((Join-Path $Root $name))
-        $relative = [IO.Path]::GetRelativePath($Root, $full)
-        if ([IO.Path]::IsPathRooted($relative) -or $relative -eq '..' -or $relative.StartsWith('../') -or
-            $relative.StartsWith('..\')) {
+        $full = [IO.Path]::GetFullPath([IO.Path]::Combine($Root, $name))
+        $relative = ConvertTo-DiscoveryPath ([IO.Path]::GetRelativePath($Root, $full))
+        if ([IO.Path]::IsPathRooted($relative) -or $relative -eq '..' -or $relative.StartsWith('../')) {
             continue
         }
         $file = [IO.FileInfo]::new($full)
@@ -144,10 +143,10 @@ function Get-RetrievalInventory {
             $ancestor = $Root
             $segments = $name -split '/'
             for ($level = 0; $level -lt $segments.Count; $level++) {
-                $ignorePath = Join-Path $ancestor '.gitignore'
+                $ignorePath = [IO.Path]::Combine($ancestor, '.gitignore')
                 if (-not $ignoreFiles.ContainsKey($ignorePath)) {
-                    $ignoreFiles[$ignorePath] = if (Test-Path -LiteralPath $ignorePath) {
-                        @(Get-Content -LiteralPath $ignorePath | Where-Object { $_ -and -not $_.StartsWith('#') })
+                    $ignoreFiles[$ignorePath] = if ([IO.File]::Exists($ignorePath)) {
+                        @([IO.File]::ReadAllLines($ignorePath) | Where-Object { $_ -and -not $_.StartsWith('#') })
                     }
                     else {
                         @()
@@ -167,7 +166,7 @@ function Get-RetrievalInventory {
                         $ignored = -not $negative
                     }
                 }
-                $ancestor = Join-Path $ancestor $segments[$level]
+                $ancestor = [IO.Path]::Combine($ancestor, $segments[$level])
             }
             if ($ignored) {
                 continue
@@ -190,16 +189,16 @@ function New-RetrievalIndex {
     param($Request, [string]$Corpus = 'project')
     $identity = Get-RetrievalIndexIdentity $Request $Corpus
     $root = $identity.Root; $key = $identity.Key
-    $directory = Join-Path $Request.Config.DataDirectory $identity.Directory
-    $path = Join-Path $directory "$key.json"
-    $index = @{ Schema = 1; Corpus = $Corpus; Root = $root; Files = @{}; Vectors = @{}; Path = $path; Dirty = $false; Ready = $false }
-    if (Test-Path -LiteralPath $path) {
+    $directory = [IO.Path]::Combine($Request.Config.DataDirectory, $identity.Directory)
+    $path = [IO.Path]::Combine($directory, "$key.json")
+    $index = @{ Schema = 1; Corpus = $Corpus; Root = $root; Files = (New-DiscoveryPathTable); Vectors = @{}; Path = $path; Dirty = $false; Ready = $false }
+    if ([IO.File]::Exists($path)) {
         try {
-            $saved = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
-            if ($saved.Schema -ne 1 -or $saved.Root -ne $root -or $saved.Files -isnot [hashtable]) {
+            $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
+            if ($saved.Schema -ne 1 -or $saved.Root -cne $root -or $saved.Files -isnot [hashtable]) {
                 throw 'Index schema mismatch.'
             }
-            foreach ($file in $saved.Files.Values) {
+            foreach ($file in $saved.Files.psbase.Values) {
                 if ($file.Revision -isnot [string] -or $file.Chunks -isnot [array]) {
                     throw 'Invalid file record.'
                 }
@@ -241,6 +240,7 @@ function Save-RetrievalIndex {
 }
 function Update-RetrievalIndex {
     param($Request, [switch]$Complete, [string]$Corpus = 'project')
+    $comparison = Get-DiscoveryPathComparison
     $identity = Get-RetrievalIndexIdentity $Request $Corpus
     $root = $identity.Root; $key = $identity.Key
     if (-not $script:Indexes.ContainsKey($key)) {
@@ -253,15 +253,15 @@ function Update-RetrievalIndex {
     }
     else {
         if ($Request.State.Context.Project.AutoIndexAllowed) {
-            $explicitRoot = @($Request.Config.RagPaths | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd('/', '\') -eq $root.TrimEnd('/', '\') }).Count -gt 0
+            $explicitRoot = @($Request.Config.RagPaths | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Equals($root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $comparison) }).Count -gt 0
             Get-RetrievalInventory $root -Request $Request -Explicit:$explicitRoot
         }
         $extra = 0
         foreach ($folder in $Request.Config.RagPaths) {
             $extra++
-            if (Test-Path -LiteralPath $folder -PathType Container) {
+            if ([IO.Directory]::Exists($folder)) {
                 $fullFolder = [IO.Path]::GetFullPath($folder)
-                if ($fullFolder.TrimEnd('/', '\') -eq $root.TrimEnd('/', '\')) {
+                if ($fullFolder.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Equals($root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $comparison)) {
                     if (-not $Request.State.Context.Project.AutoIndexAllowed) {
                         Get-RetrievalInventory $fullFolder -Request $Request -Explicit
                     }
@@ -272,11 +272,11 @@ function Update-RetrievalIndex {
             }
         }
     }
-    $present = @{}; $pending = 0
+    $present = New-DiscoveryPathTable; $pending = 0
     $cacheRoot = [IO.Path]::GetFullPath($Request.Config.DataDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     foreach ($file in $inventory) {
         Invoke-DiscoveryCheckpoint $Request
-        if ($file.FullPath -and $file.FullPath.StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        if ($file.FullPath -and $file.FullPath.StartsWith($cacheRoot, $comparison)) {
             continue
         }
         $present[$file.Path] = $true
@@ -334,7 +334,7 @@ function Update-RetrievalIndex {
             $null = & $Request.Pump
         }
     }
-    foreach ($path in @($index.Files.Keys)) {
+    foreach ($path in @($index.Files.psbase.Keys)) {
         if (-not $present.ContainsKey($path)) {
             $index.Files.Remove($path); $index.Search = $null; $index.Dirty = $true
         }
@@ -342,7 +342,7 @@ function Update-RetrievalIndex {
     $index.Ready = $pending -eq 0
     $state = [pscustomobject]@{
         SessionId         = $Request.State.SessionId
-        Files = $index.Files.Count; Chunks = @($index.Files.Values | ForEach-Object { $_.Chunks }).Count
+        Files = $index.Files.psbase.Count; Chunks = @($index.Files.psbase.Values | ForEach-Object { $_.Chunks }).Count
         Status            = if ($index.Ready) {
             'ready'
         }

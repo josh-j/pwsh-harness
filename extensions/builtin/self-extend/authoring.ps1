@@ -1,4 +1,5 @@
 #Requires -Version 7.6
+. (Join-Path $PSScriptRoot '../powershell/process-output.ps1')
 . (Join-Path $PSScriptRoot 'scan.ps1')
 . (Join-Path $PSScriptRoot 'reference.ps1')
 . (Join-Path $PSScriptRoot 'approval.ps1')
@@ -244,7 +245,8 @@ function Test-AuthoringStage {
     Get-AuthoringPreview $stage
 }
 function Invoke-AuthoringDryLoad {
-    param($Store, [string]$Id, [int]$TimeoutSeconds = 60)
+    param($Store, [string]$Id, [ValidateRange(1, 2147483647)][int]$TimeoutSeconds = 60,
+        [scriptblock]$Pump, [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
     $stage = Get-AuthoringStage $Store $Id
     $stage.DryLoaded = $false
     if (-not $stage.Valid) {
@@ -268,14 +270,36 @@ function Invoke-AuthoringDryLoad {
         $start.ArgumentList.Add($argument)
     }
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
+    $started = $false; $stdout = $null; $stderr = $null
     try {
+        $CancellationToken.ThrowIfCancellationRequested()
         $null = $process.Start()
-        $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(1000 * $TimeoutSeconds)) {
-            $process.Kill($true); throw 'Dry-load timed out.'
+        $started = $true
+        $stdout = New-PackRunCapture $process.StandardOutput; $stderr = New-PackRunCapture $process.StandardError
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        while ($true) {
+            Update-PackRunCapture $stdout; Update-PackRunCapture $stderr
+            if ($stdout.Failure) {
+                throw $stdout.Failure
+            }
+            if ($stderr.Failure) {
+                throw $stderr.Failure
+            }
+            if ($process.HasExited -and $stdout.Finished -and $stderr.Finished) {
+                break
+            }
+            if ($CancellationToken.IsCancellationRequested) {
+                throw [OperationCanceledException]::new('Dry-load cancelled.')
+            }
+            if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                throw 'Dry-load timed out.'
+            }
+            if ($Pump) {
+                $null = & $Pump
+            }
+            Start-Sleep -Milliseconds 25
         }
-        $output = $stdout.GetAwaiter().GetResult(); $errorText = $stderr.GetAwaiter().GetResult()
-        [IO.File]::WriteAllText((Join-Path $stage.Directory 'dry-load.log'), $output + "`n" + $errorText)
+        $output = $stdout.Text.ToString(); $errorText = $stderr.Text.ToString()
         if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $resultFile)) {
             throw "Dry-load failed: $output $errorText"
         }
@@ -294,10 +318,47 @@ function Invoke-AuthoringDryLoad {
         $stage.DryLoaded = $true
     }
     catch {
+        if ($started) {
+            if (-not $process.HasExited) {
+                $process.Kill($true)
+            }
+            $null = $process.WaitForExit(1000)
+            if ($stdout) {
+                Update-PackRunCapture $stdout
+            }
+            if ($stderr) {
+                Update-PackRunCapture $stderr
+            }
+        }
         $stage.Diagnostics.Add([pscustomobject]@{ Severity = 'Error'; Code = 'DryLoad'; Message = $_.Exception.Message; File = 'entry.ps1'; Line = 0 }); $stage.Valid = $false; $stage.Approval = $null
+        if ($CancellationToken.IsCancellationRequested) {
+            throw
+        }
     }
     finally {
+        if ($started -and -not $process.HasExited) {
+            $process.Kill($true); $null = $process.WaitForExit(1000)
+        }
+        $output = if ($stdout) {
+            $stdout.Text.ToString()
+        }
+        else {
+            ''
+        }
+        $errorText = if ($stderr) {
+            $stderr.Text.ToString()
+        }
+        else {
+            ''
+        }
         $process.Dispose()
+        try {
+            [IO.File]::WriteAllText((Join-Path $stage.Directory 'dry-load.log'), $output + "`n" + $errorText)
+        }
+        catch {
+            $stage.Diagnostics.Add([pscustomobject]@{ Severity = 'Error'; Code = 'DryLoadLog'; Message = "Dry-load log could not be saved: $($_.Exception.Message)"; File = 'dry-load.log'; Line = 0 })
+            $stage.Valid = $false; $stage.DryLoaded = $false; $stage.Approval = $null
+        }
     }
     Get-AuthoringPreview $stage
 }
@@ -481,7 +542,9 @@ function New-ExtensionAuthoringService {
     $service | Add-Member ScriptMethod Stage { param([string]$Text, [string]$EditName = '') & $stage $store $Text $EditName }.GetNewClosure()
     $service | Add-Member ScriptMethod Validate { param([string]$Id, [hashtable]$Config = @{}) & $validate $store $Id $Config }.GetNewClosure()
     $service | Add-Member ScriptMethod Approve { param([string]$Id, [string[]]$Approvals) & $approve $store $Id $Approvals }.GetNewClosure()
-    $service | Add-Member ScriptMethod DryLoad { param([string]$Id, [int]$TimeoutSeconds = 60) & $dry $store $Id $TimeoutSeconds }.GetNewClosure()
+    $service | Add-Member ScriptMethod DryLoad { param([string]$Id, [ValidateRange(1, 2147483647)][int]$TimeoutSeconds = 60,
+            [scriptblock]$Pump, [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
+        & $dry $store $Id $TimeoutSeconds $Pump $CancellationToken }.GetNewClosure()
     $service | Add-Member ScriptMethod Install { param([string]$Id, [string[]]$Approvals) & $install $store $Id $Approvals }.GetNewClosure()
     $service | Add-Member ScriptMethod Rollback { param([string]$Name, [string]$Generation = '', [string[]]$Approvals = @()) & $rollback $store $Name $Generation $Approvals }.GetNewClosure()
     $service | Add-Member ScriptMethod Remove { param([string]$Name, [string[]]$Approvals) & $remove $store $Name $Approvals }.GetNewClosure()

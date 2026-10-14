@@ -22,7 +22,7 @@ function Get-RetrievalStem {
 }
 function Select-RetrievalDistinctSymbol {
     param($Candidates, $Search)
-    $seen = @{}
+    $seen = New-DiscoveryPathTable
     foreach ($candidate in $Candidates) {
         $symbol = $Search.Symbols[$candidate.Chunk.Id]
         if (-not $symbol) {
@@ -68,7 +68,7 @@ function Initialize-RetrievalSearch {
     if ($Index.ContainsKey('Search') -and $Index.Search) {
         return $Index.Search
     }
-    $chunks = @($Index.Files.Values.Chunks | Sort-Object Id)
+    $chunks = @($Index.Files.psbase.Values.Chunks | Sort-Object Id)
     $records = [Collections.Generic.List[object]]::new()
     $postings = @{}; $total = 0.0
     foreach ($chunk in $chunks) {
@@ -98,7 +98,9 @@ function Initialize-RetrievalSearch {
         $records.Add(@{ Chunk = $chunk; Length = $length })
         $total += $length
     }
-    $symbols = @{}; $definitions = @{}; $named = @{}
+    $symbols = New-DiscoveryPathTable
+    $definitions = New-DiscoveryPathTable
+    $named = @{}
     foreach ($chunk in $chunks | Where-Object Kind -EQ Function) {
         $symbols[$chunk.Id] = $chunk.Id; $definitions[$chunk.Id] = $chunk
         $name = $chunk.Fields.Name
@@ -239,7 +241,7 @@ function Get-RetrievalContext {
     $script:Index = Update-RetrievalIndex $Request
     $budget = [Math]::Min($Request.Config.RagTokenBudget, $Request.RemainingTokenBudget)
     $query = Get-RetrievalQuery $Request
-    $fused = @{}
+    $fused = New-DiscoveryPathTable
     foreach ($retriever in $script:Harness.Retrievers.List()) {
         $rank = 0
         $candidates = @($script:Harness.Retrievers.Invoke($retriever.Name, @($query, $budget)) |
@@ -258,7 +260,7 @@ function Get-RetrievalContext {
         }
     }
     $selected = [Collections.Generic.List[object]]::new(); $used = 0
-    $ordered = @($fused.Values | Sort-Object @{ Expression = { $_.Score }; Descending = $true },
+    $ordered = @($fused.psbase.Values | Sort-Object @{ Expression = { $_.Score }; Descending = $true },
         @{ Expression = { $_.Chunk.Id } })
     foreach ($candidate in (Select-RetrievalDistinctSymbol $ordered (Initialize-RetrievalSearch $script:Index))) {
         if ($selected.Count -ge $Request.Config.RagTopK) {

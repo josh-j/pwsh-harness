@@ -102,27 +102,6 @@ function New-HarnessHost {
         }
     }.GetNewClosure() -Force
     $script:Hosts[$hostInstance.Id] = [WeakReference]::new($hostInstance)
-    # The composed host needs the built-in gateway's settings even for Mock.
-    # A rejected configuration rolls its registration back; surface that cause
-    # before a frontend or turn can fail with a missing provider instead.
-    $registry = $hostInstance.GetRegistry()
-    if ($registry.Extensions -notcontains 'openai-compatible') {
-        $failure = $registry.Errors | Where-Object Extension -EQ 'openai-compatible' | Select-Object -Last 1
-        $message = if ($failure) {
-            $failure.Message
-        }
-        else {
-            'The built-in OpenAI-compatible gateway could not be loaded.'
-        }
-        $record = [Management.Automation.ErrorRecord]::new([Exception]::new($message),
-            'HarnessGatewayInitializationFailed', [Management.Automation.ErrorCategory]::InvalidArgument, $null)
-        try {
-            $hostInstance.Dispose()
-        }
-        finally {
-            $PSCmdlet.ThrowTerminatingError($record)
-        }
-    }
     $hostInstance
 }
 function Invoke-PwshHarness {

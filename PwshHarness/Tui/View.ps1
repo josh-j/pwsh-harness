@@ -80,7 +80,18 @@ function New-HarnessViewState {
 function Update-HarnessSessionView {
     param($View, [string]$EventName, $Payload)
     $session = $View.SessionView
-    if (($Payload -is [Collections.IDictionary] -and $Payload.ContainsKey('SessionId')) -and $Payload.SessionId -ne $session.SessionId) {
+    $hasSessionId = if ($Payload -is [Collections.IDictionary]) {
+        if ($Payload.PSObject.Methods['ContainsKey']) {
+            $Payload.ContainsKey('SessionId')
+        }
+        else {
+            $Payload.Contains('SessionId')
+        }
+    }
+    else {
+        $null -ne $Payload -and $null -ne $Payload.PSObject.Properties['SessionId']
+    }
+    if ($hasSessionId -and -not [string]::Equals($Payload.SessionId, $session.SessionId, [StringComparison]::Ordinal)) {
         return
     }
     switch ($EventName) {
@@ -103,6 +114,9 @@ function Update-HarnessSessionView {
         }
         DiagnosticsProduced {
             $session.Diagnostics = @($Payload.Diagnostics)
+        }
+        ext.powershell.OperationPrepared {
+            $session.Records.Add([pscustomobject]@{ Role = 'operation'; Text = $Payload.Text })
         }
         TurnCompleted {
             $View.Panels.CodeLine = 1

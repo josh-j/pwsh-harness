@@ -1,6 +1,48 @@
 . (Join-Path $PSScriptRoot 'discovery.ps1')
+$script:LiteralContextPaths = [Runtime.CompilerServices.ConditionalWeakTable[object, hashtable]]::new()
+function Get-HarnessContextLiteralPaths {
+    param($State)
+    $paths = $null
+    if (-not $script:LiteralContextPaths.TryGetValue($State, [ref]$paths)) {
+        $paths = New-DiscoveryPathTable
+        $script:LiteralContextPaths.Add($State, $paths)
+    }
+    $paths
+}
+function ConvertTo-HarnessContextPattern {
+    param([string]$Root, [string]$Pattern)
+    if (-not $Pattern) {
+        return ''
+    }
+    ConvertTo-DiscoveryPath ([IO.Path]::GetRelativePath($Root, [IO.Path]::GetFullPath($Pattern, $Root)))
+}
+function New-HarnessContextPathPattern {
+    param([string]$Pattern, [string]$Root, [hashtable]$LiteralPaths)
+    $literal = $null -ne $LiteralPaths -and $LiteralPaths.ContainsKey($Pattern)
+    # An existing literal path takes precedence over its wildcard interpretation.
+    if (-not $literal -and ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Pattern) -or $Pattern.Contains([char]96))) {
+        $full = [IO.Path]::GetFullPath($Pattern, $Root)
+        $relative = ConvertTo-DiscoveryPath ([IO.Path]::GetRelativePath($Root, $full))
+        if (-not [IO.Path]::IsPathRooted($relative) -and $relative -ne '..' -and -not $relative.StartsWith('../')) {
+            $literal = [IO.File]::Exists($full) -or [IO.Directory]::Exists($full)
+        }
+    }
+    if ($literal) {
+        if ($null -ne $LiteralPaths) {
+            $LiteralPaths[$Pattern] = $true
+        }
+        $Pattern = [Management.Automation.WildcardPattern]::Escape($Pattern)
+    }
+    $options = if ((Get-DiscoveryPathComparison) -eq [StringComparison]::OrdinalIgnoreCase) {
+        [Management.Automation.WildcardOptions]::IgnoreCase
+    }
+    else {
+        [Management.Automation.WildcardOptions]::None
+    }
+    [Management.Automation.WildcardPattern]::new($Pattern, $options)
+}
 function Invoke-HarnessGit {
-    param([string]$Path, [string[]]$Arguments, $Request = $script:DiscoveryRequest)
+    param([string]$Path, [string[]]$Arguments, $Request = $script:DiscoveryRequest, [switch]$RawOutput)
     if (-not (Get-Command git -ErrorAction Ignore)) {
         return $null
     }
@@ -38,7 +80,12 @@ function Invoke-HarnessGit {
         if ($process.ExitCode -ne 0) {
             return $null
         }
-        $text.Replace("`r", '').TrimEnd("`n")
+        if ($RawOutput) {
+            $text
+        }
+        else {
+            $text.Replace("`r", '').TrimEnd("`n")
+        }
     }
     finally {
         if (-not $process.HasExited) {
@@ -59,8 +106,13 @@ function Get-HarnessGitContext {
     param($Request)
     $script:DiscoveryRequest = $Request
     Invoke-DiscoveryCheckpoint $Request
-    $requestedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Request.Path)
-    if (-not (Test-Path -LiteralPath $requestedPath -PathType Container)) {
+    $requestedPath = if ([IO.Path]::IsPathRooted($Request.Path)) {
+        [IO.Path]::GetFullPath($Request.Path)
+    }
+    else {
+        $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Request.Path)
+    }
+    if (-not [IO.Directory]::Exists($requestedPath)) {
         throw "Context directory not found: $requestedPath"
     }
     $root = if (Test-DiscoveryRepositoryCandidate $requestedPath $Request) {
@@ -74,7 +126,8 @@ function Get-HarnessGitContext {
         $root = $requestedPath
     }
     $reason = Get-DiscoveryRootReason $root
-    $explicit = @($Request.Config.RagPaths | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd('/', '\') -eq $root.TrimEnd('/', '\') }).Count -gt 0
+    $comparison = Get-DiscoveryPathComparison
+    $explicit = @($Request.Config.RagPaths | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Equals($root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $comparison) }).Count -gt 0
     if ($isRepository -and -not $reason -and -not $explicit) {
         $probe = Get-DiscoveryListing $root -Limit 5001 -Depth 2 -SkipGitMetadata -Request $Request
         if ($probe.Entries.Count -gt 5000) {
@@ -101,13 +154,13 @@ function Get-HarnessGitContext {
     }
     if ($autoIndexAllowed) {
         $status = Invoke-HarnessGit $root @('status', '--short')
-        $tracked = Invoke-HarnessGit $root @('-c', 'core.quotepath=false', 'ls-files', '--cached', '--others', '--exclude-standard')
-        $files = @($tracked -split '\r?\n' |
+        $tracked = Invoke-HarnessGit $root @('ls-files', '--cached', '--others', '--exclude-standard', '-z') -RawOutput
+        $files = @($tracked -split "`0" |
                 Where-Object {
                     $_ -and
                     $_ -notmatch '(?i)(^|/)(\.env[^/]*|credentials[^/]*|\.credentials-[^/]*|id_rsa|id_ed25519)$|\.(pfx|p12|pem|key)$'
-                } |
-                Sort-Object -Unique)
+                })
+        $files = @(Select-DiscoveryUniquePath $files)
         if ($Request.IncludeDiff) {
             $diffPaths = @('.') + @('credentials*', '.credentials-*', '.env*', 'id_rsa', 'id_ed25519', '*.pfx', '*.p12', '*.pem', '*.key' | ForEach-Object {
                     ':(glob,icase,exclude)**/' + $_
@@ -142,8 +195,8 @@ function Get-HarnessGitContext {
             Kind      = 'Metadata'
             Stability = 'Volatile'
         })
-    $selected = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
-    $stableFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $selected = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
+    $stableFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     if ($Request.AutoFiles) {
         foreach ($file in $files) {
             Invoke-DiscoveryCheckpoint $Request
@@ -179,24 +232,41 @@ function Get-HarnessGitContext {
     }
     # Exact tracked paths or unique leaf names form the Phase 5 query seam; no content search occurs.
     $query = if ($Request.PSObject.Properties['Query']) {
-        [string]$Request.Query.Replace('\', '/')
+        ConvertTo-DiscoveryPath $Request.Query
     }
     else {
         '' 
     }
     $queryFiles = if ($autoIndexAllowed) {
-        @((Invoke-HarnessGit $root @('ls-files', '--cached')) -split "`n" | Where-Object { $_ -in $files })
+        @((Invoke-HarnessGit $root @('ls-files', '--cached', '-z') -RawOutput) -split "`0" | Where-Object { $_ -and $_ -cin $files })
     }
     else {
         $files 
     }
-    $leafCounts = @{}
+    $leafCounts = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
     foreach ($file in $queryFiles) {
         $leaf = [IO.Path]::GetFileName($file)
         if (-not $leafCounts.ContainsKey($leaf)) {
             $leafCounts[$leaf] = 0 
         }
         $leafCounts[$leaf]++
+    }
+    $compatibleQuery = ''
+    if (-not $IsWindows -and $query.Contains('\')) {
+        # Keep literal Unix mentions intact before accepting Windows-style query paths.
+        $compatibleQuery = $query
+        foreach ($file in @($queryFiles | Where-Object { $_.Contains('\') })) {
+            $names = @($file)
+            $leaf = [IO.Path]::GetFileName($file)
+            if ($leafCounts[$leaf] -eq 1) {
+                $names += $leaf
+            }
+            foreach ($name in $names) {
+                $pattern = '(?<![\w./\\-])' + [regex]::Escape($name) + '(?![\w/\\-]|\.[\w])'
+                $compatibleQuery = [regex]::Replace($compatibleQuery, $pattern, ' ')
+            }
+        }
+        $compatibleQuery = $compatibleQuery.Replace('\', '/')
     }
     foreach ($file in $queryFiles) {
         $leaf = [IO.Path]::GetFileName($file)
@@ -206,7 +276,8 @@ function Get-HarnessGitContext {
             $names += $leaf 
         }
         foreach ($name in $names) {
-            if ($query -cmatch ('(?<![\w./\\-])' + [regex]::Escape($name) + '(?![\w/\\-]|\.[\w])')) {
+            $pattern = '(?<![\w./\\-])' + [regex]::Escape($name) + '(?![\w/\\-]|\.[\w])'
+            if ($query -cmatch $pattern -or ($compatibleQuery -and $compatibleQuery -cmatch $pattern)) {
                 if (-not $stableFiles.Contains($file)) {
                     $selected[$file] = 15
                 }
@@ -214,36 +285,41 @@ function Get-HarnessGitContext {
             }
         }
     }
-    foreach ($pattern in $Request.IncludeFiles) {
-        $pattern = $pattern.Replace('\', '/')
-        if ([IO.Path]::IsPathRooted($pattern)) {
-            $pattern = [IO.Path]::GetRelativePath($root, $pattern).Replace('\', '/')
-        }
-        $pattern = $pattern -replace '^\./', ''
+    $literalPaths = Get-HarnessContextLiteralPaths $Request.State
+    $includePatterns = @(foreach ($pattern in $Request.IncludeFiles) {
+            ConvertTo-HarnessContextPattern $root $pattern
+        })
+    foreach ($pattern in $includePatterns) {
+        $matcher = New-HarnessContextPathPattern $pattern $root $literalPaths
         foreach ($file in $files) {
-            if ($file -like $pattern -or
+            if ($matcher.IsMatch($file) -or
                 $file.StartsWith($pattern.TrimEnd('/') +
                     '/',
-                    [StringComparison]::OrdinalIgnoreCase)) {
+                    $comparison)) {
                 if (-not $stableFiles.Contains($file)) {
                     $selected[$file] = 20
                 }
             }
         }
     }
+    $exclusions = @(foreach ($pattern in $Request.ExcludeFiles) {
+            $pattern = ConvertTo-HarnessContextPattern $root $pattern
+            @{ Pattern = $pattern; Matcher = (New-HarnessContextPathPattern $pattern $root $literalPaths) }
+        })
     $included = [Collections.Generic.List[string]]::new()
-    foreach ($file in @($selected.Keys | Sort-Object)) {
-        $excluded = @($Request.ExcludeFiles | Where-Object {
-                $file -like $_ -or $file.StartsWith($_.TrimEnd('/') + '/', [StringComparison]::OrdinalIgnoreCase)
+    foreach ($file in @($selected.psbase.Keys | Sort-Object)) {
+        $excluded = @($exclusions | Where-Object {
+                $_.Matcher.IsMatch($file) -or $file.StartsWith($_.Pattern.TrimEnd('/') + '/', $comparison)
             }).Count
-        if ($excluded -and $file -notin $Request.IncludeFiles) {
+        $explicit = @($includePatterns | Where-Object { $file.Equals($_, $comparison) }).Count -gt 0
+        if ($excluded -and -not $explicit) {
             continue
         }
-        $fullPath = Join-Path $root $file
-        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        $fullPath = [IO.Path]::Combine($root, $file)
+        $item = [IO.FileInfo]::new($fullPath)
+        if (-not $item.Exists) {
             continue
         }
-        $item = Get-Item -LiteralPath $fullPath -Force
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             continue
         }
@@ -363,24 +439,34 @@ function Resolve-HarnessContextSelection {
     if (-not $project) {
         throw 'Project context could not be collected.'
     }
-    $pattern = $Pattern.Trim('"', "'").Replace('\', '/')
+    $pattern = Resolve-DiscoveryPathArgument $project.Root $Pattern
     if (-not $pattern) {
         throw 'A path or glob is required.'
     }
     $absolute = [IO.Path]::GetFullPath($pattern, $project.Root)
-    $relative = [IO.Path]::GetRelativePath($project.Root, $absolute).Replace('\', '/')
+    $relative = ConvertTo-DiscoveryPath ([IO.Path]::GetRelativePath($project.Root, $absolute))
     if ([IO.Path]::IsPathRooted($relative) -or $relative -eq '..' -or $relative.StartsWith('../')) {
         throw 'Context paths must stay inside the project root.'
     }
+    $comparison = Get-DiscoveryPathComparison
+    $matcher = New-HarnessContextPathPattern $relative $project.Root
     $selectedFiles = @($project.Files | Where-Object {
-            $relative -eq '.' -or $_ -like $relative -or
-            $_.StartsWith($relative.TrimEnd('/') + '/', [StringComparison]::OrdinalIgnoreCase)
+            $relative -eq '.' -or $matcher.IsMatch($_) -or
+            $_.StartsWith($relative.TrimEnd('/') + '/', $comparison)
         })
+    if (-not $selectedFiles.Count -and -not $IsWindows -and $pattern.Contains('\') -and
+        -not [IO.File]::Exists($absolute) -and -not [IO.Directory]::Exists($absolute)) {
+        # Preserve native matches, then accept Windows-style command paths on Unix.
+        return Resolve-HarnessContextSelection $State ($pattern.Replace('\', '/'))
+    }
     if (-not $selectedFiles.Count) {
         throw 'No eligible project files matched; the path may be missing, gitignored, or excluded.'
     }
     foreach ($file in $selectedFiles) {
-        $item = Get-Item -LiteralPath (Join-Path $project.Root $file) -Force -ErrorAction Stop
+        $item = [IO.FileInfo]::new([IO.Path]::Combine($project.Root, $file))
+        if (-not $item.Exists) {
+            throw 'Selected context file no longer exists.'
+        }
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw 'Symbolic links cannot be added to project context.'
         }
@@ -396,7 +482,9 @@ function Initialize-HarnessContextCommands {
             throw 'Usage: /add <path|glob>'
         }
         $files = @(Resolve-HarnessContextSelection $c.State $c.Arguments)
+        $literalPaths = Get-HarnessContextLiteralPaths $c.State
         foreach ($file in $files) {
+            $literalPaths[$file] = $true
             if (-not $c.State.Context.IncludeFiles.Contains($file)) {
                 $c.State.Context.IncludeFiles.Add($file)
             }
@@ -413,12 +501,15 @@ function Initialize-HarnessContextCommands {
         if ($c.Arguments -eq 'all') {
             $c.State.Context.IncludeFiles.Clear()
             $c.State.Context.ExcludeFiles.Clear()
+            (Get-HarnessContextLiteralPaths $c.State).Clear()
             $c.State.Context.SuppressAutoFiles = $true
             $c.State.Context.IncludeDiff = $false
         }
         else {
             $files = @(Resolve-HarnessContextSelection $c.State $c.Arguments)
+            $literalPaths = Get-HarnessContextLiteralPaths $c.State
             foreach ($file in $files) {
+                $literalPaths[$file] = $true
                 $null = $c.State.Context.IncludeFiles.Remove($file)
                 if (-not $c.State.Context.ExcludeFiles.Contains($file)) {
                     $c.State.Context.ExcludeFiles.Add($file)
@@ -490,7 +581,7 @@ function Initialize-HarnessContextCommands {
                 $file
             }
         }
-        $tree = @($paths | Sort-Object -Unique | ForEach-Object { if ($IsWindows) {
+        $tree = @(Select-DiscoveryUniquePath $paths | ForEach-Object { if ($IsWindows) {
                     $_.Replace('/', '\')
                 }
                 else {

@@ -43,7 +43,7 @@ function Invoke-HarnessEmbedding {
         $response = $pending.GetAwaiter().GetResult()
         try {
             $text = $response.Content.ReadAsStringAsync($linked.Token).GetAwaiter().GetResult()
-            $data = (Protect-HarnessProviderText $text $redact) | ConvertFrom-Json -AsHashtable
+            $data = Protect-HarnessProviderData ($text | ConvertFrom-Json -AsHashtable) $redact
             if (-not $response.IsSuccessStatusCode -or $data.ContainsKey('error')) {
                 throw "Embedding request failed ($([int]$response.StatusCode)): $($data.error.message)"
             }
@@ -69,6 +69,12 @@ function Invoke-HarnessEmbedding {
         }
     }
     catch {
+        if ($Services.CancellationToken.IsCancellationRequested) {
+            throw [OperationCanceledException]::new('Embedding request cancelled.', $Services.CancellationToken)
+        }
+        if ($linked.IsCancellationRequested) {
+            throw [TimeoutException]::new("Embedding provider timed out after $($config.TimeoutSeconds) seconds.")
+        }
         $safeMessage = if (Get-Variable redact -ErrorAction Ignore) {
             Protect-HarnessProviderText $_.Exception.Message $redact
         }

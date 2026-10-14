@@ -3,25 +3,25 @@ function New-EngineUsage {
     # Output: normalized provider-independent usage record; missing counters are zero.
     @{ prompt_tokens = 0L; completion_tokens = 0L; total_tokens = 0L
         prompt_tokens_details     = @{ cached_tokens = 0L }
-        completion_tokens_details = @{ reasoning_tokens = 0L } 
+        completion_tokens_details = @{ reasoning_tokens = 0L }
     }
 }
 function Get-EngineUsageCounter {
     param($Usage, [string]$Name, [string]$Detail = '')
     if ($null -eq $Usage) {
-        return 0L 
+        return 0L
     }
     $value = if ($Usage -is [Collections.IDictionary]) {
-        $Usage[$Name] 
+        $Usage[$Name]
     }
     elseif ($Usage.PSObject.Properties[$Name]) {
-        $Usage.$Name 
+        $Usage.$Name
     }
     if ($Detail) {
-        return Get-EngineUsageCounter $value $Detail 
+        return Get-EngineUsageCounter $value $Detail
     }
     if ($null -eq $value) {
-        return 0L 
+        return 0L
     }
     [Math]::Max(0L, [long]$value)
 }
@@ -34,6 +34,22 @@ function Add-EngineUsage {
     $Total.prompt_tokens_details.cached_tokens += Get-EngineUsageCounter $Usage 'prompt_tokens_details' 'cached_tokens'
     $Total.completion_tokens_details.reasoning_tokens += Get-EngineUsageCounter $Usage 'completion_tokens_details' 'reasoning_tokens'
 }
+function Add-EngineFailureUsage {
+    param($State, $Usage, [hashtable]$Metadata)
+    Add-EngineUsage $State.Usage $Usage
+    if (-not @(@('prompt_tokens', 'completion_tokens', 'total_tokens') | Where-Object { (Get-EngineUsageCounter $Usage $_) -gt 0 }).Count -and
+        (Get-EngineUsageCounter $Usage 'prompt_tokens_details' 'cached_tokens') -eq 0 -and
+        (Get-EngineUsageCounter $Usage 'completion_tokens_details' 'reasoning_tokens') -eq 0) {
+        return
+    }
+    $Metadata.Usage = $Usage
+    try {
+        Add-EngineTranscript $State 'request-failure' ("Uncommitted request usage: $((Get-EngineUsageCounter $Usage 'total_tokens')) tokens.") $Metadata
+    }
+    catch {
+        $Metadata.TranscriptFailure = $_.Exception.Message
+    }
+}
 function Get-EngineCalibration {
     param($Store, $Config)
     $key = "$($Config.DataDirectory)/$($Config.ModelProfile)"
@@ -42,20 +58,20 @@ function Get-EngineCalibration {
         $values = @{}
         if (Test-Path -LiteralPath $path) {
             try {
-                $values = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable 
+                $values = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
             }
             catch {
-                Write-EngineFault $Store '<engine>' 'calibration' $_ 
+                Write-EngineFault $Store '<engine>' 'calibration' $_
             }
         }
         $ratio = if ($values.ContainsKey($Config.ModelProfile)) {
-            [double]$values[$Config.ModelProfile] 
+            [double]$values[$Config.ModelProfile]
         }
         else {
-            1.0 
+            1.0
         }
         if ($ratio -le 0 -or [double]::IsNaN($ratio) -or [double]::IsInfinity($ratio)) {
-            $ratio = 1.0 
+            $ratio = 1.0
         }
         $Store.Calibrations[$key] = @{ Ratio = $ratio; Path = $path; Values = $values }
     }
@@ -65,7 +81,7 @@ function Update-EngineCalibration {
     # Input: actual and uncalibrated request estimate. EMA alpha is 0.2, independently keyed by profile.
     param($Store, $Config, [long]$Actual, [int]$Estimated)
     if ($Actual -le 0 -or $Estimated -le 0) {
-        return 
+        return
     }
     $calibration = Get-EngineCalibration $Store $Config
     $calibration.Ratio = 0.8 * $calibration.Ratio + 0.2 * ($Actual / [double]$Estimated)
@@ -75,6 +91,6 @@ function Update-EngineCalibration {
         [IO.File]::WriteAllText($calibration.Path, ($calibration.Values | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
     }
     catch {
-        Write-EngineFault $Store '<engine>' 'calibration' $_ 
+        Write-EngineFault $Store '<engine>' 'calibration' $_
     }
 }

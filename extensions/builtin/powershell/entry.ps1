@@ -5,6 +5,7 @@
 . (Join-Path $PSScriptRoot 'history.ps1')
 . (Join-Path $PSScriptRoot 'language.ps1')
 . (Join-Path $PSScriptRoot 'actions.ps1')
+. (Join-Path $PSScriptRoot 'operations.ps1')
 . (Join-Path $PSScriptRoot 'catalog.ps1')
 . (Join-Path $PSScriptRoot 'windows.ps1')
 . (Join-Path $PSScriptRoot 'save.ps1')
@@ -14,7 +15,7 @@
     $script:Harness = $Harness
     Register-PackAmplification
     Register-PackExamples
-    $Harness.Actions.Add('verify', ${function:Invoke-PackVerification}, $true)
+    $Harness.Actions.Add('verify', ${function:Invoke-PackVerification}, $true, '', '', ${function:Get-PackVerificationReview})
     $Harness.Commands.Add('verify', { param($c) $script:Harness.Actions.Invoke('verify', $c.State, $c.State.LastResult.CodeBlocks[0], '', $c.Confirm) }, 'Generate and execute guarded tests after confirmation (VerifyWithTests opt-in).')
     $Harness.QueryExpanders.Add('AdminVocabulary', ${function:Expand-PackAdminQuery})
     foreach ($suffix in @('.ps1', '.psm1', '.psd1')) {
@@ -22,6 +23,7 @@
     }
     $Harness.ContextSources.Add('CommandSyntax', ${function:Get-PackSyntaxContext}, 400)
     Register-PackHistoryCompactors
+    Register-PackOperations
     $Harness.Settings.Declare('RepairPolicy', [string], 'powershell.parser')
     $Harness.Settings.Declare('Temperature', [double], 0.2, { param($v) if ($v -lt 0 -or $v -gt 2 -or [double]::IsNaN($v)) {
                 'Temperature must be between 0 and 2.'
@@ -139,8 +141,8 @@
     $Harness.Actions.Add('save', { param($c) Save-HarnessCode $c.State $c.Arguments -CodeBlock $c.Block }, $false)
     $Harness.Actions.Add('apply', { param($c) Invoke-HarnessApply $c.State $c.Arguments -CodeBlock $c.Block -Confirmation $c.Confirm }, $false)
     $Harness.Actions.Add('copy', { param($c) Copy-HarnessCode $c.State -CodeBlock $c.Block }, $false)
-    $Harness.Actions.Add('run', { param($c) Invoke-HarnessRun $c.State -Confirm $c.Confirm -CodeBlock $c.Block }, $true)
-    $Harness.Actions.Add('whatif', { param($c) Invoke-HarnessRun $c.State -WhatIf -Confirm $c.Confirm -CodeBlock $c.Block }, $true)
+    $Harness.Actions.Add('run', { param($c) Invoke-HarnessRun $c.State -Confirm $c.Confirm -CodeBlock $c.Block -Pump $c.Pump -CancellationToken $c.CancellationToken -ScriptPath $c.Arguments -ReviewedSettings $c.ReviewData }, $true, '', '', ${function:Get-PackRunReview})
+    $Harness.Actions.Add('whatif', { param($c) Invoke-HarnessRun $c.State -WhatIf -Confirm $c.Confirm -CodeBlock $c.Block -Pump $c.Pump -CancellationToken $c.CancellationToken -ReviewedSettings $c.ReviewData }, $true, '', '', { param($c) Get-PackRunReview $c -WhatIf })
     $Harness.Settings.Declare('CommandCatalogPath', [string], (Join-Path $PSScriptRoot 'windows-7.6.json'))
     $catalogConfig = $Harness.ConfigService.Resolve()
     $catalog = New-ComposedCatalog $catalogConfig.CommandCatalogPath $catalogConfig.DataDirectory -Live:$IsWindows

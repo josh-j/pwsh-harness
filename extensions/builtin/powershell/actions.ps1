@@ -1,3 +1,4 @@
+. (Join-Path $PSScriptRoot 'process-output.ps1')
 function Get-HarnessLastCode {
     param([object]$State, [object]$CodeBlock)
     if ($CodeBlock) {
@@ -39,15 +40,39 @@ function Copy-HarnessCode {
     Set-Clipboard -Value $code
     'Copied code to the clipboard.'
 }
+function Get-PackRunSettings {
+    param($State)
+    $workingDirectory = [IO.Path]::GetFullPath($State.Config.ContextPath)
+    if ([IO.File]::Exists($workingDirectory)) {
+        $workingDirectory = [IO.Path]::GetDirectoryName($workingDirectory)
+    }
+    [pscustomobject]@{
+        ContextPath      = [string]$State.Config.ContextPath
+        WorkingDirectory = $workingDirectory
+        TimeoutSeconds   = $State.Config.RunTimeoutSeconds
+    }
+}
+function Get-PackRunReview {
+    param($Context, [switch]$WhatIf)
+    $Context.ReviewData = Get-PackRunSettings $Context.State
+    "Working directory: $($Context.ReviewData.WorkingDirectory)`nTimeout: $($Context.ReviewData.TimeoutSeconds) seconds$(if ($WhatIf) { "`nMode: -WhatIf" })"
+}
 function Invoke-HarnessRun {
     [OutputType([string], [pscustomobject])]
     [CmdletBinding()]
-    param([object]$State, [switch]$WhatIf, [scriptblock]$Confirm, [object]$CodeBlock)
-    $code = Get-HarnessLastCode $State $CodeBlock
-    $workingDirectory = Resolve-HarnessActionPath $State '.'
-    if (-not [IO.Directory]::Exists($workingDirectory)) {
-        throw 'The session context directory does not exist.'
+    param([object]$State, [switch]$WhatIf, [scriptblock]$Confirm, [object]$CodeBlock, [scriptblock]$Pump,
+        [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None,
+        [string]$ScriptPath = '', [object]$ReviewedSettings)
+    $CancellationToken.ThrowIfCancellationRequested()
+    if ($State.Cancellation) {
+        $State.Cancellation.Token.ThrowIfCancellationRequested()
     }
+    if (-not $ReviewedSettings) {
+        $ReviewedSettings = Get-PackRunSettings $State
+    }
+    $runTimeoutSeconds = $ReviewedSettings.TimeoutSeconds
+    $workingDirectory = $ReviewedSettings.WorkingDirectory
+    $code = Get-HarnessLastCode $State $CodeBlock
     $validation = Test-PackCode $code -NoAnalyzer
     if (-not $validation.Valid) {
         throw 'Execution refused: the generated code has parse errors.'
@@ -86,20 +111,43 @@ function Invoke-HarnessRun {
         $warningText = 'No known AST risk patterns found. This is not a security guarantee.'
     }
     $confirmation = "Run generated code in a child pwsh -NoProfile process$(if ($WhatIf) { ' with -WhatIf' })?`n" +
-    "$warningText`nThe child has your account permissions. Type RUN to confirm."
+    "Working directory: $workingDirectory`nTimeout: $runTimeoutSeconds seconds`n$warningText`nThe child has your account permissions. Type RUN to confirm."
     if (-not $Confirm) {
         $Confirm = { param($message) (Read-Host $message) -ceq 'RUN' }
     }
     if (-not (& $Confirm $confirmation)) {
         return 'Run cancelled.'
     }
+    $CancellationToken.ThrowIfCancellationRequested()
+    if ($State.Cancellation) {
+        $State.Cancellation.Token.ThrowIfCancellationRequested()
+    }
+    if (-not [string]::Equals([string]$State.Config.ContextPath, $ReviewedSettings.ContextPath, [StringComparison]::Ordinal) -or
+        $State.Config.RunTimeoutSeconds -ne $runTimeoutSeconds) {
+        throw 'Execution settings changed during action review. Review the working directory and timeout again before running.'
+    }
     $scriptFile = Join-Path ([IO.Path]::GetTempPath()) ("pwsh-harness-" + [guid]::NewGuid().ToString('N') + '.ps1')
+    if ($ScriptPath) {
+        $scriptFile = [IO.Path]::GetFullPath($ScriptPath)
+        $diskCode = [IO.File]::ReadAllText($scriptFile).Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd("`n")
+        $approvedCode = $code.Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd("`n")
+        if (-not [string]::Equals($diskCode, $approvedCode, [StringComparison]::Ordinal)) {
+            throw 'Run refused: the script file differs from the approved generated code.'
+        }
+    }
     $process = $null
+    $started = $false
+    $stdout = $null
+    $stderr = $null
+    $failure = $null
+    $exitCode = $null
+    $cleanupErrors = [Collections.Generic.List[object]]::new()
     $previousCancellation = $State.Cancellation
     $previousBusy = $State.Busy
     if (-not $State.Cancellation) {
         $State.Cancellation = [Threading.CancellationTokenSource]::new()
     }
+    $runCancellation = $State.Cancellation
     $State.Busy = $true
     try {
         $target = $script:Harness.TargetProfiles.Get()
@@ -107,62 +155,126 @@ function Invoke-HarnessRun {
         if ($target.EOL -eq 'CRLF') {
             $tempCode = $tempCode.Replace("`n", "`r`n")
         }
-        [IO.File]::WriteAllText($scriptFile, $tempCode, [Text.UTF8Encoding]::new($false))
+        if (-not $ScriptPath) {
+            [IO.File]::WriteAllText($scriptFile, $tempCode, [Text.UTF8Encoding]::new($false))
+        }
         $start = Get-WindowsChildStartInfo $scriptFile -WhatIf:$WhatIf
         $start.WorkingDirectory = $workingDirectory
-        $State.Cancellation.Token.ThrowIfCancellationRequested()
+        if (-not [IO.Directory]::Exists($workingDirectory)) {
+            throw 'Execution context directory does not exist.'
+        }
+        $runCancellation.Token.ThrowIfCancellationRequested()
         $process = [Diagnostics.Process]::new()
         $process.StartInfo = $start
         $null = $process.Start()
-        $stdout = $process.StandardOutput.ReadToEndAsync()
-        $stderr = $process.StandardError.ReadToEndAsync()
-        $watch = [Diagnostics.Stopwatch]::StartNew()
-        while (-not $process.HasExited) {
-            if ($State.Cancellation -and
-                $State.Cancellation.IsCancellationRequested) {
-                $process.Kill($true)
-                throw [OperationCanceledException]::new('Child run cancelled.')
-            }
-            if ($watch.Elapsed.TotalSeconds -ge $State.Config.RunTimeoutSeconds) {
-                $process.Kill($true)
-                throw [TimeoutException]::new('Child run timed out.')
-            }
-            if ($State.PSObject.Properties['Pump'] -and $State.Pump) {
-                $null = & $State.Pump $State
-            }
-            Start-Sleep -Milliseconds 25
-        }
-        $result = [pscustomobject]@{
-            ExitCode    = $process.ExitCode
-            Output      = $stdout.GetAwaiter().GetResult()
-            ErrorOutput = $stderr.GetAwaiter().GetResult()
-            WhatIf      = [bool]$WhatIf
-        }
-        $text = "Exit code: $($result.ExitCode)`n$($result.Output)$($result.ErrorOutput)"
-        $metadata = @{
-            ExitCode = $result.ExitCode; Output = $result.Output; ErrorOutput = $result.ErrorOutput; WhatIf = $result.WhatIf
-            ContextText = "[Local PowerShell execution result]`nWorking directory: $workingDirectory`nCode:`n$code`n$text"
-        }
-        Add-HarnessTranscript $State run $text $metadata
-        $result
+        $started = $true
+        $stdout = New-PackRunCapture $process.StandardOutput
+        $stderr = New-PackRunCapture $process.StandardError
+        Wait-PackRunProcess $process $stdout $stderr $runTimeoutSeconds $State $runCancellation -Pump $Pump -CancellationToken $CancellationToken
+    }
+    catch {
+        $failure = $_
     }
     finally {
-        if ($process) {
-            if (-not $process.HasExited) {
-                $process.Kill($true)
-                $process.WaitForExit()
+        try {
+            if ($process) {
+                try {
+                    if ($started -and -not $process.HasExited) {
+                        $process.Kill($true)
+                        $null = $process.WaitForExit(1000)
+                    }
+                    if ($started -and $process.HasExited) {
+                        $exitCode = $process.ExitCode
+                    }
+                }
+                catch {
+                    $cleanupErrors.Add($_)
+                }
             }
-            $process.Dispose()
+            foreach ($capture in @($stdout, $stderr)) {
+                if ($capture) {
+                    try {
+                        Update-PackRunCapture $capture
+                    }
+                    catch {
+                        $cleanupErrors.Add($_)
+                    }
+                }
+            }
+            if ($process) {
+                try {
+                    $process.Dispose()
+                }
+                catch {
+                    $cleanupErrors.Add($_)
+                }
+            }
+            try {
+                if (-not $ScriptPath -and [IO.File]::Exists($scriptFile)) {
+                    [IO.File]::Delete($scriptFile)
+                }
+            }
+            catch {
+                $cleanupErrors.Add($_)
+            }
         }
-        if ([IO.File]::Exists($scriptFile)) {
-            [IO.File]::Delete($scriptFile)
+        finally {
+            try {
+                if (-not $previousCancellation) {
+                    $runCancellation.Dispose()
+                }
+            }
+            catch {
+                $cleanupErrors.Add($_)
+            }
+            finally {
+                $State.Cancellation = $previousCancellation
+                $State.Busy = $previousBusy
+            }
         }
-        if (-not $previousCancellation) {
-            $State.Cancellation.Dispose()
-        }
-        $State.Cancellation = $previousCancellation
-        $State.Busy = $previousBusy
     }
+    if (-not $failure -and $cleanupErrors.Count) {
+        $failure = $cleanupErrors[0]
+    }
+    $result = [pscustomobject]@{
+        ExitCode    = $exitCode
+        Output      = $(if ($stdout) {
+                $stdout.Text.ToString()
+            }
+            else {
+                ''
+            })
+        ErrorOutput = $(if ($stderr) {
+                $stderr.Text.ToString()
+            }
+            else {
+                ''
+            })
+        WhatIf      = [bool]$WhatIf
+    }
+    $outcome = "Exit code: $exitCode"
+    if ($failure) {
+        $result | Add-Member NoteProperty Failure $failure.Exception.Message
+        $outcome = $result.Failure
+    }
+    if ($cleanupErrors.Count) {
+        $result | Add-Member NoteProperty CleanupFailure (($cleanupErrors | ForEach-Object { $_.Exception.Message }) -join "`n")
+        $outcome += "`nCleanup failed: $($result.CleanupFailure)"
+    }
+    $result | Add-Member NoteProperty ContextText ("[Local PowerShell execution result]`nWorking directory: $workingDirectory`nCode:`n$code`n$outcome`n$($result.Output)$($result.ErrorOutput)")
+    try {
+        Add-HarnessTranscript $State run ("$outcome`n$($result.Output)$($result.ErrorOutput)") $result
+    }
+    catch {
+        $result | Add-Member NoteProperty TranscriptFailure $_.Exception.Message
+        if (-not $failure) {
+            $failure = $_
+        }
+    }
+    if ($failure) {
+        throw $failure
+    }
+    $result
 }
 
 function Add-HarnessTranscript {

@@ -1,10 +1,17 @@
 #Requires -Version 7.6
+function Get-EngineInstructionRole {
+    param($Config)
+    if ($Config.ContainsKey('SystemPromptMode') -and $Config.SystemPromptMode -eq 'User') {
+        return 'user'
+    }
+    'system'
+}
 function Resolve-EngineContextStage {
     # Input/output: internal Turn record. Sets BaseMessages from Session, Prompt and resolved ContextItems.
     param($Turn)
     $context = Get-EngineContext $Turn.Store $Turn.Session $Turn.Prompt $Turn.OnIdle $Turn.Token
     $messages = [Collections.Generic.List[object]]::new()
-    $messages.Add((New-HarnessMessage -Role system -Content $Turn.Config.SystemPrompt))
+    $messages.Add((New-HarnessMessage -Role (Get-EngineInstructionRole $Turn.Config) -Content $Turn.Config.SystemPrompt))
     if ($context.StableText) {
         $messages.Add((New-HarnessMessage user "<project-conventions>`n$($context.StableText)`n</project-conventions>"))
     }
@@ -82,6 +89,7 @@ function Invoke-EngineMiddlewareStage {
 function Send-EngineRequestStage {
     # Input/output: Turn record. Sets validated ChatResponse and publishes ResponseReceived.
     param($Turn)
+    $Turn.Token.ThrowIfCancellationRequested()
     $provider = ''; $serial = 0
     if (-not $Turn.Response) {
         $provider = $Turn.Config.Provider
@@ -252,6 +260,8 @@ function Get-EngineRepairDecision {
 function Add-EngineCommitStage {
     # Input: final Turn record. Output: TurnResult; persists final fixed CodeBlocks/Edits in assistant metadata.
     param($Turn)
+    $Turn.Token.ThrowIfCancellationRequested()
+    Assert-EngineSessionOwner $Turn.Store $Turn.Session
     $Turn.Result | Add-Member NoteProperty OriginalText $Turn.Response.Text
     $Turn.Result | Add-Member NoteProperty FixDiff (($Turn.Result.Edits | ForEach-Object {
                 "@@ line $($_.Line), column $($_.Column), rule $($_.Rule) @@`n- $($_.Before)`n+ $($_.After)"
@@ -259,6 +269,7 @@ function Add-EngineCommitStage {
     $Turn.Result.Usage = $Turn.Usage
     $Turn.Result.Requests = $Turn.Requests.ToArray()
     Add-EngineUsage $Turn.Session.Usage $Turn.Usage
+    $Turn.UsageAccounted = $true
     $Turn.Session.LastResult = $Turn.Result
     $Turn.Session.Status = if (@($Turn.Result.Diagnostics | Where-Object Severity -EQ Error).Count) {
         'Parse errors'
@@ -289,11 +300,11 @@ function Get-EngineCandidateScore {
         try {
             $value = [double]$values[0]
             if (-not [double]::IsNaN($value) -and -not [double]::IsInfinity($value)) {
-                return $value 
+                return $value
             }
         }
         catch {
-            Write-EngineFault $Store $Policy.Extension $entry.Name $_ 
+            Write-EngineFault $Store $Policy.Extension $entry.Name $_
         }
     }
     Write-EngineFault $Store $Policy.Extension $entry.Name 'Candidate score must be a finite number.'
@@ -303,12 +314,12 @@ function Invoke-EngineSamplingStage {
     # Input/output: Turn record. Optional extension policy samples bounded alternative responses and selects by score/length.
     param($Turn)
     if ($Turn.SamplingCompleted -or $Turn.RequestKind -ne 'Initial' -or $Turn.Response.FinishReason -eq 'length') {
-        return 
+        return
     }
     foreach ($policy in @($Turn.Store.Points.SamplingPolicies.Values | Sort-Object Order, Name)) {
         $plan = Invoke-EnginePoint $Turn.Store $policy @([pscustomobject]@{ Result = $Turn.Result; Config = $Turn.Config })
         if (-not $plan) {
-            continue 
+            continue
         }
         if ($plan.Count -lt 2 -or $plan.Count -gt 10 -or $plan.Score -isnot [scriptblock]) {
             Write-EngineFault $Turn.Store $policy.Extension $policy.Name 'Invalid sampling plan.'
@@ -346,6 +357,7 @@ function Invoke-EngineSamplingStage {
 }
 function Invoke-EngineTurnRunner {
     param($Store, [string]$Prompt, $State, [scriptblock]$OnToken, [Threading.CancellationToken]$CancellationToken, [scriptblock]$OnIdle = $null)
+    $CancellationToken.ThrowIfCancellationRequested()
     if (-not $Store.Points.RepairPolicies.ContainsKey($State.Config.RepairPolicy)) {
         throw "Unknown repair policy '$($State.Config.RepairPolicy)'."
     }
@@ -356,6 +368,7 @@ function Invoke-EngineTurnRunner {
         RequestKind       ='Initial'
         MinimalMessages   =@()
         Usage             =(New-EngineUsage)
+        UsageAccounted    =$false
         Store             =$Store
         Config            =$State.Config
         Session           =$State
@@ -393,14 +406,17 @@ function Invoke-EngineTurnRunner {
             Build-EngineRequestStage $Turn
             Invoke-EngineMiddlewareStage $Turn
             Send-EngineRequestStage $Turn
+            $CancellationToken.ThrowIfCancellationRequested()
             $Turn.Result = Invoke-EngineProcessResponse $Store $Turn.Response $Turn.Config $State $Turn.Repairs
             Invoke-EngineSamplingStage $Turn
+            $CancellationToken.ThrowIfCancellationRequested()
             Publish-EngineEvent $Store DiagnosticsProduced @{
 
 
                 Diagnostics = $Turn.Result.Diagnostics
                 SessionId   = $State.SessionId
             }
+            $CancellationToken.ThrowIfCancellationRequested()
             $decision = Get-EngineContinueDecision $Turn
             if ($decision.Kind -eq 'Complete') {
                 $decision = Get-EngineRepairDecision $Turn
@@ -419,7 +435,7 @@ function Invoke-EngineTurnRunner {
                     $Turn.Response.Text
                 }
                 $Turn.MinimalMessages = @(
-                    (New-HarnessMessage system $Turn.Config.SystemPrompt)
+                    (New-HarnessMessage -Role (Get-EngineInstructionRole $Turn.Config) -Content $Turn.Config.SystemPrompt)
                     (New-HarnessMessage user $Turn.Prompt)
                     (New-HarnessMessage assistant $failing)
                     (New-HarnessMessage user $decision.Message))
@@ -443,6 +459,10 @@ function Invoke-EngineTurnRunner {
         Add-EngineCommitStage $Turn
     }
     catch {
+        if (-not $Turn.UsageAccounted) {
+            Add-EngineFailureUsage $State $Turn.Usage @{ Requests = $Turn.Requests.ToArray(); Cancelled = $CancellationToken.IsCancellationRequested }
+            $Turn.UsageAccounted = $true
+        }
         if ($CancellationToken.IsCancellationRequested) {
             throw [OperationCanceledException]::new('Request cancelled.', $CancellationToken)
         }

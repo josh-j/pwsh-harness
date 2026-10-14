@@ -9,7 +9,7 @@ $script:ContractsModule = Import-Module $script:ContractsManifest -PassThru
 . (Join-Path $PSScriptRoot 'Lifecycle.ps1')
 
 function Copy-EngineSnapshot {
-    param([object]$Value)
+    param([object]$Value, [Collections.Generic.Dictionary[object, object]]$Copies)
     if ($null -eq $Value) {
         return $null
     }
@@ -19,13 +19,29 @@ function Copy-EngineSnapshot {
     if ($Value -is [scriptblock]) {
         return $null
     }
-    if ($Value -is [string] -or $Value.GetType().IsValueType) {
+    if ($Value -is [string]) {
         return $Value
     }
-    if ($Value -is [Collections.IDictionary] -or $Value -is [pscustomobject]) {
+    $type = $Value.GetType()
+    if ($type.IsValueType -and ($type.IsPrimitive -or $type.IsEnum -or $type.FullName -in @(
+                'System.Decimal', 'System.DateTime', 'System.DateTimeOffset', 'System.TimeSpan', 'System.Guid',
+                'System.DateOnly', 'System.TimeOnly', 'System.Index', 'System.Range', 'System.Half',
+                'System.Int128', 'System.UInt128', 'System.Text.Rune', 'System.Numerics.BigInteger', 'System.Numerics.Complex'))) {
+        return $Value
+    }
+    if ($null -eq $Copies) {
+        $Copies = [Collections.Generic.Dictionary[object, object]]::new([Collections.Generic.ReferenceEqualityComparer]::Instance)
+    }
+    $existing = $null
+    if ($Copies.TryGetValue($Value, [ref]$existing)) {
+        return , $existing
+    }
+    if ($Value -is [Collections.IDictionary] -or $Value -is [pscustomobject] -or $type.IsValueType) {
         $dictionary = [Collections.Generic.Dictionary[string, object]]::new()
+        $copy = [Collections.ObjectModel.ReadOnlyDictionary[string, object]]::new($dictionary)
+        $Copies.Add($Value, $copy)
         $names = if ($Value -is [Collections.IDictionary]) {
-            @($Value.Keys)
+            @($Value.psbase.Keys)
         }
         else {
             @($Value.PSObject.Properties.Name)
@@ -34,16 +50,24 @@ function Copy-EngineSnapshot {
             if ($name -in @('Host', 'State', 'Pump', 'Cancellation')) {
                 continue
             }
-            $dictionary[[string]$name] = Copy-EngineSnapshot $Value.$name
+            if ($Value -is [Collections.IDictionary]) {
+                $entry = $Value[$name]
+            }
+            else {
+                $entry = $Value.$name
+            }
+            $dictionary[[string]$name] = Copy-EngineSnapshot $entry $Copies
         }
-        return , ([Collections.ObjectModel.ReadOnlyDictionary[string, object]]::new($dictionary))
+        return , $copy
     }
     if ($Value -is [Collections.IEnumerable]) {
         $list = [Collections.Generic.List[object]]::new()
+        $copy = $list.AsReadOnly()
+        $Copies.Add($Value, $copy)
         foreach ($entry in $Value) {
-            $list.Add((Copy-EngineSnapshot $entry))
+            $list.Add((Copy-EngineSnapshot $entry $Copies))
         }
-        return , ($list.AsReadOnly())
+        return , $copy
     }
     [string]$Value
 }
@@ -96,11 +120,43 @@ function Write-EngineFault {
         }
     }
 }
+function Test-EngineRequestedCancellation {
+    param($Store, $Failure, [Threading.CancellationToken]$Token)
+    $exception = $Failure.Exception
+    while ($exception) {
+        if ($exception -is [OperationCanceledException] -and ($Token.IsCancellationRequested -or
+                ($Store.CancelMarker -and [object]::ReferenceEquals($exception.Data['Harness.RequestedCancellation'], $Store.CancelMarker)))) {
+            $exception.Data['Harness.RequestedCancellation'] = $Store.CancelMarker
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    $false
+}
 function Invoke-EnginePoint {
     param($Store, $Entry, [object[]]$Arguments, [switch]$Rethrow, [switch]$DeferSuccess)
     if ($Store.Config.Extensions.Disabled -contains $Entry.Extension) {
         return
     }
+    $oldCancellation = $Store.PointCancellation
+    $cancellation = $oldCancellation
+    foreach ($argument in $Arguments) {
+        $token = if ($argument -is [Threading.CancellationToken]) {
+            $argument
+        }
+        elseif ($argument -is [hashtable] -and $argument.ContainsKey('CancellationToken')) {
+            $argument['CancellationToken']
+        }
+        elseif ($null -ne $argument -and $argument.PSObject.Properties['CancellationToken']) {
+            $argument.CancellationToken
+        }
+        if ($token -is [Threading.CancellationToken]) {
+            $cancellation = $token
+            break
+        }
+    }
+    # Nested points inherit the caller scope even when their arguments contain no token.
+    $Store.PointCancellation = $cancellation
     try {
         $serial = $Store.FaultSerials[$Entry.Extension]
         & $Entry.Handler @Arguments
@@ -109,20 +165,16 @@ function Invoke-EnginePoint {
         }
     }
     catch {
-        $exception = $_.Exception
-        while ($exception) {
-            if ($exception -is [OperationCanceledException] -and $Arguments.Count -and
-                $Arguments[0].PSObject.Properties['CancellationToken'] -and
-                $Arguments[0].CancellationToken -is [Threading.CancellationToken] -and
-                $Arguments[0].CancellationToken.IsCancellationRequested) {
-                throw
-            }
-            $exception = $exception.InnerException
+        if (Test-EngineRequestedCancellation $Store $_ $cancellation) {
+            throw
         }
         Write-EngineFault $Store $Entry.Extension $Entry.Name $_
         if ($Rethrow) {
             throw
         }
+    }
+    finally {
+        $Store.PointCancellation = $oldCancellation
     }
 }
 function Copy-EngineConfigValue {
@@ -293,7 +345,7 @@ function New-EngineFacade {
         }
         $point = $category
         $endpoint | Add-Member ScriptMethod Add {
-            param([string]$Name, [object]$Handler, [object]$Option = 100, [string]$Description = '', [string]$Setting = '')
+            param([string]$Name, [object]$Handler, [object]$Option = 100, [string]$Description = '', [string]$Setting = '', [scriptblock]$Review)
             if ($Store.Disposed) {
                 throw [ObjectDisposedException]::new('HarnessHost')
             }
@@ -331,6 +383,7 @@ function New-EngineFacade {
             }
             elseif ($point -eq 'Actions') {
                 $entry.RequiresConfirmation = [bool]$Option
+                $entry.Review = $Review
             }
             elseif ($point -eq 'Commands') {
                 $entry.Description = [string]$Option
@@ -872,8 +925,60 @@ function Import-EngineExtensions {
         }
     }
 }
+function Test-EngineSessionId {
+    param([string]$Id)
+    $Id -cmatch '\A[a-zA-Z0-9_-]+\z'
+}
+function Assert-EngineSessionId {
+    param([string]$Id)
+    if (-not (Test-EngineSessionId $Id)) {
+        throw 'Invalid session id. Use one or more ASCII letters, digits, underscores or hyphens.'
+    }
+}
+function Test-EngineSessionFile {
+    param($Item)
+    $Item -is [IO.FileInfo] -and -not $Item.LinkType -and
+    -not ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+    ($IsWindows -or $Item.UnixStat.ItemType -eq 'File')
+}
+function Get-EngineSessionFile {
+    param([string]$Path)
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    }
+    catch [Management.Automation.ItemNotFoundException] {
+        return
+    }
+    if (-not (Test-EngineSessionFile $item)) {
+        throw 'Session log must be a regular file, not a link, directory or special file.'
+    }
+    $item
+}
+function Assert-EngineSessionIdle {
+    param($State)
+    if ($State.Busy) {
+        throw 'An operation is already running in this session. Wait for it to finish before running another action.'
+    }
+}
+function Assert-EngineActionConversation {
+    param($Store, $State, [string]$SessionId, $Result)
+    Assert-EngineSessionOwner $Store $State
+    if (-not [string]::Equals($State.SessionId, $SessionId, [StringComparison]::Ordinal) -or
+        -not [object]::ReferenceEquals($State.LastResult, $Result)) {
+        throw 'Conversation changed during action review. Review the current generated code again before running.'
+    }
+}
+function Assert-EngineActionSource {
+    param($Store, $State, $Block, [string]$Code, [string]$Language, [string]$SessionId, $Result)
+    Assert-EngineActionConversation $Store $State $SessionId $Result
+    if (-not [string]::Equals($Block.Code, $Code, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($Block.Language, $Language, [StringComparison]::Ordinal)) {
+        throw 'Generated code changed during action review. Review it again before running.'
+    }
+}
 function Add-EngineTranscript {
     param($State, [string]$Role, [string]$Text, [object]$Metadata = $null)
+    Assert-EngineSessionId $State.SessionId
     $entry = [pscustomobject]@{
 
 
@@ -885,23 +990,30 @@ function Add-EngineTranscript {
     $State.Transcript.Add($entry)
     if ($State.Persist) {
         $null = [IO.Directory]::CreateDirectory($State.Config.SessionDirectory)
-        $entry | ConvertTo-Json -Depth 30 -Compress | Add-Content -LiteralPath (Join-Path $State.Config.SessionDirectory "$($State.SessionId).jsonl")
+        $file = Join-Path $State.Config.SessionDirectory "$($State.SessionId).jsonl"
+        $null = Get-EngineSessionFile $file
+        $entry | ConvertTo-Json -Depth 30 -Compress | Add-Content -LiteralPath $file
     }
 }
 function Read-EngineSession {
     param([hashtable]$Config, [string]$Id)
+    if ($Id) {
+        Assert-EngineSessionId $Id
+    }
     if (-not (Test-Path -LiteralPath $Config.SessionDirectory)) {
+        if ($Id) {
+            throw "Session '$Id' does not exist."
+        }
         return
     }
     if (-not $Id) {
-        Get-ChildItem -LiteralPath $Config.SessionDirectory -Filter '*.jsonl' | Select-Object BaseName, LastWriteTime, Length
+        Get-ChildItem -LiteralPath $Config.SessionDirectory -Filter '*.jsonl' |
+            Where-Object { (Test-EngineSessionId $_.BaseName) -and (Test-EngineSessionFile $_) } |
+            Select-Object BaseName, LastWriteTime, Length
         return
     }
-    if ($Id -notmatch '^[a-zA-Z0-9_-]+$') {
-        throw 'Invalid session id.'
-    }
     $file = Join-Path $Config.SessionDirectory "$Id.jsonl"
-    if (-not (Test-Path -LiteralPath $file)) {
+    if (-not (Get-EngineSessionFile $file)) {
         throw "Session '$Id' does not exist."
     }
     foreach ($line in Get-Content -LiteralPath $file) {
@@ -909,6 +1021,19 @@ function Read-EngineSession {
             $line | ConvertFrom-Json
         }
     }
+}
+function Assert-EngineSessionOwner {
+    param($Store, $Session)
+    if ($Store.Disposed) {
+        throw [ObjectDisposedException]::new('HarnessHost')
+    }
+    $owner = if ($Session -and $Session.PSObject.Properties['HostId']) {
+        $Session.HostId
+    }
+    if (-not [string]::Equals($owner, $Store.HostId, [StringComparison]::Ordinal)) {
+        throw 'The session is unavailable or belongs to another host.'
+    }
+    Assert-EngineSessionId $Session.SessionId
 }
 function Get-EngineValidation {
     param($Store, [object]$Block, [hashtable]$Config)
@@ -1128,6 +1253,8 @@ function New-HarnessHost {
         ManifestReader    =$ManifestReader
         EnvironmentPrefix =$EnvironmentPrefix
         HostId            =[guid]::NewGuid().ToString('N')
+        PointCancellation = [Threading.CancellationToken]::None
+        CancelMarker      = [object]::new()
     }
     foreach ($category in @('Providers', 'RequestMiddleware', 'ResponseProcessors', 'Critics', 'Fixers', 'TokenEstimators', 'RepairPolicies', 'Commands', 'Actions',
             'Examples', 'SamplingPolicies', 'QueryExpanders', 'Chunkers', 'Retrievers', 'Embedders', 'HistoryCompactors', 'ContextSources', 'Renderers', 'Events', 'Settings', 'TargetProfiles')) {
@@ -1157,6 +1284,7 @@ function New-HarnessHost {
         Temperature          =0.2
         MaxTokens            =4096
         SystemPrompt         =''
+        SystemPromptMode     ='System'
         Validate             =$true
         Extensions           =@{
 
@@ -1183,6 +1311,14 @@ function New-HarnessHost {
             Validator =$null
             Env       =''
             Extension ='<engine>'
+        }
+    }
+    $store.Points.Settings.SystemPromptMode.Validator = { param($v)
+        if ($v -in @('System', 'User')) {
+            $true
+        }
+        else {
+            'SystemPromptMode must be System or User.'
         }
     }
     $store.Points.Settings.Temperature.Validator = { param($v) if ($v -lt 0 -or $v -gt 2 -or [double]::IsNaN($v)) {
@@ -1240,6 +1376,7 @@ function New-HarnessHost {
     $read = ${function:Read-EngineSession}
     $newUsage = ${function:New-EngineUsage}
     $addUsage = ${function:Add-EngineUsage}
+    $failureUsage = ${function:Add-EngineFailureUsage}
     $publish = ${function:Publish-EngineEvent}
     $loader = [pscustomobject]@{
     }
@@ -1258,11 +1395,13 @@ function New-HarnessHost {
     $loader | Add-Member ScriptMethod Enable { param([string]$Name) & $disabled $store $Name $false }.GetNewClosure()
     $loader | Add-Member ScriptMethod Forget { param([string]$Name) & $forget $store $Name }.GetNewClosure()
     $hostApi | Add-Member NoteProperty ExtensionLoader $loader
+    $assertSessionId = ${function:Assert-EngineSessionId}
     $hostApi | Add-Member ScriptMethod NewSession {
         param([hashtable]$Config, [string]$Id = ([guid]::NewGuid().ToString('N')))
         if ($store.Disposed) {
             throw [ObjectDisposedException]::new('HarnessHost')
         }
+        & $assertSessionId $Id
         if (-not $Config) {
             $Config = $this.ConfigService.Resolve()
         }
@@ -1317,8 +1456,13 @@ function New-HarnessHost {
     }.GetNewClosure()
     $snapshot = ${function:Copy-EngineSnapshot}
     $resolveProfile = ${function:Get-EngineProfile}
+    $assertSession = ${function:Assert-EngineSessionOwner}
+    $assertActionSource = ${function:Assert-EngineActionSource}
+    $assertSessionIdle = ${function:Assert-EngineSessionIdle}
+    $requestedCancellation = ${function:Test-EngineRequestedCancellation}
     $hostApi | Add-Member ScriptMethod GetConversationSnapshot {
         param($Session)
+        & $assertSession $store $Session
         $target = $this.TargetProfiles.Get()
         $catalog = if ($target -and $target.CommandCatalog.Provenance -match '^Captured\b') {
             'captured'
@@ -1342,10 +1486,11 @@ function New-HarnessHost {
     }.GetNewClosure()
     $hostApi | Add-Member ScriptMethod RestoreResult {
         param($Text, $Config, $State, $Metadata = $null)
+        & $assertSession $store $State
         $result = & $process $store (New-HarnessChatResponse -Text $Text) $Config $State 0 $Metadata
         $State.Usage = & $newUsage
         foreach ($record in $State.Transcript) {
-            if ($record.Role -eq 'assistant' -and $record.Metadata -and $record.Metadata.PSObject.Properties['Usage']) {
+            if ($record.Role -in @('assistant', 'request-failure') -and $record.Metadata -and $record.Metadata.PSObject.Properties['Usage']) {
                 $null = & $addUsage $State.Usage $record.Metadata.Usage
             }
         }
@@ -1359,13 +1504,44 @@ function New-HarnessHost {
     }.GetNewClosure()
     $hostApi | Add-Member ScriptMethod Send {
         param($Prompt, $State, $OnToken, $Token = [Threading.CancellationToken]::None, $OnIdle = $null)
-        if ($store.Disposed) {
-            throw [ObjectDisposedException]::new('HarnessHost')
+        & $assertSession $store $State
+        $Token.ThrowIfCancellationRequested()
+        & $assertSessionIdle $State
+        $previousCancellation = $State.Cancellation
+        $turnCancellation = $previousCancellation
+        $linkedCancellation = $null
+        try {
+            if (-not $turnCancellation) {
+                $turnCancellation = [Threading.CancellationTokenSource]::new()
+            }
+            $State.Cancellation = $turnCancellation
+            $linkedCancellation = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($Token, $turnCancellation.Token)
+            $linkedCancellation.Token.ThrowIfCancellationRequested()
+            & $run $store $Prompt $State $OnToken $linkedCancellation.Token $OnIdle
         }
-        & $run $store $Prompt $State $OnToken $Token $OnIdle
+        catch {
+            if ($linkedCancellation) {
+                $null = & $requestedCancellation $store $_ $linkedCancellation.Token
+            }
+            throw
+        }
+        finally {
+            try {
+                if ($linkedCancellation) {
+                    $linkedCancellation.Dispose()
+                }
+                if (-not $previousCancellation -and $turnCancellation) {
+                    $turnCancellation.Dispose()
+                }
+            }
+            finally {
+                $State.Cancellation = $previousCancellation
+            }
+        }
     }.GetNewClosure()
     $hostApi | Add-Member ScriptMethod CollectContext {
         param($State, [scriptblock]$Pump = $null, [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
+        & $assertSession $store $State
         if (-not $Pump) {
             $Pump = $store.ContextPump
         }
@@ -1377,11 +1553,13 @@ function New-HarnessHost {
     $hostApi | Add-Member ScriptMethod TestCode { param($Block, $Config) & $validate $store $Block $Config }.GetNewClosure()
     $hostApi | Add-Member ScriptMethod AddTranscript {
         param($State, $Role, $Text, $Metadata = $null)
+        & $assertSession $store $State
         $null = & $transcript $State $Role $Text $Metadata
     }.GetNewClosure()
     $hostApi | Add-Member ScriptMethod GetSession { param($Config, $Id) & $read $Config $Id }.GetNewClosure()
     $hostApi.Commands | Add-Member ScriptMethod Invoke {
         param([string]$Line, $State, [scriptblock]$Confirm, [scriptblock]$Pump = $null, [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
+        & $assertSession $store $State
         if ($Line -notmatch '^/(?<name>\S+)(?:\s+(?<arguments>[\s\S]*))?$') {
             throw 'Expected a slash command.'
         }
@@ -1409,11 +1587,19 @@ function New-HarnessHost {
     }.GetNewClosure()
     $hostApi.Actions | Add-Member ScriptMethod Invoke {
         param([string]$Name, $State, $Block, [string]$Arguments, [scriptblock]$Confirm)
+        & $assertSession $store $State
         if (-not $store.Points.Actions.ContainsKey($Name)) {
             throw "Unknown action '$Name'."
         }
         Assert-HarnessCodeBlock $Block
         $entry = $store.Points.Actions[$Name]
+        if ($entry.RequiresConfirmation) {
+            & $assertSessionIdle $State
+        }
+        $reviewedCode = [string]$Block.Code
+        $reviewedLanguage = [string]$Block.Language
+        $reviewedSessionId = [string]$State.SessionId
+        $reviewedResult = $State.LastResult
         $context = [pscustomobject]@{
 
 
@@ -1421,20 +1607,26 @@ function New-HarnessHost {
             Block             = $Block
             Arguments         = $Arguments
             Confirm           = $Confirm
-            CancellationToken = $(if ($State.Cancellation) {
-                    $State.Cancellation.Token
-                }
-                else {
-                    [Threading.CancellationToken]::None
-                })
+            Pump              = $store.ContextPump
+            CancellationToken = $store.PointCancellation
+            ReviewData        = $null
+        }
+        $reviewText = ''
+        if ($entry.RequiresConfirmation -and $entry.Review) {
+            $reviewEntry = @{} + $entry
+            $reviewEntry.Handler = $entry.Review
+            $reviewText = [string](& $invoke $store $reviewEntry @($context) -Rethrow)
         }
         $null = & $publish $store ActionRequested @{
 
 
             Name      = $Name
             CodeBlock = $Block
+            SessionId = $State.SessionId
         }
         if ($entry.RequiresConfirmation) {
+            & $assertSessionIdle $State
+            & $assertActionSource $store $State $Block $reviewedCode $reviewedLanguage $reviewedSessionId $reviewedResult
             $validation = & $validate $store $Block $State.Config
             if (-not $validation.Valid) {
                 throw 'Execution refused: the generated code has parse errors.'
@@ -1443,27 +1635,99 @@ function New-HarnessHost {
             if (-not $Confirm) {
                 throw 'An explicit confirmation callback is required.'
             }
-            $confirmation = "Run action '$Name' in a child process with your account permissions?`n$warnings`nType RUN to confirm."
+            $confirmation = "Run action '$Name' in a child process with your account permissions?`n$reviewText`n$warnings`nType RUN to confirm."
             if (-not (& $Confirm $confirmation)) {
                 return 'Run cancelled.'
             }
+            $context.CancellationToken.ThrowIfCancellationRequested()
+            & $assertSessionIdle $State
+            & $assertActionSource $store $State $Block $reviewedCode $reviewedLanguage $reviewedSessionId $reviewedResult
             $context.Confirm = { param($message) $true }
         }
         $actionHost = $store.Host
         $actionAddUsage = $addUsage
+        $actionFailureUsage = $failureUsage
         $actionTranscript = $transcript
+        $actionSourceAssert = $assertActionSource
+        $actionStore = $store
+        $actionRequiresReview = $entry.RequiresConfirmation
         $context | Add-Member NoteProperty Generate {
             param([string]$Prompt)
             $options = @{} + $State.Config
             $options.Rag = $false; $options.ContextAutoFiles = $false; $options.BestOfN = $false
             $options.VerifyWithTests = $false; $options.FunctionEdits = $false; $options.AutoRepairAttempts = 0; $options.Validate = $false
-            $temporary = $actionHost.NewSession($options)
-            $generated = $actionHost.Send($Prompt, $temporary)
-            & $actionAddUsage $State.Usage $generated.Usage
-            & $actionTranscript $State assistant $generated.Text @{ ActionGeneration = $Name; Requests = $generated.Requests; Usage = $generated.Usage }
-            $generated
+            $generationToken = $context.CancellationToken
+            $linkedCancellation = $null
+            $temporary = $null
+            $recordAttempted = $false
+            try {
+                if ($State.Cancellation) {
+                    $linkedCancellation = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($generationToken, $State.Cancellation.Token)
+                    $generationToken = $linkedCancellation.Token
+                }
+                $generationToken.ThrowIfCancellationRequested()
+                if ($actionRequiresReview) {
+                    & $actionSourceAssert $actionStore $State $context.Block $reviewedCode $reviewedLanguage $reviewedSessionId $reviewedResult
+                }
+                $temporary = $actionHost.NewSession($options)
+                if ($actionRequiresReview) {
+                    & $actionSourceAssert $actionStore $State $context.Block $reviewedCode $reviewedLanguage $reviewedSessionId $reviewedResult
+                }
+                $generated = $actionHost.Send($Prompt, $temporary, $null, $generationToken, $context.Pump)
+                $generationToken.ThrowIfCancellationRequested()
+                if ($actionRequiresReview) {
+                    & $actionSourceAssert $actionStore $State $context.Block $reviewedCode $reviewedLanguage $reviewedSessionId $reviewedResult
+                }
+                $recordAttempted = $true
+                & $actionTranscript $State assistant $generated.Text @{ ActionGeneration = $Name; Requests = $generated.Requests; Usage = $generated.Usage }
+                $generated
+            }
+            finally {
+                if ($temporary) {
+                    if ($recordAttempted) {
+                        & $actionAddUsage $State.Usage $temporary.Usage
+                    }
+                    else {
+                        & $actionFailureUsage $State $temporary.Usage @{ ActionGeneration = $Name; Cancelled = $generationToken.IsCancellationRequested }
+                    }
+                }
+                if ($linkedCancellation) {
+                    $linkedCancellation.Dispose()
+                }
+            }
         }.GetNewClosure()
-        $result = & $invoke $store $entry @($context) -Rethrow
+        $previousBusy = $State.Busy
+        $previousCancellation = $State.Cancellation
+        $actionCancellation = $previousCancellation
+        $linkedActionCancellation = $null
+        try {
+            if ($entry.RequiresConfirmation) {
+                if (-not $actionCancellation) {
+                    $actionCancellation = [Threading.CancellationTokenSource]::new()
+                }
+                $State.Cancellation = $actionCancellation
+                $linkedActionCancellation = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($context.CancellationToken, $actionCancellation.Token)
+                $context.CancellationToken = $linkedActionCancellation.Token
+                $State.Busy = $true
+            }
+            $result = & $invoke $store $entry @($context) -Rethrow
+        }
+        finally {
+            if ($entry.RequiresConfirmation) {
+                try {
+                    if ($linkedActionCancellation) {
+                        $linkedActionCancellation.Dispose()
+                    }
+                    if (-not $previousCancellation -and $actionCancellation) {
+                        $actionCancellation.Dispose()
+                    }
+                }
+                finally {
+                    $State.Cancellation = $previousCancellation
+                    $State.Busy = $previousBusy
+                }
+            }
+        }
         $null = & $publish $store ActionCompleted @{
 
 
