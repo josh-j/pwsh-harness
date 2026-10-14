@@ -17,31 +17,32 @@ function Get-DefaultHarnessHost {
     param([string]$ConfigPath, [hashtable]$Options = @{})
     if (-not $ConfigPath) {
         $base = if ($IsWindows) {
-            $env:APPDATA 
+            $env:APPDATA
         }
         elseif ($env:XDG_CONFIG_HOME) {
-            $env:XDG_CONFIG_HOME 
+            $env:XDG_CONFIG_HOME
         }
         else {
             Join-Path $HOME '.config'
         }
         $directory = if ($IsWindows) {
-            'PwshHarness' 
+            'PwshHarness'
         }
         else {
-            'pwsh-harness' 
+            'pwsh-harness'
         }
         $ConfigPath = Join-Path (Join-Path $base $directory) 'config.json'
     }
     $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ConfigPath)
     if ($IsWindows) {
-        $resolved = $resolved.ToUpperInvariant() 
+        $resolved = $resolved.ToUpperInvariant()
     }
     $serialized = ConvertTo-Json -InputObject (ConvertTo-HarnessCacheValue $Options) -Depth 64 -Compress
     $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($serialized)))
-    # Defaults capture the launch location. A cached host from another folder
-    # must not silently reuse that folder's Git context for a new invocation.
-    $location = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath('.')
+    $location = (Get-Location).ProviderPath
+    if ($IsWindows) {
+        $location = $location.ToUpperInvariant()
+    }
     $key = $resolved + ':' + $hash + ':' + $location
     if ($script:ImplicitHosts.ContainsKey($key) -and -not $script:ImplicitHosts[$key].Host.IsDisposed) {
         $script:ImplicitHosts[$key].Used = ++$script:HostCacheClock
@@ -62,6 +63,6 @@ function Remove-HarnessHost {
     [CmdletBinding()]
     param([Parameter(Mandatory, ValueFromPipeline)][object]$HarnessHost)
     process {
-        $HarnessHost.Dispose() 
+        $HarnessHost.Dispose()
     }
 }

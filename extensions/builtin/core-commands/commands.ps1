@@ -86,6 +86,9 @@ function Initialize-PackCommands {
         if (-not $c.Arguments) {
             throw 'Usage: /apply [block-number] path.ps1'
         }
+        if ($c.Arguments -ieq 'all') {
+            return Invoke-PackAction apply-all $c
+        }
         Invoke-PackAction apply $c
     } 'Preview full-file replacement and require APPLY: /apply [block-number] path.ps1.'
     Add-PackCommand exec {

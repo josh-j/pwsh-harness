@@ -26,7 +26,7 @@ Windows / PowerShell 7.6 rules:
 - Review cmd /c, .bat/.cmd and msiexec quoting. Avoid --% unless its literal semantics are intended.
 - Use Get-CimInstance instead of Get-WmiObject and -AsByteStream instead of -Encoding Byte.
 - Avoid Send-MailMessage and -UseBasicParsing; check availability of Out-GridView and legacy modules.
-- Preserve strings/comments when fixing syntax. Return one complete primary fence and a brief explanation.
+- Preserve strings/comments when fixing syntax. Return complete fenced files with a brief explanation; identify multi-file blocks with # File: relative/path.ps1.
 
 Few-shot exchange 1:
 User (bad): Get-Content -Path $file; "User: $user.Name\n"

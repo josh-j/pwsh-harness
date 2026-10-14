@@ -635,12 +635,75 @@ function Invoke-PackCancelCommand {
     }
     'Pending operation discarded.'
 }
+function Invoke-PackApplyAction {
+    param($Context, [switch]$All)
+    $Context.CancellationToken.ThrowIfCancellationRequested()
+    if ($Context.State.Busy) {
+        throw 'Wait for the current operation to finish before applying generated files.'
+    }
+    $operation = if ($All) {
+        New-PackOperation $Context.State -Kind Patch
+    }
+    else {
+        if (-not $Context.Arguments) {
+            throw 'Use /apply all or /apply [block-number] path.ps1.'
+        }
+        New-PackOperation $Context.State -Kind Patch -Path $Context.Arguments -BlockIndex $Context.Block.Index
+    }
+    $null = Set-PackOperation $Context.State $operation
+    if ($Context.Confirm) {
+        $answer = & $Context.Confirm (Format-PackOperation $operation) 'APPLY'
+        $approved = if ($answer -is [string]) {
+            $answer -ceq 'APPLY'
+        }
+        else {
+            $answer -eq $true
+        }
+        if (-not $approved) {
+            return 'Apply cancelled. The file changes remain prepared for /approve.'
+        }
+    }
+    $approval = [pscustomobject]@{ State = $Context.State; Arguments = ''; Confirm = $null;
+        Pump = $Context.Pump; CancellationToken = $Context.CancellationToken
+    }
+    $operation | Add-Member NoteProperty Approving $true -Force
+    try {
+        Invoke-PackApprovedOperation $approval $operation
+    }
+    finally {
+        $operation.Approving = $false
+    }
+}
+function Invoke-PackFixCommand {
+    param($Context)
+    if ($Context.Arguments -ine 'all') {
+        throw 'Use /fix all to repair every generated file.'
+    }
+    if (-not $Context.State.LastResult -or -not $Context.State.LastResult.CodeBlocks.Count) {
+        throw 'There are no generated files to fix. Ask for a multi-file change first.'
+    }
+    $parts = [Collections.Generic.List[string]]::new()
+    $parts.Add('Fix all the generated files below and their reported diagnostics. Return every file in a complete powershell fence with its original leading # File: path comment. Preserve working behavior and file paths. Do not execute anything; prepare the corrected changes for review.')
+    foreach ($block in $Context.State.LastResult.CodeBlocks) {
+        $fenceLength = 3
+        foreach ($match in [regex]::Matches($block.Code, '(?m)^ {0,3}(`{3,})')) {
+            $fenceLength = [Math]::Max($fenceLength, $match.Groups[1].Length + 1)
+        }
+        $fence = ([string][char]96) * $fenceLength
+        $parts.Add($fence + "powershell`n" + $block.Code + "`n" + $fence)
+    }
+    $parts.Add('Diagnostics: ' + ($Context.State.LastResult.Diagnostics | ConvertTo-Json -Depth 10 -Compress))
+    [pscustomobject]@{ Action = 'Send'; Prompt = $parts -join "`n`n" }
+}
 function Register-PackOperations {
     $script:PackOperations = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
     $script:PackOperationStates = [Collections.Generic.Dictionary[string, WeakReference]]::new()
     $script:Harness.Commands.Add('patch', { param($context) Invoke-PackPrepareCommand $context }, 'Prepare generated file changes; infer the block, path and entry script when possible. /patch [--run [--entry path]] [--block N] [path]')
     $script:Harness.Commands.Add('approve', ${function:Invoke-PackApproveCommand}, 'Complete the latest displayed operation with one approval; infer the current block and path.')
     $script:Harness.Commands.Add('cancel', ${function:Invoke-PackCancelCommand}, 'Discard the pending patch/run operation.')
+    $script:Harness.Commands.Add('fix', ${function:Invoke-PackFixCommand}, 'Repair all generated files: /fix all. Review the new files, then /apply all or /approve.')
+    $script:Harness.Actions.Add('apply', { param($context) Invoke-PackApplyAction $context }, $false)
+    $script:Harness.Actions.Add('apply-all', { param($context) Invoke-PackApplyAction $context -All }, $false)
     $script:Harness.ResponseProcessors.Add('OperationState', {
             param($context)
             $script:PackOperationStates[$context.State.SessionId] = [WeakReference]::new($context.State)

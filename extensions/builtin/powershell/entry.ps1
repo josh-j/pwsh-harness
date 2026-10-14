@@ -139,7 +139,6 @@
             }
         })
     $Harness.Actions.Add('save', { param($c) Save-HarnessCode $c.State $c.Arguments -CodeBlock $c.Block }, $false)
-    $Harness.Actions.Add('apply', { param($c) Invoke-HarnessApply $c.State $c.Arguments -CodeBlock $c.Block -Confirmation $c.Confirm }, $false)
     $Harness.Actions.Add('copy', { param($c) Copy-HarnessCode $c.State -CodeBlock $c.Block }, $false)
     $Harness.Actions.Add('run', { param($c) Invoke-HarnessRun $c.State -Confirm $c.Confirm -CodeBlock $c.Block -Pump $c.Pump -CancellationToken $c.CancellationToken -ScriptPath $c.Arguments -ReviewedSettings $c.ReviewData }, $true, '', '', ${function:Get-PackRunReview})
     $Harness.Actions.Add('whatif', { param($c) Invoke-HarnessRun $c.State -WhatIf -Confirm $c.Confirm -CodeBlock $c.Block -Pump $c.Pump -CancellationToken $c.CancellationToken -ReviewedSettings $c.ReviewData }, $true, '', '', { param($c) Get-PackRunReview $c -WhatIf })

@@ -1,4 +1,17 @@
 #Requires -Version 7.6
+function Resolve-HarnessWorkspacePath {
+    param([Parameter(Mandatory)][string]$Path)
+    if ([IO.Path]::IsPathRooted($Path)) {
+        return [IO.Path]::GetFullPath($Path)
+    }
+    $provider = $null
+    $drive = $null
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref]$provider, [ref]$drive)
+    if ($provider.Name -ne 'FileSystem') {
+        throw 'The workspace must use a filesystem path.'
+    }
+    $resolved
+}
 function Invoke-HarnessPublicError {
     param([Management.Automation.PSCmdlet]$Command, [Management.Automation.ErrorRecord]$Record)
     $exception = $Record.Exception

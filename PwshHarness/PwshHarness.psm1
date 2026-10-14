@@ -127,6 +127,10 @@ function Invoke-PwshHarness {
                 }
             }
         }
+        if ($PSBoundParameters.ContainsKey('Path')) {
+            $Path = Resolve-HarnessWorkspacePath $Path
+            $Options.ContextPath = $Path
+        }
         if (-not $HarnessHost) {
             $HarnessHost = if ($State) {
                 $reference = $script:Hosts[$State.HostId]
@@ -218,6 +222,10 @@ function Start-PwshHarness {
     $ownsHost = -not $HarnessHost
     $session = $null
     try {
+        if ($PSBoundParameters.ContainsKey('Path')) {
+            $Path = Resolve-HarnessWorkspacePath $Path
+            $Options.ContextPath = $Path
+        }
         if ($ownsHost) {
             $HarnessHost = New-HarnessHost -ConfigPath $ConfigPath -Options $Options
         }

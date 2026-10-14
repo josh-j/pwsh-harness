@@ -24,13 +24,17 @@ param(
 $ErrorActionPreference = 'Stop'
 $manifestPath = Join-Path $PSScriptRoot 'PwshHarness/PwshHarness.psd1'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-    # Accept older portable installs while checkouts and new bundles use the same layout.
-    $moduleRoot = Join-Path $PSScriptRoot 'modules/PwshHarness'
-    $versions = @(Get-ChildItem -LiteralPath $moduleRoot -Directory -ErrorAction Ignore | Where-Object {
-            $parsed = $null
-            [version]::TryParse($_.Name, [ref]$parsed) -and
-            (Test-Path -LiteralPath (Join-Path $_.FullName 'PwshHarness.psd1'))
-        } | Sort-Object { [version]$_.Name } -Descending)
+    $versions = @(foreach ($moduleRoot in @((Join-Path $PSScriptRoot 'PwshHarness'), (Join-Path $PSScriptRoot 'modules/PwshHarness'))) {
+            if (-not [IO.Directory]::Exists($moduleRoot)) {
+                continue
+            }
+            Get-ChildItem -LiteralPath $moduleRoot -Directory | Where-Object {
+                $parsed = $null
+                [version]::TryParse($_.Name, [ref]$parsed) -and
+                (Test-Path -LiteralPath (Join-Path $_.FullName 'PwshHarness.psd1'))
+            }
+        })
+    $versions = @($versions | Sort-Object { [version]$_.Name } -Descending)
     if (-not $versions.Count) {
         throw 'Module not found beside the launcher. Clone the complete repository or unpack the complete bundle.'
     }

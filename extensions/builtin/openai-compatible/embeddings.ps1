@@ -76,7 +76,7 @@ function Invoke-HarnessEmbedding {
             throw [TimeoutException]::new("Embedding provider timed out after $($config.TimeoutSeconds) seconds.")
         }
         $safeMessage = if (Get-Variable redact -ErrorAction Ignore) {
-            Protect-HarnessProviderText $_.Exception.Message $redact
+            Get-HarnessProviderFailureMessage $_.Exception $redact
         }
         else {
             'Embedding authentication failed.'

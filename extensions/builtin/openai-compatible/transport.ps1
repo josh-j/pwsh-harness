@@ -75,6 +75,32 @@ function Protect-HarnessProviderText {
     }
     $Text
 }
+function Get-HarnessProviderFailureMessage {
+    param([Exception]$Exception, [string[]]$Redact)
+    $messages = [Collections.Generic.List[string]]::new()
+    $tls = $false
+    for ($depth = 0; $Exception -and $depth -lt 16; $depth++) {
+        if ($Exception -is [Security.Authentication.AuthenticationException] -or
+            ($Exception -is [Net.Http.HttpRequestException] -and
+            $Exception.HttpRequestError -eq [Net.Http.HttpRequestError]::SecureConnectionError)) {
+            $tls = $true
+        }
+        $wrapped = $Exception.InnerException -and ($Exception -is [Management.Automation.MethodInvocationException] -or
+            $Exception -is [Reflection.TargetInvocationException])
+        if (-not $wrapped -and $Exception.Message -and -not $messages.Contains($Exception.Message)) {
+            $messages.Add($Exception.Message)
+        }
+        $Exception = $Exception.InnerException
+    }
+    $detail = Protect-HarnessProviderText ($messages -join ' -> ') $Redact
+    if ($detail.Length -gt 4096) {
+        $detail = $detail.Substring(0, 4096) + '...'
+    }
+    if ($tls) {
+        return 'TLS/SSL connection failed: ' + $detail + ' Check the Windows clock, gateway certificate chain and any HTTPS proxy certificate trust.'
+    }
+    $detail
+}
 function Protect-HarnessProviderData {
     param($Value, [string[]]$Redact, [switch]$PropertyNames, [string[]]$PreserveNames = @())
     if ($Value -is [string]) {
@@ -476,7 +502,7 @@ function Invoke-HarnessHttpProvider {
             }
             throw [TimeoutException]::new("Provider timed out after $($config.TimeoutSeconds) seconds.")
         }
-        $safeMessage = Protect-HarnessProviderText $_.Exception.Message $redact
+        $safeMessage = Get-HarnessProviderFailureMessage $_.Exception $redact
         throw [InvalidOperationException]::new($safeMessage)
     }
     finally {

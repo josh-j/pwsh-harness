@@ -1,4 +1,13 @@
 #Requires -Version 7.6
+function Get-HarnessFrontendErrorMessage {
+    param([Management.Automation.ErrorRecord]$Record)
+    $exception = $Record.Exception
+    while ($exception.InnerException -and ($exception -is [Management.Automation.MethodInvocationException] -or
+            $exception -is [Reflection.TargetInvocationException])) {
+        $exception = $exception.InnerException
+    }
+    $exception.Message
+}
 function Set-HarnessViewSnapshot {
     param($View, $Snapshot, [switch]$Conversation)
     if ($Conversation) {
@@ -230,7 +239,7 @@ function Invoke-HarnessFrontendInput {
             'Request cancelled.'
         }
         else {
-            $_.Exception.Message
+            Get-HarnessFrontendErrorMessage $_
         }
         $HarnessHost.AddTranscript($Session, 'system', $message, $null)
         $View.StatusBar.Text = if ($cancellation.IsCancellationRequested) {
@@ -255,7 +264,7 @@ function Invoke-HarnessSafeFrontendInput {
         Invoke-HarnessFrontendInput $HarnessHost $Session $View $Terminal $Text $Pump $LineMode
     }
     catch {
-        $message = $_.Exception.Message
+        $message = ConvertTo-HarnessSafeText (Get-HarnessFrontendErrorMessage $_)
         $HarnessHost.AddTranscript($Session, 'system', $message, $null)
         Set-HarnessViewSnapshot $View ($HarnessHost.GetConversationSnapshot($Session)) -Conversation
         $View.StatusBar.Text = 'Command error'

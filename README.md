@@ -38,6 +38,12 @@ The gateway must support `/v1/chat/completions` with SSE streaming. Instructions
 .\pwsh-harness.ps1 -Prompt 'Write a function to report disk space' -PassThru
 ```
 
+## Windows repository defaults
+
+Start `pwsh-harness.cmd` or `pwsh-harness.ps1` from your project folder; packages and checkouts use the same launchers. `-Path` binds context, file changes and approved commands to one workspace. Defaults use user-role instructions, bounded README/diff context, local retrieval and the Windows/Core/7.6/CRLF target; explicit settings override them.
+
+`/fix all` requests repairs for every generated file. `/apply all` reviews and applies all named files together without execution. TLS failures show credential-redacted inner causes and Windows certificate/proxy guidance.
+
 ## Commands
 
 Enter sends; Shift/Ctrl/Alt+Enter inserts a newline. PgUp/PgDn scroll a page, Ctrl+Up/Down scroll a line, Ctrl+Home/End jump to oldest/latest output. Scrolling up holds your place as output arrives. Assistant Markdown is styled; fences show their language and latest PowerShell block number, with fixed code inline. Links retain visible destinations. F5 reviews/runs the first block; F10 starts `/apply` so you can enter a destination. Ctrl+C cancels; `/quit` exits. `/help` lists all commands.

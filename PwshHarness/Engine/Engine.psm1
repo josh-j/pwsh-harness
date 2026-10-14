@@ -1284,7 +1284,7 @@ function New-HarnessHost {
         Temperature          =0.2
         MaxTokens            =4096
         SystemPrompt         =''
-        SystemPromptMode     ='System'
+        SystemPromptMode     ='User'
         Validate             =$true
         Extensions           =@{
 
@@ -1294,7 +1294,7 @@ function New-HarnessHost {
         ExtensionPaths       =$ExtensionPaths
         DataDirectory        =$DataDirectory
         SessionDirectory     =(Join-Path $DataDirectory 'sessions')
-        ContextPath          =(Get-Location).Path
+        ContextPath          =(Get-Location).ProviderPath
         RepairMode           ='Minimal'
         HistoryTokenBudget   =12000
         ContextTokenBudget   =2000
