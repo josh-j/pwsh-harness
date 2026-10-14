@@ -72,4 +72,38 @@ Session logs save timestamped approval reviews, source hashes, file changes and 
 Scaffold, ExampleRetrieval and SemanticCritics are enabled by default. ExampleRetrieval supplies calibrated local examples; low-confidence matches inject nothing. `/why` reports IDs, scores and library state.
 Add folders through `ExamplePaths` or packs through `Examples.Add`; `# synopsis:` and `# tags:` enrich retrieval. Missing/partial libraries work quietly; `/reindex` refreshes them. Example code never executes.
 
-Routine commands use short inline PowerShell statements; file changes and a command can share one review. Small commands run directly in the bounded child process. The default `InputTokenBudget` is 8192 with 10% reserved for request framing/tools; budgeting includes middleware, trims older conversation and optional context, and preserves the latest source. Oversized required input is refused before contacting the gateway. `/tokens` reports the effective budget and estimate; full evidence remains in session logs.
+Routine commands use short inline PowerShell statements; file changes and a command can share one review. Small commands run directly in the bounded child process. The default `InputTokenBudget` is 8192 with configurable headroom (10% by default) for request framing/tools; budgeting includes middleware, trims older conversation and optional context, and preserves the latest source. Oversized required input is refused before contacting the gateway. `/tokens` reports the effective budget and estimate; full evidence remains in session logs.
+
+Use `/config` to see all effective settings, `/config get InputTokenBudget` to inspect one, and `/config set InputTokenBudget 16000` to change the current session. Values are JSON: numbers, `true`/`false`, quoted strings, arrays or objects. Invalid changes leave the session intact. To keep settings across launches, edit the config path shown by `/config get ConfigPath` or run:
+
+```powershell
+Set-PwshHarnessConfig -Options @{
+    InputTokenBudget = 16000
+    InputTokenReservePercent = 15.0
+    'Continuation.MaxResultChars' = 2000
+    'Tui.ToolPreviewLines' = 6
+}
+```
+
+Saving only options does not prompt for an API key. All these options also work through startup `-Options` and environment variables using the existing settings resolver.
+
+| Setting | Default | Purpose |
+| --- | ---: | --- |
+| `InputTokenBudget` | 8192 | Total estimated input limit after middleware |
+| `InputTokenReservePercent` | 10 | Input headroom for request framing/tools, 0–90% |
+| `ContextWindowTokens` | 0 | Override gateway context window; 0 uses the model profile |
+| `HistoryTokenBudget` | 12000 | Retained-history target within the total input limit |
+| `ContextTokenBudget` | 2000 | Project/context excerpt budget |
+| `MaxTokens` | 4096 | Requested model output limit |
+| `Continuation.MaxResults` | 6 | Latest action records sent for continuation, 1–64 |
+| `Continuation.MaxGoalChars` | 4000 | Maximum original-goal characters per continuation |
+| `Continuation.MaxResultChars` | 1000 | Maximum characters per result excerpt |
+| `Run.InlineCommandMaxChars` | 4096 | Direct-command threshold, 0–8192; 0 selects the file path |
+| `RunTimeoutSeconds` | 60 | Approved child-process deadline |
+| `Tui.Inline` | true | Inline terminal versus alternate-screen view; changes apply live |
+| `Tui.ContinueAfterAction` | true | Ask the agent to continue after approved actions |
+| `Tui.ToolOutputExpanded` | false | Default action-output expansion; Ctrl+O remains available |
+| `Tui.ToolPreviewLines` | 4 | Compact result preview lines, 1–100 |
+| `Tui.ReviewOnEmptyEnter` | true | Empty Enter opens review; F5 remains available |
+
+Continuation character limits accept 1–1048576. Configuration changes never waive exact-source execution approval or required logging.

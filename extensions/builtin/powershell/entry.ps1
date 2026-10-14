@@ -48,6 +48,10 @@
     $Harness.Settings.Declare('AutoRepairAttempts', [int], 2, { param($v) $v -ge 0 }, 'PWSH_HARNESS_AUTO_REPAIR')
     $Harness.Settings.Declare('VerificationTimeoutSeconds', [int], 180, { param($v) $v -gt 0 })
     $Harness.Settings.Declare('RunTimeoutSeconds', [int], 60, { param($v) $v -gt 0 })
+    $Harness.Settings.Declare('Run.InlineCommandMaxChars', [int], 4096, { param($v) $v -ge 0 -and $v -le 8192 })
+    $Harness.Settings.Declare('Continuation.MaxResults', [int], 6, { param($v) $v -ge 1 -and $v -le 64 })
+    $Harness.Settings.Declare('Continuation.MaxGoalChars', [int], 4000, { param($v) $v -ge 1 -and $v -le 1048576 })
+    $Harness.Settings.Declare('Continuation.MaxResultChars', [int], 1000, { param($v) $v -ge 1 -and $v -le 1048576 })
     $prompt = Get-Content (Join-Path $PSScriptRoot '../../../prompts/system.md') -Raw
     $script:PackBehaviorPrompts = @{ code = $prompt.Trim() }
     foreach ($mode in @('auto', 'chat')) {

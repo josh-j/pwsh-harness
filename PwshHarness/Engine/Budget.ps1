@@ -49,14 +49,17 @@ function Get-EngineBudgetedHistory {
         ''
     }
     $reserved = Get-EngineTokenEstimate $Store ($State.Config.SystemPrompt + $addendum + $Prompt) $State.Config
-    $window = if ($modelProfile) {
+    $window = if ($State.Config.ContextWindowTokens -gt 0) {
+        $State.Config.ContextWindowTokens - $State.Config.MaxTokens
+    }
+    elseif ($modelProfile) {
         $modelProfile.ContextWindowTokens - $State.Config.MaxTokens
     }
     else {
         $State.Config.InputTokenBudget
     }
     $budget = [Math]::Max(0, [Math]::Min($window, $State.Config.InputTokenBudget) - $State.Config.ContextTokenBudget - $reserved)
-    $windowBudget = if ($modelProfile) {
+    $windowBudget = if ($modelProfile -or $State.Config.ContextWindowTokens -gt 0) {
         [Math]::Max(0, $window - $State.Config.ContextTokenBudget - $reserved)
     }
     else {
@@ -101,11 +104,14 @@ function Limit-EngineRequest {
     param($Turn)
     $request = $Turn.Request
     $limit = $request.Config.InputTokenBudget
-    if ($request.Profile) {
+    if ($request.Config.ContextWindowTokens -gt 0) {
+        $limit = [Math]::Min($limit, $request.Config.ContextWindowTokens - $request.Config.MaxTokens)
+    }
+    elseif ($request.Profile) {
         $limit = [Math]::Min($limit, $request.Profile.ContextWindowTokens - $request.Config.MaxTokens)
     }
     # Leave room for wire framing and the provider's proposal schema; estimates are approximate.
-    $budget = [Math]::Max(0, [int][Math]::Floor($limit * 0.9))
+    $budget = [Math]::Max(0, [int][Math]::Floor($limit * (1 - $request.Config.InputTokenReservePercent / 100.0)))
     $messages = [Collections.Generic.List[object]]::new()
     $messages.AddRange([object[]]$request.Messages)
     $estimate = ${function:Get-EngineTokenEstimate}

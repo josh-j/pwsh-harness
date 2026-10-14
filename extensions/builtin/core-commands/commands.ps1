@@ -162,9 +162,8 @@ function Initialize-PackCommands {
         }
     } 'Send last prompt again.'
     Add-PackCommand config {
-        param($c) $c.State.Config |
-            ConvertTo-Json -Depth 10
-    } 'Display effective config (keys are never stored).'
+        param($c) Invoke-PackConfigCommand $c
+    } 'Show config; /config get Name; /config set Name JSON-value (session only). Persist with config.json or Set-PwshHarnessConfig.'
     Add-PackCommand extensions {
         param($c) $script:Harness.GetExtensionInfo() | Format-Table Name, Source, Generation, State -AutoSize | Out-String
     } 'List extensions with source, generation and state.'
@@ -201,6 +200,50 @@ function Initialize-PackCommands {
         $script:Harness.Events.Publish('ext.core-commands.ConversationRestored', @{ SessionId = $c.State.SessionId })
         "Resumed $($c.Arguments)."
     } 'List sessions or /resume session-id.'
+}
+function Invoke-PackConfigCommand {
+    param($Context)
+    if (-not $Context.Arguments) {
+        return $Context.State.Config | ConvertTo-Json -Depth 10
+    }
+    if ($Context.Arguments -notmatch '^(?<action>get|set)\s+(?<name>\S+)(?:\s+(?<value>[\s\S]+))?$') {
+        throw 'Use /config get Name or /config set Name JSON-value.'
+    }
+    $action = $Matches.action; $name = $Matches.name
+    $text = if ($Matches.ContainsKey('value')) {
+        $Matches.value
+    }
+    else {
+        ''
+    }
+    if ($name -match '(ApiKey|AccessToken|RefreshToken|Authorization|Password|ClientSecret|Credential|Credentials|Secret|Token|Key)$') {
+        throw 'API secrets must not be passed in config.'
+    }
+    if ($action -eq 'get') {
+        if ($text -or -not $Context.State.Config.ContainsKey($name)) {
+            throw 'Use /config get with one existing setting name.'
+        }
+        return @{ Name = $name; Value = $Context.State.Config[$name] } | ConvertTo-Json -Depth 10
+    }
+    if ($Context.State.Busy) {
+        throw 'Wait for the active operation to finish before changing settings.'
+    }
+    if (-not $text) {
+        throw 'Use /config set Name JSON-value.'
+    }
+    try {
+        $value = ConvertFrom-Json -InputObject $text -AsHashtable -NoEnumerate -Depth 30 -ErrorAction Stop
+    }
+    catch {
+        throw 'The setting value must be valid JSON: a number, true/false, a quoted string, an array or an object.'
+    }
+    $validated = $script:Harness.ConfigService.ValidateSetting($name, $value, $Context.State.Config, $Context.State.Config.ConfigPath)
+    $value = $validated.Value
+    $Context.State.Config[$name] = $value
+    if ($name -eq 'ContextPath') {
+        $Context.State.Context.Path = $value
+    }
+    "Session setting updated: $name. Persist with config.json or Set-PwshHarnessConfig."
 }
 
 function Add-PackCommand {

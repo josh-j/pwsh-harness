@@ -37,22 +37,25 @@ function New-HarnessViewState {
         StatusBar    = [pscustomobject]@{
 
 
-            Text                ='Ready'
-            ExtensionNotice     = ''
-            Profile             =''
-            Model               =''
-            Behavior            ='auto'
-            Target              =''
-            Repo                ='context:none'
-            UsageText           =''
-            IndexText           =''
-            Tokens              =0
-            Budget              =0
-            Validation          ='none'
-            Ascii               =$false
-            LogText             ='log:memory'
-            Inline              =$false
-            ContinueAfterAction =$true
+            Text                  ='Ready'
+            ExtensionNotice       = ''
+            Profile               =''
+            Model                 =''
+            Behavior              ='auto'
+            Target                =''
+            Repo                  ='context:none'
+            UsageText             =''
+            IndexText             =''
+            Tokens                =0
+            Budget                =0
+            Validation            ='none'
+            Ascii                 =$false
+            LogText               ='log:memory'
+            Inline                =$false
+            ContinueAfterAction   =$true
+            ReviewOnEmptyEnter    =$true
+            ToolPreviewLines      =4
+            ConfiguredExpandTools =$false
         }
         Spinner      = [pscustomobject]@{
 
@@ -86,7 +89,7 @@ function New-HarnessViewState {
             Operation         =$null
             NextPromptSummary =''
         }
-        RenderCache  = [pscustomobject]@{ Width = 0; Ascii = $false; Expanded = $false; Start = 0; Records = @() }
+        RenderCache  = [pscustomobject]@{ Width = 0; Ascii = $false; Expanded = $false; PreviewLines = 4; Start = 0; Records = @() }
         ReviewMode   =$false
         Quit         =$false
         LastControlC =-2000L
@@ -348,7 +351,7 @@ function Get-HarnessRenderModel {
         else {
             $null
         }
-        $recordRows = if ($cache.Width -eq $Width -and $cache.Ascii -eq $State.StatusBar.Ascii -and $cache.Expanded -eq $State.Panels.ExpandTools -and $cached -and
+        $recordRows = if ($cache.Width -eq $Width -and $cache.Ascii -eq $State.StatusBar.Ascii -and $cache.Expanded -eq $State.Panels.ExpandTools -and $cache.PreviewLines -eq $State.StatusBar.ToolPreviewLines -and $cached -and
             $cached.Role -ceq $record.Role -and $cached.Text -ceq $record.Text -and $cached.BlocksText -ceq $blocksText) {
             $cached.Rows
         }
@@ -361,7 +364,7 @@ function Get-HarnessRenderModel {
                 1
             }
             else {
-                4
+                $State.StatusBar.ToolPreviewLines
             }
             $preview = @($lines | Select-Object -First $limit)
             @(foreach ($line in $preview) {
@@ -521,7 +524,7 @@ function Get-HarnessRenderModel {
         'Working | Ctrl+C cancel | ' + $bar.LogText
     }
     elseif ($operation -and $operation.Status -eq 'Ready') {
-        "Enter Review & $($operation.Label.ToLowerInvariant()) | F10 Discard | F12 Logs"
+        "$(if ($State.StatusBar.ReviewOnEmptyEnter) { 'Enter' } else { 'F5' }) Review & $($operation.Label.ToLowerInvariant()) | F10 Discard | F12 Logs"
     }
     elseif ($operation) {
         "$($operation.Label): $($operation.Status) | F12 Logs | $($bar.LogText)"
@@ -602,7 +605,7 @@ function Get-HarnessRenderModel {
         InputHeight     =$inputHeight
         MaxScroll       =$maxScroll
         ScrollOffset    =$scroll
-        RenderCache     = [pscustomobject]@{ Width = $Width; Ascii = $State.StatusBar.Ascii; Expanded = $State.Panels.ExpandTools; Start = $cacheStart; Records = $cachedRecords.ToArray() }
+        RenderCache     = [pscustomobject]@{ Width = $Width; Ascii = $State.StatusBar.Ascii; Expanded = $State.Panels.ExpandTools; PreviewLines = $State.StatusBar.ToolPreviewLines; Start = $cacheStart; Records = $cachedRecords.ToArray() }
         StatusRows      = $statusRows
         ActionRows      = $actionRows
         Status          =$status
@@ -746,7 +749,7 @@ function Update-HarnessEditor {
             }
             switch ($Key.Key) {
                 Enter {
-                    if (-not $editor.Text -and -not $editor.Paste -and -not $MoreKeys -and $Key.Modifiers -eq 0 -and
+                    if ($View.StatusBar.ReviewOnEmptyEnter -and -not $editor.Text -and -not $editor.Paste -and -not $MoreKeys -and $Key.Modifiers -eq 0 -and
                         $View.SessionView.Operation -and $View.SessionView.Operation.Status -eq 'Ready') {
                         return [pscustomobject]@{ Action = 'Review'; Prompt = '/approve' }
                     }

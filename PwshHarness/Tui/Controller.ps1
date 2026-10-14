@@ -49,6 +49,12 @@ function Set-HarnessViewSnapshot {
     $bar = $View.StatusBar
     $bar.Inline = $Snapshot.Config.'Tui.Inline'
     $bar.ContinueAfterAction = $Snapshot.Config.'Tui.ContinueAfterAction'
+    $bar.ReviewOnEmptyEnter = $Snapshot.Config.'Tui.ReviewOnEmptyEnter'
+    $bar.ToolPreviewLines = $Snapshot.Config.'Tui.ToolPreviewLines'
+    if ($bar.ConfiguredExpandTools -ne $Snapshot.Config.'Tui.ToolOutputExpanded') {
+        $bar.ConfiguredExpandTools = $Snapshot.Config.'Tui.ToolOutputExpanded'
+        $View.Panels.ExpandTools = $bar.ConfiguredExpandTools
+    }
     $bar.LogText = if ($Snapshot.Persist) {
         'log:saved (F12)'
     }
@@ -84,7 +90,10 @@ function Set-HarnessViewSnapshot {
         $bar.Tokens = [Math]::Ceiling((((@($Snapshot.Transcript | ForEach-Object { $_.Text }) -join '')).Length + $Snapshot.Context.Text.Length) / 4)
     }
     $bar.Budget = $Snapshot.Config.InputTokenBudget
-    if ($Snapshot.Profile) {
+    if ($Snapshot.Config.ContextWindowTokens -gt 0) {
+        $bar.Budget = [Math]::Min($bar.Budget, $Snapshot.Config.ContextWindowTokens - $Snapshot.Config.MaxTokens)
+    }
+    elseif ($Snapshot.Profile) {
         $bar.Budget = [Math]::Min($bar.Budget, $Snapshot.Profile.ContextWindowTokens - $Snapshot.Config.MaxTokens)
     }
     $bar.Target = "$($Snapshot.Target.OS) $($Snapshot.Target.PSVersion) catalog:$($Snapshot.Catalog)"
@@ -521,6 +530,13 @@ function Invoke-HarnessFrontend {
             $Terminal.Inline = $View.StatusBar.Inline
             $Terminal.Enter(-not $View.StatusBar.Inline)
             while (-not $View.Quit) {
+                if ($Terminal.Inline -ne $View.StatusBar.Inline) {
+                    $Terminal.Restore()
+                    $Terminal.Inline = $View.StatusBar.Inline
+                    $Terminal.Enter(-not $Terminal.Inline)
+                    $Terminal.Previous = $null
+                    $View.Dirty = $true
+                }
                 $size = $Terminal.GetSize()
                 $dimensions = "$($size.Width)x$($size.Height)"
                 if ($dimensions -ne $last.Size) {

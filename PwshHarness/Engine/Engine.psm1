@@ -264,7 +264,7 @@ function Resolve-EngineSettings {
             if ($environment -and $value -eq $environment -and $spec.Type -in @([int], [double])) {
                 $value = [Convert]::ChangeType($value, $spec.Type, [Globalization.CultureInfo]::InvariantCulture)
             }
-            elseif ($spec.Type -eq [double] -and $value -is [int]) {
+            elseif ($spec.Type -eq [double] -and ($value -is [int] -or $value -is [long])) {
                 $value = [double]$value
             }
             elseif ($spec.Type -eq [string[]] -and $value -is [array] -and
@@ -562,6 +562,23 @@ function New-EngineFacade {
             return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
         }
         $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Store.ConfigPath)
+    }.GetNewClosure()
+    $service | Add-Member ScriptMethod ValidateSetting {
+        param([string]$Name, $Value, [hashtable]$Current, [string]$Path)
+        $declarations = @{} + $Store.Points.Settings
+        foreach ($key in $Target.Points.Settings.Keys) {
+            $declarations[$key] = $Target.Points.Settings[$key]
+        }
+        if ($Name -match '(ApiKey|AccessToken|RefreshToken|Authorization|Password|ClientSecret|Credential|Credentials|Secret|Token|Key)$' -or $Value -is [Security.SecureString]) {
+            throw 'API secrets must not be passed in config.'
+        }
+        if (-not $declarations.ContainsKey($Name)) {
+            throw "Unknown setting '$Name'."
+        }
+        $candidate = @{} + $Current
+        $candidate[$Name] = $Value
+        $resolved = & $resolve $Store $candidate $Path $declarations
+        @{ Name = $Name; Value = $resolved[$Name] }
     }.GetNewClosure()
     if ($isHost) {
         $service | Add-Member ScriptMethod Save {
@@ -1275,32 +1292,34 @@ function New-HarnessHost {
     $defaults = @{
 
 
-        TokenEstimator       ='characters'
-        ModelProfile         =$profileName
-        ContinuationAttempts =2
-        RepairPolicy         =''
-        Provider             =''
-        Model                =''
-        Temperature          =0.2
-        MaxTokens            =4096
-        SystemPrompt         =''
-        SystemPromptMode     ='User'
-        Validate             =$true
-        Extensions           =@{
+        TokenEstimator           ='characters'
+        ModelProfile             =$profileName
+        ContinuationAttempts     =2
+        RepairPolicy             =''
+        Provider                 =''
+        Model                    =''
+        Temperature              =0.2
+        MaxTokens                =4096
+        SystemPrompt             =''
+        SystemPromptMode         ='User'
+        Validate                 =$true
+        Extensions               =@{
 
 
             Disabled = @()
         }
-        ExtensionPaths       =$ExtensionPaths
-        DataDirectory        =$DataDirectory
-        SessionDirectory     =(Join-Path $DataDirectory 'sessions')
-        ContextPath          =(Get-Location).ProviderPath
-        RepairMode           ='Minimal'
-        HistoryTokenBudget   =12000
-        InputTokenBudget     =8192
-        ContextTokenBudget   =2000
-        ContextAutoFiles     =$false
-        ContextIncludeDiff   =$false
+        ExtensionPaths           =$ExtensionPaths
+        DataDirectory            =$DataDirectory
+        SessionDirectory         =(Join-Path $DataDirectory 'sessions')
+        ContextPath              =(Get-Location).ProviderPath
+        RepairMode               ='Minimal'
+        HistoryTokenBudget       =12000
+        InputTokenBudget         =8192
+        InputTokenReservePercent =10.0
+        ContextWindowTokens      =0
+        ContextTokenBudget       =2000
+        ContextAutoFiles         =$false
+        ContextIncludeDiff       =$false
     }
     foreach ($key in $defaults.Keys) {
         $store.Points.Settings[$key] = @{
@@ -1331,6 +1350,8 @@ function New-HarnessHost {
     $store.Points.Settings.RepairMode.Validator = { param($v) $v -in @('Minimal', 'Full') }
     $store.Points.Settings.HistoryTokenBudget.Validator = { param($v) $v -ge 0 }
     $store.Points.Settings.InputTokenBudget.Validator = { param($v) $v -gt 0 }
+    $store.Points.Settings.InputTokenReservePercent.Validator = { param($v) $v -ge 0 -and $v -le 90 -and -not [double]::IsNaN($v) }
+    $store.Points.Settings.ContextWindowTokens.Validator = { param($v) $v -ge 0 }
     $store.Points.Settings.ContextTokenBudget.Validator = { param($v) $v -ge 0 }
     $store.Points.Settings.ContinuationAttempts.Validator = { param($v) $v -ge 0 }
     $store.Points.Settings.MaxTokens.Validator = { param($v) $v -gt 0 }

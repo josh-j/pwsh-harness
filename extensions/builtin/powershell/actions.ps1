@@ -126,7 +126,7 @@ function Invoke-HarnessRun {
         $State.Config.RunTimeoutSeconds -ne $runTimeoutSeconds) {
         throw 'Execution settings changed during action review. Review the working directory and timeout again before running.'
     }
-    $inline = -not $ScriptPath -and -not $WhatIf -and $code.Length -le 4096 -and $code -match '^\s*# harness-command\r?\n'
+    $inline = -not $ScriptPath -and -not $WhatIf -and $code.Length -le $State.Config.'Run.InlineCommandMaxChars' -and $code -match '^\s*# harness-command\r?\n'
     $scriptFile = Join-Path ([IO.Path]::GetTempPath()) ("pwsh-harness-" + [guid]::NewGuid().ToString('N') + '.ps1')
     if ($ScriptPath) {
         $scriptFile = [IO.Path]::GetFullPath($ScriptPath)

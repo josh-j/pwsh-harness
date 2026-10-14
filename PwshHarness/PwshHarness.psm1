@@ -74,6 +74,9 @@ function New-HarnessHost {
     $hostInstance.Settings.Declare('Tui.Ascii', [bool], $false)
     $hostInstance.Settings.Declare('Tui.Inline', [bool], $true)
     $hostInstance.Settings.Declare('Tui.ContinueAfterAction', [bool], $true)
+    $hostInstance.Settings.Declare('Tui.ToolOutputExpanded', [bool], $false)
+    $hostInstance.Settings.Declare('Tui.ToolPreviewLines', [int], 4, { param($v) $v -ge 1 -and $v -le 100 })
+    $hostInstance.Settings.Declare('Tui.ReviewOnEmptyEnter', [bool], $true)
     $hostInstance.Renderers.Add('Default', (Get-Command PwshHarness.Tui\Get-HarnessRenderModel).ScriptBlock, 100)
     $hostInstance.ExtensionLoader.Load($ExtensionPaths)
     $references = $script:Hosts

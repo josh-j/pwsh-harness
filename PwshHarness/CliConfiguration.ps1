@@ -202,7 +202,9 @@ function Set-PwshHarnessConfig {
         }
         Assert-HarnessSavedOptions $instance $Options
         $config = $instance.ConfigService.Resolve($Options, $ConfigPath)
-        if (-not $PSBoundParameters.ContainsKey('ApiKey') -and (Test-HarnessInteractive)) {
+        $connectionKeys = @('Provider', 'Model', 'BaseUrl')
+        $settingsOnly = $PSBoundParameters.ContainsKey('Options') -and -not @($connectionKeys | Where-Object { $PSBoundParameters.ContainsKey($_) -or $Options.ContainsKey($_) }).Count
+        if (-not $PSBoundParameters.ContainsKey('ApiKey') -and -not $settingsOnly -and (Test-HarnessInteractive)) {
             $ApiKey = Read-HarnessConfigurationPrompt 'API key (empty input keeps the saved key)' -Secret
             if ($ApiKey -isnot [Security.SecureString]) {
                 throw 'The API key prompt must return a SecureString.'
