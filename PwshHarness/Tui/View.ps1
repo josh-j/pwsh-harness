@@ -40,6 +40,7 @@ function New-HarnessViewState {
             Budget          =0
             Validation      ='none'
             Ascii           =$false
+            LogText         ='log:memory'
         }
         Spinner      = [pscustomobject]@{
 
@@ -69,8 +70,10 @@ function New-HarnessViewState {
             LastResult    =$null
             Diagnostics   =@()
             Trimmed       =0
+            Operation     =$null
         }
         RenderCache  = [pscustomobject]@{ Width = 0; Ascii = $false; Start = 0; Records = @() }
+        ReviewMode   =$false
         Quit         =$false
         LastControlC =-2000L
         Renderer     ='Default'
@@ -96,6 +99,7 @@ function Update-HarnessSessionView {
     }
     switch ($EventName) {
         TurnStarted {
+            $session.Operation = $null
             $session.Busy = $true
             $session.StreamingText = ''
             $session.Records.Add([pscustomobject]@{
@@ -117,6 +121,9 @@ function Update-HarnessSessionView {
         }
         ext.powershell.OperationPrepared {
             $session.Records.Add([pscustomobject]@{ Role = 'operation'; Text = $Payload.Text })
+            if (($Payload -is [Collections.IDictionary] -and $Payload.Contains('Operation')) -or $Payload.PSObject.Properties['Operation']) {
+                $session.Operation = $Payload.Operation
+            }
         }
         TurnCompleted {
             $View.Panels.CodeLine = 1
@@ -445,10 +452,31 @@ function Get-HarnessRenderModel {
     }
     $status = "$spin $($bar.Model) | $($bar.Text) | $($bar.Repo) | $($bar.Validation)$usage | est $($bar.Tokens)/$($bar.Budget) | behavior:$($bar.Behavior) | $($bar.Target)$indexText"
     $status = ConvertTo-HarnessSafeText $status
+    if ($State.ReviewMode) {
+        $status = 'Review the exact files, command and risks before approval.'
+    }
     $statusRows = @(Split-HarnessStatus $status $Width | Select-Object -First 3)
+    $operation = $State.SessionView.Operation
+    $actionText = if ($State.ReviewMode) {
+        'Enter approve | Esc back | PgUp/PgDn scroll'
+    }
+    elseif ($State.SessionView.Busy) {
+        'Working | Ctrl+C cancel | ' + $bar.LogText
+    }
+    elseif ($operation -and $operation.Status -eq 'Ready') {
+        "F5 Review & $($operation.Label.ToLowerInvariant()) | F10 Discard | F12 Logs"
+    }
+    elseif ($operation) {
+        "$($operation.Label): $($operation.Status) | F12 Logs | $($bar.LogText)"
+    }
+    else {
+        'Describe a task to begin | F12 Logs | ' + $bar.LogText
+    }
     $inputRows = @(Split-HarnessEditorLines $State.Editor.Text ($Width - 2))
-    $inputHeight = [Math]::Min([Math]::Min(6, $Height - $statusRows.Count - 2), [Math]::Max(1, $inputRows.Count))
-    $paneHeight = $Height - $inputHeight - $statusRows.Count - 1
+    $actionHeight = [Math]::Max(1, [Math]::Min(2, $Height - $statusRows.Count - [Math]::Min(2, $inputRows.Count) - 2))
+    $actionRows = @(Split-HarnessDisplayLine (ConvertTo-HarnessSafeText $actionText) $Width | Select-Object -First $actionHeight)
+    $inputHeight = [Math]::Min([Math]::Min(6, $Height - $statusRows.Count - $actionRows.Count - 2), [Math]::Max(1, $inputRows.Count))
+    $paneHeight = $Height - $inputHeight - $statusRows.Count - $actionRows.Count - 1
     $maxScroll = [Math]::Max(0, $all.Count - $paneHeight)
     $scroll = [Math]::Min($maxScroll, [Math]::Max(0, $State.Viewport.ScrollOffset))
     $end = [Math]::Max(0, $all.Count - $scroll)
@@ -466,6 +494,9 @@ function Get-HarnessRenderModel {
     while ($rows.Count -lt $paneHeight) {
         $rows.Add((New-HarnessFrameRow ''))
     }
+    foreach ($actionRow in $actionRows) {
+        $rows.Add((New-HarnessFrameRow $actionRow -Color Yellow))
+    }
     foreach ($statusRow in $statusRows) {
         $rows.Add((New-HarnessFrameRow $statusRow -Color Cyan))
     }
@@ -480,17 +511,17 @@ function Get-HarnessRenderModel {
     while ($rows.Count -lt $Height - 1) {
         $rows.Add((New-HarnessFrameRow '> '))
     }
-    $help = if ($State.SessionView.Busy) {
+    $help = if ($State.ReviewMode) {
+        'Enter approve | Esc back | PgUp/PgDn scroll'
+    }
+    elseif ($State.SessionView.Busy) {
         'Ctrl+C cancel | PgUp/PgDn scroll'
     }
     elseif ($scroll) {
         'PgUp/PgDn scroll | Ctrl+Home top | Ctrl+End latest | Enter send'
     }
-    elseif ($result -and $result.CodeBlocks.Count) {
-        'Enter send | PgUp/PgDn scroll | F5 run | F10 apply | /help'
-    }
     else {
-        'Enter send | PgUp/PgDn scroll | /help'
+        'Enter send | Ctrl+J newline | PgUp/PgDn scroll | /help | Ctrl+D exit'
     }
     $rows.Add((New-HarnessFrameRow (@(Split-HarnessDisplayLine $help $Width)[0]) -Color BrightBlack))
     [pscustomobject]@{
@@ -499,7 +530,7 @@ function Get-HarnessRenderModel {
         Rows         =$rows.ToArray()
         Width        =$Width
         Height       =$Height
-        CursorRow    =$paneHeight + $statusRows.Count + [Math]::Max(0, $cursorLine - $inputStart)
+        CursorRow    =$paneHeight + $actionRows.Count + $statusRows.Count + [Math]::Max(0, $cursorLine - $inputStart)
         CursorColumn =[Math]::Min($Width - 1, 2 + (Get-HarnessTextWidth $cursorLines[-1]))
         Transcript   =$visible
         PaneHeight   =$paneHeight
@@ -509,6 +540,7 @@ function Get-HarnessRenderModel {
         ScrollOffset =$scroll
         RenderCache  = [pscustomobject]@{ Width = $Width; Ascii = $State.StatusBar.Ascii; Start = $cacheStart; Records = $cachedRecords.ToArray() }
         StatusRows   = $statusRows
+        ActionRows   = $actionRows
         Status       =$status
         Help         =$help
     }
@@ -579,6 +611,21 @@ function Update-HarnessEditor {
         return
     }
     switch ($Key.Key) {
+        F5 {
+            if (-not $View.SessionView.Busy -and -not $editor.Paste -and $View.SessionView.Operation -and $View.SessionView.Operation.Status -eq 'Ready') {
+                return [pscustomobject]@{ Action = 'Review'; Prompt = '/approve' }
+            }
+        }
+        F10 {
+            if (-not $View.SessionView.Busy -and -not $editor.Paste -and $View.SessionView.Operation -and $View.SessionView.Operation.Status -eq 'Ready') {
+                return [pscustomobject]@{ Action = 'Shortcut'; Prompt = '/cancel' }
+            }
+        }
+        F12 {
+            if (-not $View.SessionView.Busy -and -not $editor.Paste) {
+                return [pscustomobject]@{ Action = 'Shortcut'; Prompt = '/logs' }
+            }
+        }
         F2 {
             $editor.Paste = -not $editor.Paste
             $View.StatusBar.Text = if ($editor.Paste) {
@@ -593,17 +640,6 @@ function Update-HarnessEditor {
         }
         F4 {
             $View.Panels.CodeLine += 10
-        }
-        F5 {
-            if (-not $View.SessionView.Busy -and -not $editor.Text -and $View.SessionView.LastResult -and $View.SessionView.LastResult.CodeBlocks.Count) {
-                return [pscustomobject]@{ Action = 'Send'; Prompt = '/run' }
-            }
-        }
-        F10 {
-            if (-not $View.SessionView.Busy -and -not $editor.Text -and $View.SessionView.LastResult -and $View.SessionView.LastResult.CodeBlocks.Count) {
-                $editor.Text = '/apply '
-                $editor.Cursor = $editor.Text.Length
-            }
         }
         F6 {
             $View.Panels.ShowDiff = -not $View.Panels.ShowDiff

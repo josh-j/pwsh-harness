@@ -11,6 +11,7 @@ function Get-HarnessFrontendErrorMessage {
 function Set-HarnessViewSnapshot {
     param($View, $Snapshot, [switch]$Conversation)
     if ($Conversation) {
+        $View.SessionView.Operation = $null
         $View.SessionView.Records.Clear()
         foreach ($record in $Snapshot.Transcript) {
             $View.SessionView.Records.Add($record)
@@ -21,6 +22,9 @@ function Set-HarnessViewSnapshot {
             if ($Snapshot.LastResult.ContainsKey('OperationReview')) {
                 $View.SessionView.Records.Add([pscustomobject]@{ Role = 'operation'; Text = $Snapshot.LastResult.OperationReview })
             }
+            if ($Snapshot.LastResult.ContainsKey('Operation')) {
+                $View.SessionView.Operation = $Snapshot.LastResult.Operation
+            }
         }
     }
     $View.Editor.History.Clear()
@@ -29,6 +33,12 @@ function Set-HarnessViewSnapshot {
     }
     $View.Editor.HistoryIndex = $View.Editor.History.Count
     $bar = $View.StatusBar
+    $bar.LogText = if ($Snapshot.Persist) {
+        'log:saved (F12)'
+    }
+    else {
+        'log:memory'
+    }
     if ($Snapshot.LastResult -and $Snapshot.LastResult.Usage -and $Snapshot.Usage) {
         $u = $Snapshot.LastResult.Usage
         $bar.UsageText = "in $($u.prompt_tokens)/out $($u.completion_tokens)/cache $($u.prompt_tokens_details.cached_tokens) total $($Snapshot.Usage.total_tokens)"
@@ -69,6 +79,70 @@ function Set-HarnessViewSnapshot {
             })
     }
     $View.Dirty = $true
+}
+function Read-HarnessOperationReview {
+    param($View, $Terminal, [string]$Text)
+    $review = New-HarnessViewState
+    $review.ReviewMode = $true
+    $review.StatusBar.Ascii = $View.StatusBar.Ascii
+    $review.SessionView.Records.Add([pscustomobject]@{ Role = 'review'; Text = $Text })
+    $review.Viewport.ScrollOffset = [int]::MaxValue
+    $dimensions = ''
+    try {
+        while ($true) {
+            $size = $Terminal.GetSize()
+            $nextDimensions = "$($size.Width)x$($size.Height)"
+            if ($review.Dirty -or $dimensions -cne $nextDimensions) {
+                $frame = Get-HarnessRenderModel $review $size.Width $size.Height
+                $review.Viewport.ScrollOffset = [Math]::Min($review.Viewport.ScrollOffset, $frame.MaxScroll)
+                $Terminal.Draw($frame)
+                $review.Dirty = $false
+                $dimensions = $nextDimensions
+            }
+            if (-not $Terminal.Available()) {
+                $Terminal.Wait(10); continue
+            }
+            $key = $Terminal.ReadKey()
+            if ($key.Key -eq 'Escape' -or (($key.Modifiers -band [ConsoleModifiers]::Control) -and $key.Key -in @('C', 'D'))) {
+                return $false
+            }
+            if ($key.Key -eq 'Enter' -and $key.Modifiers -eq 0) {
+                return $true
+            }
+            if ($key.Key -eq 'Home') {
+                $review.Viewport.ScrollOffset = [int]::MaxValue
+            }
+            elseif ($key.Key -eq 'End') {
+                $review.Viewport.ScrollOffset = 0
+            }
+            elseif ($key.Key -in @('PageUp', 'PageDown')) {
+                $null = Update-HarnessEditor $review $key
+            }
+            $review.Dirty = $true
+        }
+    }
+    finally {
+        $Terminal.Previous = $null; $View.Dirty = $true
+    }
+}
+function Invoke-HarnessFrontendShortcut {
+    param($HarnessHost, $Session, $View, $Terminal, $Action, [scriptblock]$Pump)
+    $reviewedOperation = if ($Action.Action -eq 'Review') {
+        $View.SessionView.Operation
+    }
+    else {
+        $null
+    }
+    if ($reviewedOperation -and -not (Read-HarnessOperationReview $View $Terminal $reviewedOperation.Review)) {
+        return
+    }
+    $draft = $View.Editor.Text; $cursor = $View.Editor.Cursor
+    try {
+        Invoke-HarnessSafeFrontendInput $HarnessHost $Session $View $Terminal $Action.Prompt $Pump -ReviewedOperation $reviewedOperation
+    }
+    finally {
+        $View.Editor.Text = $draft; $View.Editor.Cursor = $cursor; $View.Dirty = $true
+    }
 }
 function Get-HarnessActiveRenderModel {
     param($View, $HarnessHost, [int]$Width, [int]$Height)
@@ -136,7 +210,7 @@ function Read-HarnessLine {
     $null
 }
 function Invoke-HarnessFrontendInput {
-    param($HarnessHost, $Session, $View, $Terminal, [string]$Text, [scriptblock]$Pump, [bool]$LineMode = $false)
+    param($HarnessHost, $Session, $View, $Terminal, [string]$Text, [scriptblock]$Pump, [bool]$LineMode = $false, $ReviewedOperation = $null)
     if (-not $Text.Trim()) {
         return
     }
@@ -146,6 +220,23 @@ function Invoke-HarnessFrontendInput {
     $reader = ${function:Read-HarnessLine}
     $safeText = ${function:ConvertTo-HarnessSafeText}
     $confirm = { param($message, $expected = 'RUN')
+        if ($ReviewedOperation) {
+            $snapshot = $HarnessHost.GetConversationSnapshot($Session)
+            $current = if ($snapshot.LastResult -and $snapshot.LastResult.ContainsKey('Operation')) {
+                $snapshot.LastResult.Operation
+            }
+            else {
+                $null
+            }
+            if (-not $current -or $current.Status -cne 'Ready' -or
+                -not [string]::Equals($current.Id, $ReviewedOperation.Id, [StringComparison]::Ordinal) -or
+                -not [string]::Equals($message, $ReviewedOperation.Review, [StringComparison]::Ordinal)) {
+                throw 'The operation changed during review. Press F5 to review it again.'
+            }
+        }
+        if (-not $LineMode -and $expected -ceq '') {
+            return
+        }
         if (-not $LineMode) {
             $Terminal.Restore()
         }
@@ -259,14 +350,24 @@ function Invoke-HarnessFrontendInput {
     }
 }
 function Invoke-HarnessSafeFrontendInput {
-    param($HarnessHost, $Session, $View, $Terminal, [string]$Text, [scriptblock]$Pump, [bool]$LineMode = $false)
+    param($HarnessHost, $Session, $View, $Terminal, [string]$Text, [scriptblock]$Pump, [bool]$LineMode = $false, $ReviewedOperation = $null)
     try {
-        Invoke-HarnessFrontendInput $HarnessHost $Session $View $Terminal $Text $Pump $LineMode
+        Invoke-HarnessFrontendInput $HarnessHost $Session $View $Terminal $Text $Pump $LineMode $ReviewedOperation
     }
     catch {
         $message = ConvertTo-HarnessSafeText (Get-HarnessFrontendErrorMessage $_)
-        $HarnessHost.AddTranscript($Session, 'system', $message, $null)
+        $logFailure = $false
+        try {
+            $HarnessHost.AddTranscript($Session, 'system', $message, $null)
+        }
+        catch {
+            # AddTranscript retains the record in memory before attempting persistence.
+            $logFailure = $true
+        }
         Set-HarnessViewSnapshot $View ($HarnessHost.GetConversationSnapshot($Session)) -Conversation
+        if ($logFailure) {
+            $View.StatusBar.LogText = 'log:save failed (F12)'
+        }
         $View.StatusBar.Text = 'Command error'
         if ($LineMode) {
             $Terminal.WriteText("Error: $message`n")
@@ -401,6 +502,9 @@ function Invoke-HarnessFrontend {
                     $action = Update-HarnessEditor $View ($Terminal.ReadKey()) ($Terminal.Available()) ($Terminal.Now())
                     if ($action -and $action.Action -eq 'Send') {
                         Invoke-HarnessSafeFrontendInput $HarnessHost $Session $View $Terminal $action.Prompt $pump
+                    }
+                    elseif ($action -and $action.Action -in @('Review', 'Shortcut')) {
+                        Invoke-HarnessFrontendShortcut $HarnessHost $Session $View $Terminal $action $pump
                     }
                 }
                 if (-not $Terminal.Available()) {

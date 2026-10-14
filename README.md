@@ -46,12 +46,16 @@ Start `pwsh-harness.cmd` or `pwsh-harness.ps1` from your project folder; package
 
 ## Commands
 
-Enter sends; Shift/Ctrl/Alt+Enter inserts a newline. PgUp/PgDn scroll a page, Ctrl+Up/Down scroll a line, Ctrl+Home/End jump to oldest/latest output. Scrolling up holds your place as output arrives. Assistant Markdown is styled; fences show their language and latest PowerShell block number, with fixed code inline. Links retain visible destinations. F5 reviews/runs the first block; F10 starts `/apply` so you can enter a destination. Ctrl+C cancels; `/quit` exits. `/help` lists all commands.
+Enter sends; Ctrl+J or Shift/Ctrl/Alt+Enter inserts a newline. PgUp/PgDn scroll a page, Ctrl+Up/Down scroll a line, Ctrl+Home/End jump to oldest/latest output. Scrolling up holds your place as output arrives. Assistant Markdown is styled; fences show their language and latest PowerShell block number, with fixed code inline. Links retain visible destinations. Ctrl+C cancels; `/quit` exits. `/help` lists all commands.
+
+After describing a task, press **F5** to review the prepared files, command and risks. **Enter** approves applying the files and the requested run together; **Escape** returns without approving. **F10** discards the proposal, and **F12** shows logs. The action bar shows the operation status, and shortcuts preserve unfinished prompts.
 Use `/model`, `/provider`, `/system`, `/config`, `/history` and `/resume` for sessions; `/blocks`, `/save`, `/apply`, `/copy`, `/validate`, `/run`, `/exec` and `/whatif` for code; `/tokens` for usage. Default `auto` behavior accepts conversation and code requests; `/behavior code` or `/behavior chat` selects either explicitly. `-Behavior` sets it at startup.
 `/add`, `/drop`, `/context`, `/diff`, `/tree`, `/rag`, `/why` and `/reindex` control local context.
 `/blocks` lists numbered suggestions. `/apply 2 'file name.ps1'` previews and replaces the entire file after typing `APPLY`; omit `2` for the first block. `/run 2` previews and runs that block after `RUN`; `/exec Get-Location` runs an explicitly entered command with the same confirmation. `/save` and `/whatif` also accept a block number. Relative action paths and child commands use the session's context folder. Applying never runs code; command output/exit status enter the transcript and accompany your next prompt in bounded user-role history.
 
 Generated operations are reviewed automatically. Use bare `/approve` once to apply the displayed patches and run the command when your request asks for execution. Block numbers and script paths are needed only when the selection is ambiguous. Review shows the target files, command, and risks. `SystemPromptMode=User` supports the same workflow; `/cancel` cancels generation or execution. Commands run with bounded timeouts and captured output.
+
+Session logs save timestamped approval reviews, source hashes, file changes and command stdout/stderr, exit codes, timeouts and cancellation outcomes. `/logs` shows the saved JSONL path and recent operation records. `-NoPersist` keeps records in memory, as indicated in the TUI. If a required approval log cannot be saved, no files are changed or commands started; the TUI retains the error in memory.
 
 ## Troubleshooting
 

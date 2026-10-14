@@ -2,7 +2,7 @@ function Initialize-PackCommands {
     Add-PackCommand help {
         param($c)
         ($script:Harness.Commands.List() | ForEach-Object { "/$($_.Name) — $($_.Description)" }) -join "`n"
-    } 'List commands. PgUp/PgDn scroll; Ctrl+Home/End top/latest; F5 run; F10 apply; Ctrl+C cancels.'
+    } 'List commands. PgUp/PgDn scroll; F5 review and approve; F10 discard; F12 logs; Ctrl+C cancels.'
     Add-PackCommand model {
         param($c) if ($c.Arguments) {
             $c.State.Config.Model = $c.Arguments
@@ -64,6 +64,22 @@ function Initialize-PackCommands {
                     "[$($_.Role)] $($_.Text)"
                 }) -join "`n"
     } 'Show transcript.'
+    Add-PackCommand logs {
+        param($c)
+        $location = if ($c.State.Persist) {
+            'Session log: ' + (Join-Path $c.State.Config.SessionDirectory ($c.State.SessionId + '.jsonl'))
+        }
+        else {
+            'Session log: memory only (persistence disabled).'
+        }
+        $entries = @($c.State.Transcript | Where-Object Role -In @('approval', 'patch', 'patch-rollback', 'run', 'request-failure') | Select-Object -Last 20)
+        $location + "`n" + $(if ($entries.Count) {
+                ($entries | ForEach-Object { "[$($_.Time)] [$($_.Role)] $($_.Text)" }) -join "`n`n"
+            }
+            else {
+                'No operations logged yet.'
+            })
+    } 'Show the session log location and the latest approvals, file changes and command output.'
     Add-PackCommand save {
         param($c) if (-not $c.Arguments) {
             throw 'Usage: /save path.ps1'

@@ -234,6 +234,7 @@ function New-PackOperation {
             })
         WorkingDirectory = Get-PackOperationDirectory $State; TimeoutSeconds = $State.Config.RunTimeoutSeconds
         SaveEncoding  = $State.Config.SaveEncoding
+        Id            = [guid]::NewGuid().ToString('N')
         ResultHash = Get-PackResultHash $State.LastResult; Risks = $risks.ToArray(); Result = $State.LastResult; Completed = $false
     }
 }
@@ -288,14 +289,56 @@ function Format-PackOperation {
     $parts -join "`n"
 }
 function Set-PackOperationReview {
-    param($State, [string]$Text, $Operation = $null)
+    param($State, [string]$Text, $Operation = $null, [string]$Status = '')
     if ($Operation -and -not [object]::ReferenceEquals((Get-PackPendingOperation $State), $Operation)) {
         return
     }
+    if (-not $Status) {
+        $Status = if (-not $Operation) {
+            'Needs selection'
+        }
+        elseif ($Operation.Completed) {
+            if ($Operation.PSObject.Properties['Failed'] -and $Operation.Failed) {
+                'Failed'
+            }
+            else {
+                'Completed'
+            }
+        }
+        elseif ($Operation.PSObject.Properties['Cancelled'] -and $Operation.Cancelled) {
+            'Cancelled'
+        }
+        else {
+            'Ready'
+        }
+    }
+    $label = if ($Operation -and $Operation.PSObject.Properties['Kind']) {
+        if ($Operation.Kind -eq 'Run') {
+            'Run'
+        }
+        elseif ($Operation.RunAfter) {
+            'Apply + run'
+        }
+        else {
+            'Apply files'
+        }
+    }
+    else {
+        'Operation'
+    }
+    $presentation = @{ Status = $Status; Label = $label; Review = $Text
+        Id = $(if ($Operation -and $Operation.PSObject.Properties['Id']) {
+                $Operation.Id
+            }
+            else {
+                ''
+            })
+    }
     if ($State.LastResult) {
         $State.LastResult | Add-Member NoteProperty OperationReview $Text -Force
+        $State.LastResult | Add-Member NoteProperty Operation $presentation -Force
     }
-    $null = $script:Harness.Events.Publish('ext.powershell.OperationPrepared', @{ SessionId = $State.SessionId; Text = $Text })
+    $null = $script:Harness.Events.Publish('ext.powershell.OperationPrepared', @{ SessionId = $State.SessionId; Text = $Text; Operation = $presentation })
 }
 function Set-PackOperation {
     param($State, $Operation)
@@ -488,6 +531,20 @@ function Invoke-PackApprovedOperation {
     foreach ($file in $operation.Files) {
         Assert-PackPatchTarget $Context.State $file
     }
+    try {
+        $script:Harness.AddTranscript($Context.State, 'approval', $review, @{
+                Kind = $operation.Kind; RunAfter = $operation.RunAfter; ResultHash = $operation.ResultHash
+                Paths = @($operation.Files.Path); EntryPath = $operation.RunPath
+                WorkingDirectory = $operation.WorkingDirectory; TimeoutSeconds = $operation.TimeoutSeconds
+            })
+    }
+    catch {
+        $operation.Completed = $true
+        $operation | Add-Member NoteProperty Failed $true -Force
+        $operation | Add-Member NoteProperty FailureMessage $_.Exception.GetBaseException().Message -Force
+        Set-PackOperationReview $Context.State (Format-PackOperation $operation) $operation
+        throw
+    }
     $written = [Collections.Generic.List[object]]::new()
     try {
         foreach ($file in $operation.Files) {
@@ -578,7 +635,7 @@ function Invoke-PackApprovedOperation {
         $scriptPath = [string]$operation.RunPath
         $assertOperation = ${function:Assert-PackOperationCurrent}
         $runApproval = { & $assertOperation $Context.State $operation -AllowCompleted; $true }.GetNewClosure()
-        Set-PackOperationReview $Context.State 'The approved operation is running.' $operation
+        Set-PackOperationReview $Context.State 'The approved operation is running.' $operation -Status Running
         try {
             $result = $script:Harness.Actions.Invoke('run', $Context.State, $operation.Block, $scriptPath, $runApproval)
             $operation | Add-Member NoteProperty Failed ($result.ExitCode -ne 0) -Force
@@ -622,7 +679,7 @@ function Invoke-PackCancelCommand {
     }
     if ($running) {
         $review = 'Cancellation requested for the approved operation.'
-        Set-PackOperationReview $Context.State $review $operation
+        Set-PackOperationReview $Context.State $review $operation -Status Cancelling
         return $review
     }
     $review = Format-PackOperation $operation
