@@ -11,11 +11,27 @@ function Get-HarnessChangedRows {
         $after = @($Frame.Rows[$index].Segments)
         $changed = $before.Count -ne $after.Count
         for ($segment = 0; -not $changed -and $segment -lt $after.Count; $segment++) {
-            $changed = $before[$segment].Text -cne $after[$segment].Text -or
+            $changed = -not [string]::Equals($before[$segment].Text, $after[$segment].Text, [StringComparison]::Ordinal) -or
             $before[$segment].Color -cne $after[$segment].Color
         }
         if ($changed) {
             $index
+        }
+    }
+}
+function Write-HarnessTerminalFrameText {
+    param($ConsoleApi, [string]$Text, [scriptblock]$ServiceInput)
+    # Bound native writes during initial scrollback archival. UTF-16 surrogate pairs
+    # stay together; ANSI sequences are trusted renderer sequences in a terminal stream.
+    for ($offset = 0; $offset -lt $Text.Length; ) {
+        $count = [Math]::Min(16384, $Text.Length - $offset)
+        if ($offset + $count -lt $Text.Length -and [char]::IsHighSurrogate($Text[$offset + $count - 1])) {
+            $count--
+        }
+        $ConsoleApi.Write($Text.Substring($offset, $count))
+        $offset += $count
+        if ($ServiceInput) {
+            & $ServiceInput
         }
     }
 }
@@ -367,18 +383,28 @@ function New-HarnessConsoleTerminal {
     $terminal | Add-Member ScriptMethod Restore { & $restoreState $this }.GetNewClosure()
     $changedRows = ${function:Get-HarnessChangedRows}
     $inlineDraw = ${function:Get-HarnessInlineDraw}
+    $safeText = ${function:ConvertTo-HarnessSafeText}
+    $writeFrame = ${function:Write-HarnessTerminalFrameText}
     $terminal | Add-Member ScriptMethod Draw {
-        param($Frame)
+        param($Frame, [scriptblock]$ServiceInput)
         if ($this.Inline) {
-            $draw = & $inlineDraw $this.InlineState $Frame
-            $this.Api.Write($draw.Text)
+            $draw = & $inlineDraw $this.InlineState $Frame $ServiceInput
+            & $writeFrame $this.Api $draw.Text $ServiceInput
             $this.InlineState = $draw.State
+            $this.Previous = $Frame
+            return
+        }
+        $changed = @(& $changedRows $this.Previous $Frame)
+        if (-not $changed.Count) {
+            if ($this.Previous.CursorRow -ne $Frame.CursorRow -or $this.Previous.CursorColumn -ne $Frame.CursorColumn) {
+                & $writeFrame $this.Api "`e[$($Frame.CursorRow+1);$($Frame.CursorColumn+1)H" $ServiceInput
+            }
             $this.Previous = $Frame
             return
         }
         $builder = [Text.StringBuilder]::new()
         $null = $builder.Append("`e[?25l")
-        foreach ($index in @(& $changedRows $this.Previous $Frame)) {
+        foreach ($index in $changed) {
             $null = $builder.Append("`e[$($index+1);1H`e[2K")
             foreach ($segment in $Frame.Rows[$index].Segments) {
                 $color = if ($segment.Color -eq 'Default') {
@@ -387,12 +413,12 @@ function New-HarnessConsoleTerminal {
                 else {
                     $PSStyle.Foreground.($segment.Color)
                 }
-                $null = $builder.Append($color).Append($segment.Text)
+                $null = $builder.Append($color).Append((& $safeText $segment.Text))
             }
             $null = $builder.Append($PSStyle.Reset)
         }
         $null = $builder.Append("`e[$($Frame.CursorRow+1);$($Frame.CursorColumn+1)H`e[?25h")
-        $this.Api.Write($builder.ToString())
+        & $writeFrame $this.Api $builder.ToString() $ServiceInput
         $this.Previous = $Frame
     }.GetNewClosure()
     $safeText = ${function:ConvertTo-HarnessSafeText}

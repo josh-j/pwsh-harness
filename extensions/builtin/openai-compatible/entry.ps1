@@ -28,7 +28,11 @@
     $Harness.Providers.Add('OpenAICompatible', {
             param($request, $callback, $token)
             $response = Invoke-HarnessHttpProvider $request $callback $token
-            New-HarnessChatResponse -Text $response.Text -Usage $response.Usage -FinishReason $response.FinishReason
+            $result = New-HarnessChatResponse -Text $response.Text -Usage $response.Usage -FinishReason $response.FinishReason
+            if ($request.PSObject.Properties['AgentTools'] -and $request.AgentTools) {
+                $result | Add-Member NoteProperty Metadata $response.Metadata
+            }
+            $result
         }, @{
             Streaming = $true
             Usage     = $true

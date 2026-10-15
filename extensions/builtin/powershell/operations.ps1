@@ -20,32 +20,7 @@ function Get-PackOperationDirectory {
 }
 function Resolve-PackOperationPath {
     param($State, [string]$Path)
-    $root = Get-PackOperationDirectory $State
-    $candidate = [IO.Path]::GetFullPath($Path, $root)
-    $comparison = if ($IsWindows) {
-        [StringComparison]::OrdinalIgnoreCase
-    }
-    else {
-        [StringComparison]::Ordinal
-    }
-    if (-not $candidate.StartsWith($root.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar, $comparison)) {
-        throw 'Patch target must be inside the current context directory.'
-    }
-    $ancestor = $candidate
-    while ($ancestor -and $ancestor.Length -ge $root.Length) {
-        $item = $null
-        try {
-            $item = Get-Item -LiteralPath $ancestor -Force -ErrorAction Stop
-        }
-        catch [Management.Automation.ItemNotFoundException] {
-            $item = $null
-        }
-        if ($item -and $item.LinkType) {
-            throw 'Patch targets through symbolic links require a physical context path.'
-        }
-        $ancestor = [IO.Path]::GetDirectoryName($ancestor)
-    }
-    $candidate
+    $script:Harness.OperationControl.ResolvePath((Get-PackOperationDirectory $State), $Path)
 }
 function Get-PackFileHeader {
     param([string]$Code, $State)
@@ -277,6 +252,9 @@ function New-PackOperation {
 }
 function Format-PackOperation {
     param($Operation)
+    if ($Operation.PSObject.Properties['ToolCall']) {
+        return Format-PackToolReview $Operation
+    }
     if ($Operation.Completed) {
         if ($Operation.PSObject.Properties['Failed'] -and $Operation.Failed) {
             $reason = if ($Operation.PSObject.Properties['FailureMessage']) {
@@ -293,6 +271,9 @@ function Format-PackOperation {
         return 'This operation was cancelled. Prepare another operation to continue.'
     }
     $parts = [Collections.Generic.List[string]]::new()
+    if (@($Operation.Result.Edits | Where-Object Rule -EQ 'Analyzer.Format').Count) {
+        $parts.Add('Formatting was applied before review. Approval binds the formatted candidate shown below.')
+    }
     $parts.Add($(if ($Operation.Kind -eq 'Patch') {
                 'Proposed file changes:'
             }
@@ -350,7 +331,10 @@ function Set-PackOperationReview {
         }
     }
     $label = if ($Operation -and $Operation.PSObject.Properties['Kind']) {
-        if ($Operation.Kind -eq 'Run') {
+        if ($Operation.Kind -eq 'Tool') {
+            'Tool: ' + $Operation.ToolCall.Name
+        }
+        elseif ($Operation.Kind -eq 'Run') {
             'Run'
         }
         elseif ($Operation.RunAfter) {
@@ -375,13 +359,14 @@ function Set-PackOperationReview {
         $State.LastResult | Add-Member NoteProperty OperationReview $Text -Force
         $State.LastResult | Add-Member NoteProperty Operation $presentation -Force
     }
+    $script:Harness.OperationControl.PublishReview($State, $Text, $presentation)
     $null = $script:Harness.Events.Publish('ext.powershell.OperationPrepared', @{ SessionId = $State.SessionId; Text = $Text; Operation = $presentation })
 }
 function Set-PackOperation {
     param($State, $Operation)
+    Initialize-PackOperationFlow $State $Operation
     $script:PackOperationStates[$State.SessionId] = [WeakReference]::new($State)
-    $script:PackOperations.Remove($State) | Out-Null
-    $script:PackOperations.Add($State, $Operation)
+    $script:Harness.OperationControl.SetPending($State, $Operation.Flow, $Operation)
     $review = Format-PackOperation $Operation
     Set-PackOperationReview $State $review $Operation
     $review
@@ -389,11 +374,11 @@ function Set-PackOperation {
 function Get-PackPendingOperation {
     param($State)
     $script:PackOperationStates[$State.SessionId] = [WeakReference]::new($State)
-    $operation = $null
-    if ($script:PackOperations.TryGetValue($State, [ref]$operation)) {
-        return $operation
-    }
-    $null
+    $script:Harness.OperationControl.GetPending($State)
+}
+function Remove-PackOperation {
+    param($State)
+    $script:Harness.OperationControl.ClearPending($State)
 }
 function Get-PackPatchArguments {
     param([string]$Text)
@@ -473,7 +458,7 @@ function Invoke-PackPrepareCommand {
     $arguments = Get-PackPatchArguments $Context.Arguments
     Set-PackOperation $Context.State (New-PackOperation $Context.State -Kind $Kind -Path $arguments.Path -RunAfter:$arguments.RunAfter -BlockIndex $arguments.Block -EntryPath $arguments.EntryPath)
 }
-function Assert-PackOperationCurrent {
+function Test-PackOperationBinding {
     param($State, $Operation, [switch]$AllowCompleted)
     if (-not [object]::ReferenceEquals((Get-PackPendingOperation $State), $Operation)) {
         throw 'The pending operation changed. Review the new operation before approving it.'
@@ -498,29 +483,50 @@ function Assert-PackOperationCurrent {
         throw 'Save encoding changed. Prepare and review a new operation before approving it.'
     }
 }
-function Assert-PackPatchTarget {
-    param($State, $File)
-    $path = Resolve-PackOperationPath $State $file.Path
-    if ([IO.Directory]::Exists($path)) {
-        throw 'A patch target changed into a directory since review.'
+function Initialize-PackOperationFlow {
+    param($State, $Operation)
+    if ($Operation.PSObject.Properties['Flow']) {
+        return
     }
-    $exists = [IO.File]::Exists($path)
-    [byte[]]$bytes = @()
-    if ($exists) {
-        $bytes = [IO.File]::ReadAllBytes($path)
+    $binding = ${function:Test-PackOperationBinding}
+    $validator = { & $binding $State $Operation -AllowCompleted }.GetNewClosure()
+    $encoding = [Text.UTF8Encoding]::new($Operation.SaveEncoding -eq 'utf8BOM')
+    $files = @($Operation.Files | ForEach-Object {
+            [byte[]]$final = $encoding.GetPreamble() + $encoding.GetBytes($_.Content)
+            @{ Path = $_.Path; BeforeExists = $_.Exists; BeforeBytes = $_.Before; BeforeHash = $_.BeforeHash.ToLowerInvariant()
+                FinalBytes = $final; FinalHash = [Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($final))
+            }
+        })
+    $command = if ($Operation.Kind -eq 'Run' -or $Operation.RunAfter) {
+        @{ Source = $Operation.Block.Code; EntryPath = $Operation.RunPath
+            SourceHash = (Get-PackOperationHash $Operation.Block.Code).ToLowerInvariant()
+        }
     }
-    if ($exists -ne $file.Exists -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -cne $file.BeforeHash) {
-        throw 'A patch target changed since review. Prepare the operation again.'
+    else {
+        $null
     }
+    $candidate = New-HarnessPreparedOperation -Id $Operation.Id -Kind $Operation.Kind -ContextRoot $Operation.WorkingDirectory -Files $files -Command $command -Risks $Operation.Risks -Source ($Operation.Result.CodeBlocks.Code | ConvertTo-Json -Compress) -CapturedSettings @{
+        SaveEncoding = $Operation.SaveEncoding; TimeoutSeconds = $Operation.TimeoutSeconds; Prompt = [string]$State.LastPrompt
+    }
+    $Operation | Add-Member NoteProperty Flow ($script:Harness.OperationControl.Prepare($State, $validator, $Operation.TimeoutSeconds, $candidate))
+}
+function Assert-PackOperationCurrent {
+    param($State, $Operation, [switch]$AllowCompleted, $File)
+    Initialize-PackOperationFlow $State $Operation
+    $script:Harness.OperationControl.Transition($Operation.Flow, 'Check', [Threading.CancellationToken]::None, $File)
 }
 function Invoke-PackApproveCommand {
     param($Context)
     $Context.CancellationToken.ThrowIfCancellationRequested()
-    if ($Context.State.Busy) {
-        throw 'Approval is already in progress while this session is running another operation. Wait for it to finish before approving.'
-    }
     if ($Context.Arguments) {
         throw 'Use bare /approve, or prepare an explicit operation with /patch or /run --block N.'
+    }
+    $operation = Get-PackPendingOperation $Context.State
+    if ($operation -and $operation.PSObject.Properties['ToolCall']) {
+        return Invoke-PackToolApproval $Context $operation
+    }
+    if ($Context.State.Busy) {
+        throw 'Approval is already in progress while this session is running another operation. Wait for it to finish before approving.'
     }
     if ($script:Harness.Actions.Contains('approve-extension')) {
         $extension = $script:Harness.Actions.Invoke('approve-extension', $Context.State, (New-HarnessCodeBlock -Code '# staged extension approval'), '', $Context.Confirm)
@@ -528,16 +534,13 @@ function Invoke-PackApproveCommand {
             return $extension
         }
     }
-    $operation = Get-PackPendingOperation $Context.State
     if (-not $operation) {
         $operation = New-PackOperation $Context.State
-        $script:PackOperations.Add($Context.State, $operation)
+        Initialize-PackOperationFlow $Context.State $operation
+        $script:Harness.OperationControl.SetPending($Context.State, $operation.Flow, $operation)
     }
     if ($operation.PSObject.Properties['Cancelled'] -and $operation.Cancelled) {
         return 'This operation was cancelled. Prepare another operation to continue.'
-    }
-    if ($operation.PSObject.Properties['Approving'] -and $operation.Approving) {
-        throw 'Approval is already in progress for this operation.'
     }
     if ($operation.Completed) {
         if ($operation.PSObject.Properties['Failed'] -and $operation.Failed) {
@@ -545,19 +548,34 @@ function Invoke-PackApproveCommand {
         }
         return 'This operation has already completed.'
     }
+    $script:Harness.OperationControl.Transition($operation.Flow, 'EnterReview', $Context.CancellationToken)
     $operation | Add-Member NoteProperty Approving $true -Force
     try {
         Invoke-PackApprovedOperation $Context $operation
     }
+    catch {
+        if ($script:Harness.OperationControl.Transition($operation.Flow, 'Inspect').State -in @('Approved', 'Running')) {
+            $outcome = if ($_.Exception -is [OperationCanceledException] -or $Context.CancellationToken.IsCancellationRequested) {
+                'Cancel'
+            }
+            else {
+                'Fail'
+            }
+            $script:Harness.OperationControl.Transition($operation.Flow, $outcome)
+        }
+        throw
+    }
     finally {
         $operation.Approving = $false
+        $script:Harness.OperationControl.Transition($operation.Flow, 'LeaveReview')
     }
 }
 function Invoke-PackApprovedOperation {
     param($Context, $operation)
     Assert-PackOperationCurrent $Context.State $operation
+    # Capture immutable source values before review/runner callbacks can change the conversation.
     foreach ($file in $operation.Files) {
-        Assert-PackPatchTarget $Context.State $file
+        Assert-PackOperationCurrent $Context.State $operation -File $file
     }
     $review = Format-PackOperation $operation
     if ($Context.Confirm) {
@@ -565,9 +583,7 @@ function Invoke-PackApprovedOperation {
     }
     $Context.CancellationToken.ThrowIfCancellationRequested()
     Assert-PackOperationCurrent $Context.State $operation
-    foreach ($file in $operation.Files) {
-        Assert-PackPatchTarget $Context.State $file
-    }
+    $script:Harness.OperationControl.Transition($operation.Flow, 'Approve', $Context.CancellationToken)
     try {
         $script:Harness.AddTranscript($Context.State, 'approval', $review, @{
                 Kind = $operation.Kind; RunAfter = $operation.RunAfter; ResultHash = $operation.ResultHash
@@ -576,86 +592,16 @@ function Invoke-PackApprovedOperation {
             })
     }
     catch {
+        $script:Harness.OperationControl.Transition($operation.Flow, 'Fail')
         $operation.Completed = $true
         $operation | Add-Member NoteProperty Failed $true -Force
         $operation | Add-Member NoteProperty FailureMessage $_.Exception.GetBaseException().Message -Force
         Set-PackOperationReview $Context.State (Format-PackOperation $operation) $operation
         throw
     }
-    $written = [Collections.Generic.List[object]]::new()
-    try {
-        foreach ($file in $operation.Files) {
-            if ($Context.Pump) {
-                $null = & $Context.Pump
-            }
-            $Context.CancellationToken.ThrowIfCancellationRequested()
-            Assert-PackOperationCurrent $Context.State $operation
-            Assert-PackPatchTarget $Context.State $file
-            $parent = [IO.Path]::GetDirectoryName($file.Path)
-            if (-not [IO.Directory]::Exists($parent)) {
-                $null = [IO.Directory]::CreateDirectory($parent)
-            }
-            $encoding = [Text.UTF8Encoding]::new($operation.SaveEncoding -eq 'utf8BOM')
-            [byte[]]$after = $encoding.GetPreamble() + $encoding.GetBytes($file.Content)
-            $temporary = Join-Path $parent ('.pwsh-harness-' + [guid]::NewGuid().ToString('N') + '.tmp')
-            try {
-                if ($file.Exists) {
-                    [IO.File]::Copy($file.Path, $temporary)
-                }
-                [IO.File]::WriteAllBytes($temporary, $after)
-                $Context.CancellationToken.ThrowIfCancellationRequested()
-                Assert-PackPatchTarget $Context.State $file
-                if ($file.Exists) {
-                    [IO.File]::Replace($temporary, $file.Path, [NullString]::Value)
-                }
-                else {
-                    [IO.File]::Move($temporary, $file.Path)
-                }
-                $written.Add(@{ File = $file; Hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($after)) })
-            }
-            finally {
-                if ([IO.File]::Exists($temporary)) {
-                    [IO.File]::Delete($temporary)
-                }
-            }
-        }
-    }
-    catch {
-        $failure = $_
-        $retained = [Collections.Generic.List[string]]::new()
-        foreach ($entry in $written) {
-            $file = $entry.File
-            try {
-                $path = Resolve-PackOperationPath $Context.State $file.Path
-                if (-not [IO.File]::Exists($path) -or
-                    [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($path))) -cne $entry.Hash) {
-                    throw 'A written target changed before rollback.'
-                }
-                if ($file.Exists) {
-                    [IO.File]::WriteAllBytes($path, $file.Before)
-                }
-                else {
-                    [IO.File]::Delete($path)
-                }
-            }
-            catch {
-                $retained.Add($file.Path)
-            }
-        }
-        if ($retained.Count) {
-            $rollback = @{ Paths = $retained.ToArray() }
-            try {
-                $script:Harness.AddTranscript($Context.State, 'patch-rollback', ('Rollback retained changed or inaccessible targets: ' + ($retained -join ', ')), $rollback)
-            }
-            catch {
-                $rollback.TranscriptFailure = $_.Exception.Message
-            }
-        }
-        throw $failure
-    }
+    $script:Harness.OperationControl.Transition($operation.Flow, 'Start', $Context.CancellationToken)
+    $script:Harness.OperationControl.ApplyFiles($operation.Flow, $Context.Pump, $Context.CancellationToken)
     $operation.Completed = $true
-    $script:PackOperations.Remove($Context.State) | Out-Null
-    $script:PackOperations.Add($Context.State, $operation)
     if ($operation.Files.Count) {
         try {
             $script:Harness.AddTranscript($Context.State, 'patch', ('Patched ' + ($operation.Files.Path -join ', ')), @{ Paths = @($operation.Files.Path) })
@@ -665,6 +611,7 @@ function Invoke-PackApprovedOperation {
             $operation | Add-Member NoteProperty Failed $true -Force
             $operation | Add-Member NoteProperty FailureMessage $failure.Exception.GetBaseException().Message -Force
             Set-PackOperationReview $Context.State (Format-PackOperation $operation) $operation
+            $script:Harness.OperationControl.Transition($operation.Flow, 'Fail')
             throw $failure
         }
     }
@@ -680,6 +627,19 @@ function Invoke-PackApprovedOperation {
                 $operation | Add-Member NoteProperty FailureMessage "Exit code: $($result.ExitCode)." -Force
             }
             Set-PackOperationReview $Context.State (Format-PackOperation $operation) $operation
+            $outcome = if ($result.ExitCode -ne 0) {
+                'Fail'
+            }
+            else {
+                'Complete'
+            }
+            $script:Harness.OperationControl.Transition($operation.Flow, $outcome)
+            Publish-PackOperationCompletion $Context.State $operation $(if ($result.ExitCode -ne 0) {
+                    'failed'
+                }
+                else {
+                    'success'
+                })
             return $result
         }
         catch {
@@ -687,11 +647,45 @@ function Invoke-PackApprovedOperation {
             $operation | Add-Member NoteProperty Failed $true -Force
             $operation | Add-Member NoteProperty FailureMessage $failure.Exception.GetBaseException().Message -Force
             Set-PackOperationReview $Context.State (Format-PackOperation $operation) $operation
+            Publish-PackOperationCompletion $Context.State $operation $(if ($failure.Exception.GetBaseException() -is [OperationCanceledException]) {
+                    'cancelled'
+                }
+                else {
+                    'failed'
+                })
             throw $failure
         }
     }
     Set-PackOperationReview $Context.State (Format-PackOperation $operation) $operation
+    $script:Harness.OperationControl.Transition($operation.Flow, 'Complete')
+    Publish-PackOperationCompletion $Context.State $operation 'applied'
     'Patched ' + ($operation.Files.Path -join ', ')
+}
+function Publish-PackOperationCompletion {
+    param($State, $Operation, [string]$Status)
+    $snapshot = $script:Harness.OperationControl.Transition($Operation.Flow, 'Inspect')
+    $candidate = $snapshot.Candidate
+    $files = @($candidate.Files | ForEach-Object {
+            @{ Path = $_.Path; Source = [Text.Encoding]::UTF8.GetString([byte[]]$_.FinalBytes).TrimStart([char]0xFEFF) }
+        })
+    $source = if ($candidate.Command -and $candidate.Command.EntryPath) {
+        @($files | Where-Object Path -CEQ $candidate.Command.EntryPath)[0].Source
+    }
+    elseif ($candidate.Command) {
+        $candidate.Command.Source
+    }
+    else {
+        $candidate.Source
+    }
+    $completion = @{
+        SessionId = $snapshot.Authorization.SessionId; Id = $candidate.Id; Kind = $candidate.Kind; Status = $Status
+        Source = $source; Files = $files; Prompt = $candidate.CapturedSettings.Prompt
+        Authorization = $snapshot.Authorization
+    }
+    $script:Harness.OperationControl.PublishCompletion($State, $completion)
+    if ($candidate.Command) {
+        $script:Harness.Events.Publish('ext.powershell.OperationCompleted', $completion)
+    }
 }
 function Invoke-PackCancelCommand {
     param($Context)
@@ -703,7 +697,8 @@ function Invoke-PackCancelCommand {
     $running = $operation -and $operation.Completed -and $operation.PSObject.Properties['Approving'] -and $operation.Approving
     if (-not $operation) {
         $operation = [pscustomobject]@{ Completed = $false; Cancelled = $true }
-        $script:PackOperations.Add($Context.State, $operation)
+        $operation | Add-Member NoteProperty Flow ($script:Harness.OperationControl.Prepare($Context.State, { }))
+        $script:Harness.OperationControl.SetPending($Context.State, $operation.Flow, $operation)
     }
     elseif ($running) {
         $operation | Add-Member NoteProperty CancelRequested $true -Force
@@ -711,7 +706,11 @@ function Invoke-PackCancelCommand {
     elseif (-not $operation.Completed) {
         $operation | Add-Member NoteProperty Cancelled $true -Force
     }
-    if ($script:Harness.Actions.Contains('cancel-extension')) {
+    if ($operation.PSObject.Properties['Flow'] -and
+        $script:Harness.OperationControl.Transition($operation.Flow, 'Inspect').State -in @('Prepared', 'Approved', 'Running')) {
+        $script:Harness.OperationControl.Transition($operation.Flow, 'Cancel')
+    }
+    if ($script:Harness.Actions.Contains('cancel-extension') -and -not ($activeRun -and $operation.PSObject.Properties['ToolCall'])) {
         $null = $script:Harness.Actions.Invoke('cancel-extension', $Context.State, (New-HarnessCodeBlock -Code '# cancel staged extension'), '', $null)
     }
     if ($running) {
@@ -790,7 +789,6 @@ function Invoke-PackFixCommand {
     [pscustomobject]@{ Action = 'Send'; Prompt = $parts -join "`n`n" }
 }
 function Register-PackOperations {
-    $script:PackOperations = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
     $script:PackContinuations = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
     $script:PackOperationStates = [Collections.Generic.Dictionary[string, WeakReference]]::new()
     $script:Harness.Commands.Add('patch', { param($context) Invoke-PackPrepareCommand $context }, 'Prepare generated file changes; infer the block, path and entry script when possible. /patch [--run [--entry path]] [--block N] [path]')
@@ -813,7 +811,7 @@ function Register-PackOperations {
         if (-not $state) {
             return
         }
-        $null = $script:PackOperations.Remove($state)
+        Remove-PackOperation $state
         if (-not $state.LastResult -or -not $state.LastResult.CodeBlocks.Count) {
             return
         }
@@ -833,7 +831,7 @@ function Register-PackOperations {
             if ($script:PackOperationStates.ContainsKey($notice.SessionId)) {
                 $state = $script:PackOperationStates[$notice.SessionId].Target
                 if ($state) {
-                    $null = $script:PackOperations.Remove($state)
+                    Remove-PackOperation $state
                     $null = $script:PackContinuations.Remove($state)
                 }
                 $null = $script:PackOperationStates.Remove($notice.SessionId)

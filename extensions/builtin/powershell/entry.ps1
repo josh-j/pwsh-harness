@@ -6,6 +6,7 @@
 . (Join-Path $PSScriptRoot 'language.ps1')
 . (Join-Path $PSScriptRoot 'actions.ps1')
 . (Join-Path $PSScriptRoot 'operations.ps1')
+. (Join-Path $PSScriptRoot 'agent-tools.ps1')
 . (Join-Path $PSScriptRoot 'continuation.ps1')
 . (Join-Path $PSScriptRoot 'catalog.ps1')
 . (Join-Path $PSScriptRoot 'windows.ps1')
@@ -14,6 +15,9 @@
 {
     param($Harness)
     $script:Harness = $Harness
+    $Harness.Events.Declare('ext.powershell.OperationPrepared', 1, @{ SessionId = [string]; Text = [string]; Operation = @{ Type = [object]; Nullable = $true } })
+    $Harness.Events.Declare('ext.powershell.OperationCompleted', 1, @{ SessionId = [string]; Id = [string]; Kind = [string]; Status = [string]; Source = [string]; Files = [Collections.IEnumerable]; Prompt = [string]; Authorization = @{ Type = [object]; Required = $false } })
+    Register-PackAnalyzer
     Register-PackAmplification
     Register-PackExamples
     $Harness.Actions.Add('verify', ${function:Invoke-PackVerification}, $true, '', '', ${function:Get-PackVerificationReview})
@@ -25,6 +29,8 @@
     $Harness.ContextSources.Add('CommandSyntax', ${function:Get-PackSyntaxContext}, 400)
     Register-PackHistoryCompactors
     Register-PackOperations
+    Register-PackAgentRuntime
+    $Harness.Commands.Add('tool', ${function:Invoke-PackToolCommand}, 'Prepare one built-in agent tool: /tool read|write|edit|pwsh {arguments}; mutations require /approve.')
     $Harness.Settings.Declare('RepairPolicy', [string], 'powershell.parser')
     $Harness.Settings.Declare('Temperature', [double], 0.2, { param($v) if ($v -lt 0 -or $v -gt 2 -or [double]::IsNaN($v)) {
                 'Temperature must be between 0 and 2.'
@@ -106,7 +112,7 @@
             if (-not $config.Analyzer) {
                 return
             }
-            $v = Test-PackCode $block.Code -AnalyzerRules $config.AnalyzerRules
+            $v = Test-PackCode $block.Code -AnalyzerRules $config.AnalyzerRules -AnalyzerConfig $config
             foreach ($d in $v.Analyzer) {
                 $severity = if ($d.Severity -eq 'Information') {
                     'Info'

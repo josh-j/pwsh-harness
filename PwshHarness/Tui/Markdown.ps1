@@ -32,7 +32,7 @@ function Get-HarnessMarkdownInlineSegments {
             [pscustomobject]@{ Text = ' (' + $match.Groups['url'].Value + ')'; Color = 'BrightBlack' }
         }
         elseif ($match.Groups['strong'].Success) {
-            Get-HarnessMarkdownInlineSegments $match.Groups['bold'].Value BrightWhite ($Depth + 1)
+            Get-HarnessMarkdownInlineSegments $match.Groups['bold'].Value Magenta ($Depth + 1)
         }
         else {
             Get-HarnessMarkdownInlineSegments $match.Groups['italic'].Value Magenta ($Depth + 1)
@@ -104,8 +104,57 @@ function New-HarnessStyledRow {
     [pscustomobject]@{ Text = ($styled.Text -join ''); Segments = $merged.ToArray() }
 }
 
+function Get-HarnessMarkdownLineRows {
+    param([AllowEmptyString()][string]$Text, [int]$Width, [string]$Prefix, [string]$Color,
+        [bool]$Code, [bool]$PowerShell, [bool]$Literal, [hashtable]$LineCache, [hashtable]$NextLineCache)
+    $key = "$Width|$Prefix|$Color|$Code|$PowerShell|$Literal|$Text"
+    $rows = if ($LineCache -and $LineCache.ContainsKey($key)) {
+        $LineCache[$key]
+    }
+    elseif ($null -ne $NextLineCache -and $NextLineCache.ContainsKey($key)) {
+        $NextLineCache[$key]
+    }
+    else {
+        if ($Literal) {
+            @(foreach ($part in @(Split-HarnessDisplayLine $Text $Width)) {
+                    New-HarnessFrameRow $part -Color $Color
+                })
+        }
+        else {
+            $segments = if ($Code) {
+                @(Get-HarnessHighlightedLine $Text $PowerShell)
+            }
+            else {
+                @(Get-HarnessMarkdownInlineSegments $Text $Color)
+            }
+            @(Split-HarnessStyledRows $segments $Width $Prefix)
+        }
+    }
+    if ($null -ne $NextLineCache -and $NextLineCache.Count -lt 8192 -and $Text.Length -le 16384 -and -not $NextLineCache.ContainsKey($key)) {
+        $rowCount = if ($NextLineCache.ContainsKey('_RowCount')) {
+            $NextLineCache['_RowCount']
+        }
+        else {
+            0
+        }
+        $keyChars = if ($NextLineCache.ContainsKey('_KeyChars')) {
+            $NextLineCache['_KeyChars']
+        }
+        else {
+            0
+        }
+        if ($rowCount + @($rows).Count -le 32768 -and $keyChars + $key.Length -le 2000000) {
+            $NextLineCache[$key] = @($rows)
+            $NextLineCache['_RowCount'] = $rowCount + @($rows).Count
+            $NextLineCache['_KeyChars'] = $keyChars + $key.Length
+        }
+    }
+    $rows
+}
+
 function Get-HarnessMarkdownRows {
-    param([AllowEmptyString()][string]$Text, [int]$Width, [bool]$Ascii = $false, [object[]]$CodeBlocks = @())
+    param([AllowEmptyString()][string]$Text, [int]$Width, [bool]$Ascii = $false, [object[]]$CodeBlocks = @(),
+        [hashtable]$LineCache, [hashtable]$NextLineCache)
     $lines = [regex]::Split($Text, '\r\n|\n|\r')
     # Share extraction boundaries, including PowerShell here-strings containing fences.
     $fences = @(Get-HarnessPowerShellFencedBlock $Text)
@@ -127,8 +176,13 @@ function Get-HarnessMarkdownRows {
                 $blockIndex++
                 $heading = "--- $language #$blockIndex ---"
             }
-            foreach ($part in @(Split-HarnessDisplayLine $heading $Width)) {
-                New-HarnessFrameRow $part -Color Cyan
+            if ($null -eq $LineCache -and $null -eq $NextLineCache) {
+                foreach ($part in @(Split-HarnessDisplayLine $heading $Width)) {
+                    New-HarnessFrameRow $part -Color Cyan
+                }
+            }
+            else {
+                Get-HarnessMarkdownLineRows $heading $Width '' Cyan $false $false $true $LineCache $NextLineCache
             }
             $prefix = if ($Ascii) {
                 '| '
@@ -138,7 +192,12 @@ function Get-HarnessMarkdownRows {
             }
             foreach ($line in [regex]::Split($code, '\r\n|\n|\r')) {
                 $safe = ConvertTo-HarnessSafeText $line
-                Split-HarnessStyledRows @(Get-HarnessHighlightedLine $safe $powerShell) $Width $prefix
+                if ($null -eq $LineCache -and $null -eq $NextLineCache) {
+                    Split-HarnessStyledRows @(Get-HarnessHighlightedLine $safe $powerShell) $Width $prefix
+                }
+                else {
+                    Get-HarnessMarkdownLineRows $safe $Width $prefix Default $true $powerShell $false $LineCache $NextLineCache
+                }
             }
             $index = $fence.EndLine - 1
             continue
@@ -181,6 +240,76 @@ function Get-HarnessMarkdownRows {
                     '• '
                 }) + $Matches.item
         }
-        Split-HarnessStyledRows @(Get-HarnessMarkdownInlineSegments $line $color) $Width $prefix
+        if ($null -eq $LineCache -and $null -eq $NextLineCache) {
+            Split-HarnessStyledRows @(Get-HarnessMarkdownInlineSegments $line $color) $Width $prefix
+        }
+        else {
+            Get-HarnessMarkdownLineRows $line $Width $prefix $color $false $false $false $LineCache $NextLineCache
+        }
+    }
+}
+
+function Get-HarnessStreamingMarkdown {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseLiteralInitializerForHashtable', '', Justification = 'Rendered text keys require ordinal case-sensitive equality, unlike literal PowerShell hashtables.')]
+    param([AllowEmptyString()][string]$Text, [int]$Width, [bool]$Ascii, $Cache)
+    $prefixLength = 0
+    $stableRows = [Collections.Generic.List[object]]::new()
+    $lineCache = $null
+    $nextLines = [hashtable]::new([StringComparer]::Ordinal)
+    if ($Cache -and $Cache.Width -eq $Width -and $Cache.Ascii -eq $Ascii -and
+        $Text.StartsWith($Cache.Prefix, [StringComparison]::Ordinal)) {
+        $prefixLength = $Cache.Prefix.Length
+        $stableRows.AddRange([object[]]$Cache.Rows)
+        $lineCache = $Cache.Lines
+    }
+    $suffix = $Text.Substring($prefixLength)
+    $lines = [regex]::Matches($suffix, '[^\r\n]*(?:\r\n|\n|\r|$)')
+    # Keep the last two source lines mutable: setext lookahead, partial fences and CRLF
+    # can change their interpretation when the next chunk arrives.
+    $commitLine = [Math]::Max(0, $lines.Count - 2)
+    if ($commitLine -gt 0 -and $lines[$commitLine].Value.TrimEnd("`r", "`n") -match '^ {0,3}(?:=+|-+)\s*$') {
+        $commitLine--
+    }
+    $commitOffset = $lines[$commitLine].Index
+    foreach ($fence in @(Get-HarnessPowerShellFencedBlock $suffix)) {
+        $unstable = -not $fence.IsTerminated
+        if ($fence.IsTerminated -and $fence.Language -in @('powershell', 'pwsh', 'ps1')) {
+            # An incomplete literal can later extend a CommonMark boundary through a
+            # nested fence. Conservatively keep any errored PowerShell fence mutable.
+            $tokens = $null; $errors = $null
+            $null = [Management.Automation.Language.Parser]::ParseInput($fence.Code, [ref]$tokens, [ref]$errors)
+            $unstable = $errors.Count -gt 0
+        }
+        if ($fence.StartOffset -lt $commitOffset -and
+            ($unstable -or $fence.StartOffset + $fence.Length -ge $commitOffset)) {
+            $commitOffset = $fence.StartOffset
+            break
+        }
+    }
+    if ($commitOffset -gt 0) {
+        $committed = @(Get-HarnessMarkdownRows $suffix.Substring(0, $commitOffset) $Width $Ascii @() $lineCache)
+        # Splitting at a line boundary creates an artificial trailing empty row.
+        # The suffix renderer owns that line; real blank lines remain in the prefix.
+        if ($committed.Count -and $committed[-1].Text -eq '') {
+            $stableRows.AddRange([object[]]@($committed | Select-Object -SkipLast 1))
+        }
+        else {
+            $stableRows.AddRange([object[]]$committed)
+        }
+        $prefixLength += $commitOffset
+    }
+    $tail = @(Get-HarnessMarkdownRows $Text.Substring($prefixLength) $Width $Ascii @() $lineCache $nextLines)
+    $rows = [Collections.Generic.List[object]]::new()
+    $rows.AddRange($stableRows.ToArray())
+    $rows.AddRange([object[]]$tail)
+    [pscustomobject]@{
+        Rows         = $rows.ToArray()
+        Cache        = if ($stableRows.Count -le 32768 -and $prefixLength -le 2000000) {
+            [pscustomobject]@{ Width = $Width; Ascii = $Ascii; Prefix = $Text.Substring(0, $prefixLength); Rows = $stableRows.ToArray(); Lines = $nextLines }
+        }
+        else {
+            $null
+        }
+        MutableChars = $Text.Length - $prefixLength
     }
 }

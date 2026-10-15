@@ -3,6 +3,13 @@
     ModuleVersion     = '1.0.0'
     PowerShellVersion = '7.6'
     FunctionsToExport = @(
+        'Get-HarnessPathSnapshot', 'Read-HarnessTextFile',
+        'Get-HarnessSecretPatterns', 'Get-HarnessSecretSuffixLength', 'Protect-HarnessText'
+        'New-HarnessToolCall', 'Assert-HarnessToolCall',
+        'New-HarnessToolResult', 'Assert-HarnessToolResult',
+        'New-HarnessAgentRun', 'Assert-HarnessAgentRun',
+        'New-HarnessAgentRunSummary', 'Assert-HarnessAgentRunSummary',
+        'New-HarnessPreparedOperation', 'Assert-HarnessPreparedOperation',
         'Get-HarnessFencedBlock'
         'Assert-HarnessContract'
         'New-HarnessMessage'

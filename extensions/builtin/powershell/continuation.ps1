@@ -10,13 +10,16 @@ function Test-PackContinuationField {
     $null -ne $Record -and $null -ne $Record.PSObject.Properties[$Name]
 }
 function Get-PackContinuationText {
-    param([string]$Text, [int]$Limit)
+    param([string]$Text, [int]$Limit, [switch]$ContentOnly)
     if ($Text.Length -le $Limit) {
         return $Text
     }
     $length = $Limit
     if ([char]::IsHighSurrogate($Text[$length - 1])) {
         $length--
+    }
+    if ($ContentOnly) {
+        return $Text.Substring(0, $length)
     }
     $Text.Substring(0, $length) + "`n[truncated; complete record in /logs]"
 }

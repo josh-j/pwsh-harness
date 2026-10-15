@@ -33,7 +33,7 @@ function Get-DefaultHarnessHost {
         }
         $ConfigPath = Join-Path (Join-Path $base $directory) 'config.json'
     }
-    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ConfigPath)
+    $resolved = [IO.Path]::GetFullPath($ConfigPath)
     if ($IsWindows) {
         $resolved = $resolved.ToUpperInvariant()
     }

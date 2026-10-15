@@ -50,6 +50,9 @@ function Build-EngineRequestStage {
             if ($_.PSObject.Properties['BudgetGroup']) {
                 $copy | Add-Member NoteProperty BudgetGroup $_.BudgetGroup
             }
+            if ($_.PSObject.Properties['NativeBatch']) {
+                $copy | Add-Member NoteProperty NativeBatch $_.NativeBatch
+            }
             $copy
         }) -Model $Turn.Config.Model -Config (Copy-EngineConfigValue $Turn.Config) -State $Turn.Session -Prompt $Turn.Prompt
     $modelProfile = Get-EngineProfile $Turn.Store $Turn.Config
@@ -95,6 +98,11 @@ function Invoke-EngineMiddlewareStage {
         }
     }
     Assert-HarnessChatRequest $Turn.Request
+    if ($Turn.Request.PSObject.Properties['AgentTools']) {
+        foreach ($message in $Turn.Request.Messages) {
+            $message.Content = $Turn.Store.Host.OperationControl.ProtectText($Turn.Session, $message.Content)
+        }
+    }
     Limit-EngineRequest $Turn
     Publish-EngineEvent $Turn.Store RequestPrepared $Turn.Request
 }
@@ -142,7 +150,11 @@ function Send-EngineRequestStage {
     Update-EngineCalibration $Turn.Store $Turn.Config $usage.prompt_tokens $estimated
     Publish-EngineEvent $Turn.Store ResponseReceived $Turn.Response
     $Turn.StitchedText += $Turn.Response.Text
+    $metadata = $Turn.Response.PSObject.Properties['Metadata'] ? $Turn.Response.Metadata : $null
     $Turn.Response = New-HarnessChatResponse -Text $Turn.StitchedText -Usage $Turn.Response.Usage -FinishReason $Turn.Response.FinishReason
+    if ($metadata) {
+        $Turn.Response | Add-Member NoteProperty Metadata $metadata
+    }
 }
 function Invoke-EngineProcessResponse {
     # Input: Store, ChatResponse, Config, Session, repair count, optional persisted metadata. Output: TurnResult.
@@ -369,12 +381,22 @@ function Invoke-EngineSamplingStage {
         break
     }
 }
-function Invoke-EngineTurnRunner {
-    param($Store, [string]$Prompt, $State, [scriptblock]$OnToken, [Threading.CancellationToken]$CancellationToken, [scriptblock]$OnIdle = $null)
-    $CancellationToken.ThrowIfCancellationRequested()
-    if (-not $Store.Points.RepairPolicies.ContainsKey($State.Config.RepairPolicy)) {
-        throw "Unknown repair policy '$($State.Config.RepairPolicy)'."
+function Set-EngineRepairMessages {
+    param($Turn, [string]$Message)
+    $failing = if ($Turn.Result.CodeBlocks.Count) {
+        '```' + $Turn.Result.CodeBlocks[0].Language + "`n" + $Turn.Result.CodeBlocks[0].Code + "`n" + '```'
     }
+    else {
+        $Turn.Response.Text
+    }
+    $Turn.MinimalMessages = @(
+        (New-HarnessMessage -Role (Get-EngineInstructionRole $Turn.Config) -Content $Turn.Config.SystemPrompt)
+        (New-HarnessMessage user $Turn.Prompt)
+        (New-HarnessMessage assistant $failing)
+        (New-HarnessMessage user $Message))
+}
+function New-EngineTurn {
+    param($Store, [string]$Prompt, $State, [scriptblock]$OnToken, [Threading.CancellationToken]$CancellationToken, [scriptblock]$OnIdle)
     $Turn = [pscustomobject]@{
 
 
@@ -409,6 +431,15 @@ function Invoke-EngineTurnRunner {
             $null = & $OnToken $fragment $session
         }
     }.GetNewClosure()
+    $Turn
+}
+function Invoke-EngineTurnRunner {
+    param($Store, [string]$Prompt, $State, [scriptblock]$OnToken, [Threading.CancellationToken]$CancellationToken, [scriptblock]$OnIdle = $null)
+    $CancellationToken.ThrowIfCancellationRequested()
+    if (-not $Store.Points.RepairPolicies.ContainsKey($State.Config.RepairPolicy)) {
+        throw "Unknown repair policy '$($State.Config.RepairPolicy)'."
+    }
+    $Turn = New-EngineTurn $Store $Prompt $State $OnToken $CancellationToken $OnIdle
     $State.LastPrompt = $Prompt
     $State.History.Add($Prompt)
     $State.Busy = $true
@@ -442,17 +473,7 @@ function Invoke-EngineTurnRunner {
             $Turn.Exchange.Add((New-HarnessMessage user $decision.Message))
             $Turn.RequestKind = $decision.Kind
             if ($decision.Kind -eq 'Repair') {
-                $failing = if ($Turn.Result.CodeBlocks.Count) {
-                    '```' + $Turn.Result.CodeBlocks[0].Language + "`n" + $Turn.Result.CodeBlocks[0].Code + "`n" + '```'
-                }
-                else {
-                    $Turn.Response.Text
-                }
-                $Turn.MinimalMessages = @(
-                    (New-HarnessMessage -Role (Get-EngineInstructionRole $Turn.Config) -Content $Turn.Config.SystemPrompt)
-                    (New-HarnessMessage user $Turn.Prompt)
-                    (New-HarnessMessage assistant $failing)
-                    (New-HarnessMessage user $decision.Message))
+                Set-EngineRepairMessages $Turn $decision.Message
             }
             if ($decision.Kind -eq 'Continue') {
                 $Turn.Continuations++

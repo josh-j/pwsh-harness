@@ -8,6 +8,28 @@ function Get-HarnessFrontendErrorMessage {
     }
     $exception.Message
 }
+function Assert-HarnessFrontendAgentResult {
+    param($Result, $Session)
+    if (-not (Test-HarnessRecordProperty $Result 'AgentSummary') -or $Result.AgentSummary.StopReason -cin @('Complete', 'AwaitingApproval')) {
+        return
+    }
+    if ($Result.AgentSummary.StopReason -ceq 'Cancelled') {
+        throw [OperationCanceledException]::new('Request cancelled.')
+    }
+    $message = if ($Session.Status) {
+        $Session.Status
+    }
+    else {
+        'Agent stopped: ' + $Result.AgentSummary.StopReason
+    }
+    throw (ConvertTo-HarnessSafeText $message)
+}
+function Set-HarnessAgentView {
+    param($View, $Agent)
+    $View.StatusBar.Mode = $Agent.Mode.ToUpperInvariant()
+    $View.StatusBar.Steps = "steps:$($Agent.RemainingSteps)/$($Agent.MaxSteps)"
+    $View.Dirty = $true
+}
 function Set-HarnessViewSnapshot {
     param($View, $Snapshot, [switch]$Conversation)
     if ($Conversation) {
@@ -47,6 +69,7 @@ function Set-HarnessViewSnapshot {
     }
     $View.Editor.HistoryIndex = $View.Editor.History.Count
     $bar = $View.StatusBar
+    Set-HarnessAgentView $View $Snapshot.Agent
     $bar.Inline = $Snapshot.Config.'Tui.Inline'
     $bar.ContinueAfterAction = $Snapshot.Config.'Tui.ContinueAfterAction'
     $bar.ReviewOnEmptyEnter = $Snapshot.Config.'Tui.ReviewOnEmptyEnter'
@@ -116,6 +139,8 @@ function Read-HarnessOperationReview {
     $review = New-HarnessViewState
     $review.ReviewMode = $true
     $review.StatusBar.Ascii = $View.StatusBar.Ascii
+    $review.StatusBar.Mode = $View.StatusBar.Mode
+    $review.StatusBar.Steps = $View.StatusBar.Steps
     $review.SessionView.Records.Add([pscustomobject]@{ Role = 'review'; Text = $Text })
     $review.Viewport.ScrollOffset = [int]::MaxValue
     $dimensions = ''
@@ -176,16 +201,32 @@ function Invoke-HarnessFrontendShortcut {
     }
 }
 function Get-HarnessActiveRenderModel {
-    param($View, $HarnessHost, [int]$Width, [int]$Height)
+    param($View, $HarnessHost, [int]$Width, [int]$Height, $RenderWorker, [scriptblock]$ServiceInput, [scriptblock]$Wait,
+        [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
     try {
+        if (-not (Invoke-HarnessRenderWarmup $View $RenderWorker $Width $Height $ServiceInput $Wait $CancellationToken)) {
+            return $null
+        }
         $frame = $HarnessHost.Renderers.Render($View.Renderer, $View, $Width, $Height)
         if (-not $frame -or -not $frame.PSObject.Properties['Rows'] -or $frame.Rows.Count -ne $frame.Height -or
             $frame.Status -isnot [string] -or $frame.Width -ne [Math]::Max(20, $Width) -or $frame.Height -ne [Math]::Max(8, $Height) -or $frame.CursorRow -lt 0 -or $frame.CursorRow -ge $frame.Height -or $frame.CursorColumn -lt 0 -or $frame.CursorColumn -ge $frame.Width) {
             throw 'Renderer returned an invalid frame.'
         }
         $validateRows = @($frame.Rows)
-        if ($frame.PSObject.Properties['AllTranscript']) {
-            $validateRows += @($frame.AllTranscript)
+        if ($frame.PSObject.Properties['AllTranscript'] -and
+            ($View.Renderer -ne 'Default' -or -not [object]::ReferenceEquals($View.ValidatedTranscript, $frame.AllTranscript))) {
+            $firstChanged = 0
+            if ($View.Renderer -eq 'Default' -and $View.ValidatedTranscript) {
+                # Built-in cache rows are immutable. Only the changed suffix needs another
+                # safety/width check; extension renderers always receive full validation.
+                while ($firstChanged -lt [Math]::Min($View.ValidatedTranscript.Count, $frame.AllTranscript.Count) -and
+                    [object]::ReferenceEquals($View.ValidatedTranscript[$firstChanged], $frame.AllTranscript[$firstChanged])) {
+                    $firstChanged++
+                }
+            }
+            if ($firstChanged -lt $frame.AllTranscript.Count) {
+                $validateRows += @($frame.AllTranscript[$firstChanged..($frame.AllTranscript.Count - 1)])
+            }
         }
         foreach ($row in $validateRows) {
             if ((Get-HarnessTextWidth ($row.Segments.Text -join '')) -gt $frame.Width) {
@@ -193,10 +234,13 @@ function Get-HarnessActiveRenderModel {
             }
             foreach ($segment in $row.Segments) {
                 if ($segment.Text -isnot [string] -or $segment.Color -notin @('Default', 'Black', 'Red', 'Green', 'Yellow', 'Blue', 'Magenta', 'Cyan', 'White', 'BrightBlack', 'BrightRed', 'BrightGreen', 'BrightYellow', 'BrightBlue', 'BrightMagenta', 'BrightCyan', 'BrightWhite') -or
-                    ($segment.Text.Contains("`n") -or $segment.Text -cne (ConvertTo-HarnessSafeText $segment.Text))) {
+                    ($segment.Text.Contains("`n") -or -not [string]::Equals($segment.Text, (ConvertTo-HarnessSafeText $segment.Text), [StringComparison]::Ordinal))) {
                     throw 'Renderer returned unsafe segments.'
                 }
             }
+        }
+        if ($View.Renderer -eq 'Default' -and $frame.PSObject.Properties['AllTranscript']) {
+            $View.ValidatedTranscript = $frame.AllTranscript
         }
         if ($View.Renderer -eq 'Default' -and $frame.PSObject.Properties['MaxScroll']) {
             # Keep the same output in view when new rows arrive while reading above the bottom.
@@ -298,6 +342,9 @@ function Invoke-HarnessFrontendInput {
             }
         }
     }.GetNewClosure()
+    if ($Text -match '^/config\s+set\s+Autonomy\s+(.+)$') {
+        $Text = '/mode ' + (ConvertFrom-Json -InputObject $Matches[1] -NoEnumerate -ErrorAction Stop)
+    }
     if ($Text.StartsWith('/')) {
         if ($Text.Trim() -eq '/quit') {
             $View.Quit = $true
@@ -314,6 +361,7 @@ function Invoke-HarnessFrontendInput {
             $output = $HarnessHost.Commands.Invoke($Text, $Session, $confirm, { if ($Pump) {
                         & $Pump $commandCancellation
                     } }.GetNewClosure(), $commandCancellation.Token)
+            Assert-HarnessFrontendAgentResult $output $Session
         }
         finally {
             $View.SessionView.Busy = $false; $commandCancellation.Dispose()
@@ -355,12 +403,21 @@ function Invoke-HarnessFrontendInput {
         if ($LineMode) {
             $Terminal.WriteText((& $safeText $fragment))
         }
-        else {
-            & $Pump $cancellation
+        elseif ($Pump -and $Session.Cancellation) {
+            & $Pump $Session.Cancellation
         }
     }.GetNewClosure()
     try {
-        $null = $HarnessHost.Send($Text, $Session, $stream, $cancellation.Token, { & $Pump $cancellation }.GetNewClosure())
+        $idle = { if ($Pump) {
+                & $Pump $cancellation
+            } }.GetNewClosure()
+        $result = if ($Session.Config.'Agent.Enabled') {
+            $HarnessHost.SendAgent($Text, $Session, $stream, $cancellation.Token, $idle)
+        }
+        else {
+            $HarnessHost.Send($Text, $Session, $stream, $cancellation.Token, $idle)
+        }
+        Assert-HarnessFrontendAgentResult $result $Session
         if ($LineMode) {
             $Terminal.WriteText("`n")
             $snapshot = $HarnessHost.GetConversationSnapshot($Session)
@@ -370,14 +427,15 @@ function Invoke-HarnessFrontendInput {
         }
     }
     catch {
-        $message = if ($cancellation.IsCancellationRequested) {
+        $cancelled = $cancellation.IsCancellationRequested -or $_.Exception.GetBaseException() -is [OperationCanceledException]
+        $message = if ($cancelled) {
             'Request cancelled.'
         }
         else {
             Get-HarnessFrontendErrorMessage $_
         }
         $HarnessHost.AddTranscript($Session, 'system', $message, $null)
-        $View.StatusBar.Text = if ($cancellation.IsCancellationRequested) {
+        $View.StatusBar.Text = if ($cancelled) {
             'Request cancelled'
         }
         else {
@@ -420,16 +478,57 @@ function Invoke-HarnessSafeFrontendInput {
             $Terminal.WriteText("Error: $message`n")
         }
     }
-    if ($Text.StartsWith('/') -and $View.StatusBar.ContinueAfterAction -and -not $View.Quit -and
+    if ($Text.StartsWith('/') -and -not $HarnessHost.AgentControl.GetState($Session).HasRun -and $View.StatusBar.ContinueAfterAction -and -not $View.Quit -and
         [string]::Equals($beforeId, $Session.SessionId, [StringComparison]::Ordinal) -and $HarnessHost.Commands.Contains('continue') -and
         @($Session.Transcript | Select-Object -Skip $beforeCount | Where-Object Role -In @('run', 'patch', 'patch-rollback')).Count) {
         Invoke-HarnessSafeFrontendInput $HarnessHost $Session $View $Terminal '/continue --auto' $Pump $LineMode
+    }
+}
+function Read-HarnessFrontendBatch {
+    param($View, $Terminal, $Cancellation, $PendingActions, $HarnessHost = $null, $Session = $null)
+    if ($PendingActions.Count) {
+        # Leave following keys for the modal review/command, preserving F5→Enter
+        # ordering. The controller dispatches the queued action before reading more.
+        $null = $Terminal.Available()
+        return
+    }
+    $read = 0
+    while (-not $View.Quit -and $read -lt 128 -and $Terminal.Available()) {
+        $read++
+        $action = Update-HarnessEditor $View ($Terminal.ReadKey()) ($Terminal.Available()) ($Terminal.Now())
+        $View.InputRevision++
+        if ($action -and $action.Action -in @('Cancel', 'Quit') -and $Cancellation) {
+            $Cancellation.Cancel()
+        }
+        elseif ($action -and $action.Action -in @('Send', 'Review', 'Shortcut')) {
+            if ($action.Action -ceq 'Send' -and $action.Prompt -match '^/(mode|agent)\s+\S|^/config\s+set\s+Autonomy\s') {
+                if ($Cancellation) {
+                    $Cancellation.Cancel()
+                }
+                if ($HarnessHost) {
+                    $HarnessHost.AgentControl.Revoke($Session)
+                }
+            }
+            $PendingActions.Add($action)
+            $View.RenderInterrupted = $true
+            break
+        }
+    }
+}
+function Read-HarnessRenderInput {
+    param($View, $Terminal, $Cancellation, $PendingActions, $ExpectedSize, $HarnessHost = $null, $Session = $null)
+    Read-HarnessFrontendBatch $View $Terminal $Cancellation $PendingActions $HarnessHost $Session
+    $size = $Terminal.GetSize()
+    if ($size.Width -ne $ExpectedSize.Width -or $size.Height -ne $ExpectedSize.Height) {
+        $View.RenderInterrupted = $true
+        $View.Dirty = $true
     }
 }
 function Invoke-HarnessFrontend {
     param($HarnessHost, $Session, $View, $Terminal, [scriptblock]$RendererOverride, [bool]$LineMode = $false)
     $subscriptions = [Collections.Generic.List[object]]::new()
     $update = ${function:Update-HarnessSessionView}
+    $setAgentView = ${function:Set-HarnessAgentView}
     foreach ($eventName in @('TurnStarted', 'ChunkReceived', 'TurnCompleted', 'DiagnosticsProduced', 'HistoryTrimmed', 'HistoryCompacted', 'ActionCompleted', 'ext.powershell.OperationPrepared')) {
         $name = 'view-' + [guid]::NewGuid().ToString('N')
         $HarnessHost.Events.Subscribe($eventName, $name, { param($payload) & $update $View $eventName $payload }.GetNewClosure())
@@ -470,48 +569,82 @@ function Invoke-HarnessFrontend {
                 return
             }
             $View.StatusBar.Tokens = $HarnessHost.EstimateTokens(($request.Messages.Content -join "`n"), $request.Config)
-            $View.Dirty = $true
+            & $setAgentView $View ($HarnessHost.AgentControl.GetState($Session))
         }.GetNewClosure())
     $subscriptions.Add(@('RequestPrepared', $requestName))
+    foreach ($eventName in @('AgentToolStarted', 'AgentToolCompleted')) {
+        $name = 'view-agent-' + [guid]::NewGuid().ToString('N')
+        $HarnessHost.Events.Subscribe($eventName, $name, {
+                param($payload)
+                if ($payload.SessionId -ceq $Session.SessionId) {
+                    & $setAgentView $View ($HarnessHost.AgentControl.GetState($Session))
+                    if ($LineMode) {
+                        $tool = if (Test-HarnessRecordProperty $payload 'Call') {
+                            $payload.Call.Name
+                        }
+                        else {
+                            $payload.Result.Tool
+                        }
+                        $Terminal.WriteText('[' + $View.StatusBar.Mode + '] ' + $eventName + ' ' + $tool + "`n")
+                    }
+                }
+            }.GetNewClosure())
+        $subscriptions.Add(@($eventName, $name))
+    }
     $render = ${function:Get-HarnessActiveRenderModel}
-    $editor = ${function:Update-HarnessEditor}
+    $readInput = ${function:Read-HarnessFrontendBatch}
+    $readRenderInput = ${function:Read-HarnessRenderInput}
+    $pendingActions = [Collections.Generic.List[object]]::new()
+    $renderWorker = New-HarnessRenderWorker
+    $waitRender = { param($milliseconds) $Terminal.Wait($milliseconds) }.GetNewClosure()
     $last = [pscustomobject]@{
 
 
 
-        Render =-1000L
-        Size   =''
+        Render  =-1000L
+        Spinner =-1000L
+        Size    =''
     }
     $pump = { param($cancellation)
-        while ($Terminal.Available()) {
-            $action = & $editor $View ($Terminal.ReadKey()) ($Terminal.Available()) ($Terminal.Now())
-            if ($action -and $action.Action -in @('Cancel', 'Quit') -and $cancellation) {
-                $cancellation.Cancel()
-            }
-        }
+        & $readInput $View $Terminal $cancellation $pendingActions $HarnessHost $Session
         if ($LineMode) {
             return
         }
-        if ($View.SessionView.Busy) {
+        if ($View.SessionView.Busy -and $Terminal.Now() - $last.Spinner -ge 100) {
             $View.Dirty = $true
+            $View.Spinner.Index++
+            $last.Spinner = $Terminal.Now()
         }
         $size = $Terminal.GetSize()
         $dimensions = "$($size.Width)x$($size.Height)"
         if ($dimensions -ne $last.Size) {
             $View.Dirty = $true
+            if (-not $pendingActions.Count) {
+                $View.RenderInterrupted = $false
+            }
         }
         if ($View.Dirty -and $Terminal.Now() - $last.Render -ge 34) {
-            $View.Spinner.Index++
             $frame = if ($RendererOverride) {
                 & $RendererOverride $View $size
             }
             else {
-                & $render $View $HarnessHost $size.Width $size.Height
+                & $render $View $HarnessHost $size.Width $size.Height $renderWorker {
+                    & $readRenderInput $View $Terminal $cancellation $pendingActions $size $HarnessHost $Session
+                }.GetNewClosure() $waitRender $(if ($cancellation) {
+                        $cancellation.Token
+                    }
+                    else {
+                        [Threading.CancellationToken]::None
+                    })
             }
-            $Terminal.Draw($frame)
+            if (-not $frame) {
+                return
+            }
+            $drawRevision = $View.InputRevision
+            $Terminal.Draw($frame, { & $readInput $View $Terminal $cancellation $pendingActions $HarnessHost $Session }.GetNewClosure())
             $last.Render = $Terminal.Now()
             $last.Size = $dimensions
-            $View.Dirty = $false
+            $View.Dirty = $View.InputRevision -ne $drawRevision
         }
     }.GetNewClosure()
     try {
@@ -519,6 +652,7 @@ function Invoke-HarnessFrontend {
             $Terminal.Enter($false)
             $Terminal.WriteText("PowerShell harness line mode. /help for commands; /quit or EOF exits.`n")
             while (-not $View.Quit) {
+                $Terminal.WriteText('[' + $HarnessHost.AgentControl.GetState($Session).Mode.ToUpperInvariant() + '] ')
                 $line = Read-HarnessLine -View $View -Terminal $Terminal
                 if ($null -eq $line) {
                     break
@@ -541,25 +675,34 @@ function Invoke-HarnessFrontend {
                 $dimensions = "$($size.Width)x$($size.Height)"
                 if ($dimensions -ne $last.Size) {
                     $View.Dirty = $true
+                    if (-not $pendingActions.Count) {
+                        $View.RenderInterrupted = $false
+                    }
                 }
                 if ($View.Dirty -and $Terminal.Now() - $last.Render -ge 34) {
                     $frame = if ($RendererOverride) {
                         & $RendererOverride $View $size
                     }
                     else {
-                        & $render $View $HarnessHost $size.Width $size.Height
+                        & $render $View $HarnessHost $size.Width $size.Height $renderWorker {
+                            & $readRenderInput $View $Terminal $null $pendingActions $size $HarnessHost $Session
+                        }.GetNewClosure() $waitRender
                     }
-                    $Terminal.Draw($frame)
+                    $drawRevision = $View.InputRevision
+                    if ($frame) {
+                        $Terminal.Draw($frame, { & $readInput $View $Terminal $null $pendingActions $HarnessHost $Session }.GetNewClosure())
+                    }
                     $last.Render = $Terminal.Now()
                     $last.Size = $dimensions
-                    $View.Dirty = $false
+                    $View.Dirty = $View.InputRevision -ne $drawRevision
                 }
                 # Drain queued input in bounded batches; sleeping per character
                 # made long pastes take seconds on Windows consoles.
-                $read = 0
-                while (-not $View.Quit -and $Terminal.Available() -and $read -lt 128) {
-                    $read++
-                    $action = Update-HarnessEditor $View ($Terminal.ReadKey()) ($Terminal.Available()) ($Terminal.Now())
+                & $readInput $View $Terminal $null $pendingActions $HarnessHost $Session
+                while (-not $View.Quit -and $pendingActions.Count) {
+                    $action = $pendingActions[0]
+                    $pendingActions.RemoveAt(0)
+                    $View.RenderInterrupted = $false
                     if ($action -and $action.Action -eq 'Send') {
                         Invoke-HarnessSafeFrontendInput $HarnessHost $Session $View $Terminal $action.Prompt $pump
                     }
@@ -574,6 +717,7 @@ function Invoke-HarnessFrontend {
         }
     }
     finally {
+        Close-HarnessRenderWorker $renderWorker
         $Terminal.Restore()
         foreach ($subscription in $subscriptions) {
             $HarnessHost.Events.Unsubscribe($subscription[0], $subscription[1])

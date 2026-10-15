@@ -26,41 +26,69 @@ function Invoke-ApproveExtensionOperation {
     if (-not $script:PendingAuthoring.TryGetValue($Context.State, [ref]$pending)) {
         return $null
     }
-    $preview = $pending.Preview
-    if (-not $preview.Valid) {
-        throw 'The staged extension is no longer valid. Request a repair before approving it.'
-    }
-    $preview | Add-Member NoteProperty ReferenceInfo $pending.ReferenceInfo -Force
-    if ($Context.Confirm) {
-        $null = & $Context.Confirm (Format-AuthoringReview $preview) ''
-    }
-    $approvals = Get-AuthoringApprovals $preview { param($message, $expected) 'APPROVE' }
-    $null = $script:Authoring.Approve($preview.Id, $approvals)
-    $preview = $script:Authoring.DryLoad($preview.Id, $Context.State.Config.RunTimeoutSeconds, $Context.Pump, $Context.CancellationToken)
-    $preview | Add-Member NoteProperty ReferenceInfo $pending.ReferenceInfo -Force
-    $pending.Preview = $preview
-    if (-not $preview.DryLoaded) {
-        for ($attempt = $pending.Attempt + 1; $attempt -le $Context.State.Config.AutoRepairAttempts; $attempt++) {
-            $errors = @($preview.Diagnostics | Where-Object Severity -EQ Error | ForEach-Object Message) -join "`n"
-            $prompt = "$($pending.Prompt)`nRepair the following failures, preserving intent. Return all complete files.`n$errors`nPrevious response:`n$($pending.Text)"
-            $generated = $script:Authoring.Generate($prompt, $Context.State, $attempt)
-            $preview = $script:Authoring.Stage($generated.Text, $pending.Edit)
-            $preview = $script:Authoring.Validate($preview.Id, $Context.State.Config)
-            $preview | Add-Member NoteProperty ReferenceInfo $pending.ReferenceInfo -Force
-            $pending = [pscustomobject]@{ Id = $preview.Id; Preview = $preview; ReferenceInfo = $pending.ReferenceInfo
-                Prompt = $prompt; Text = $generated.Text; Edit = $pending.Edit; Attempt = $attempt
-            }
-            $null = $script:PendingAuthoring.Remove($Context.State)
-            $script:PendingAuthoring.Add($Context.State, $pending)
-            if ($preview.Valid) {
-                return (Format-AuthoringReview $preview) + "`nDry-load failed; nothing installed. A revised extension is staged. Use /approve to authorize this revised source."
-            }
+    $original = $pending
+    $session = $Context.State
+    $pendingTable = $script:PendingAuthoring
+    $validatePending = {
+        $current = $null
+        if (-not $pendingTable.TryGetValue($session, [ref]$current) -or -not [object]::ReferenceEquals($original, $current)) {
+            throw 'The staged extension operation changed. Review the new source before approving it.'
         }
-        return (Format-AuthoringReview $preview) + "`nDry-load failed; nothing installed. Repair limit reached."
+    }.GetNewClosure()
+    $flow = $script:Harness.OperationControl.Prepare($session, $validatePending, $session.Config.RunTimeoutSeconds)
+    try {
+        $preview = $pending.Preview
+        if (-not $preview.Valid) {
+            throw 'The staged extension is no longer valid. Request a repair before approving it.'
+        }
+        $preview | Add-Member NoteProperty ReferenceInfo $pending.ReferenceInfo -Force
+        if ($Context.Confirm) {
+            $null = & $Context.Confirm (Format-AuthoringReview $preview) ''
+        }
+        $script:Harness.OperationControl.Transition($flow, 'Approve', $Context.CancellationToken)
+        $script:Harness.OperationControl.Transition($flow, 'Start', $Context.CancellationToken)
+        $approvals = Get-AuthoringApprovals $preview { param($message, $expected) 'APPROVE' }
+        $null = $script:Authoring.Approve($preview.Id, $approvals)
+        $preview = $script:Authoring.DryLoad($preview.Id, $Context.State.Config.RunTimeoutSeconds, $Context.Pump, $Context.CancellationToken)
+        $preview | Add-Member NoteProperty ReferenceInfo $pending.ReferenceInfo -Force
+        $pending.Preview = $preview
+        if (-not $preview.DryLoaded) {
+            $script:Harness.OperationControl.Transition($flow, 'Fail')
+            for ($attempt = $pending.Attempt + 1; $attempt -le $Context.State.Config.AutoRepairAttempts; $attempt++) {
+                $errors = @($preview.Diagnostics | Where-Object Severity -EQ Error | ForEach-Object Message) -join "`n"
+                $prompt = "$($pending.Prompt)`nRepair the following failures, preserving intent. Return all complete files.`n$errors`nPrevious response:`n$($pending.Text)"
+                $generated = $script:Authoring.Generate($prompt, $Context.State, $attempt)
+                $preview = $script:Authoring.Stage($generated.Text, $pending.Edit)
+                $preview = $script:Authoring.Validate($preview.Id, $Context.State.Config)
+                $preview | Add-Member NoteProperty ReferenceInfo $pending.ReferenceInfo -Force
+                $pending = [pscustomobject]@{ Id = $preview.Id; Preview = $preview; ReferenceInfo = $pending.ReferenceInfo
+                    Prompt = $prompt; Text = $generated.Text; Edit = $pending.Edit; Attempt = $attempt
+                }
+                $null = $script:PendingAuthoring.Remove($Context.State)
+                $script:PendingAuthoring.Add($Context.State, $pending)
+                if ($preview.Valid) {
+                    return (Format-AuthoringReview $preview) + "`nDry-load failed; nothing installed. A revised extension is staged. Use /approve to authorize this revised source."
+                }
+            }
+            return (Format-AuthoringReview $preview) + "`nDry-load failed; nothing installed. Repair limit reached."
+        }
+        $installed = $script:Authoring.Install($preview.Id, $approvals)
+        $null = $script:PendingAuthoring.Remove($Context.State)
+        $script:Harness.OperationControl.Transition($flow, 'Complete')
+        $installed
     }
-    $installed = $script:Authoring.Install($preview.Id, $approvals)
-    $null = $script:PendingAuthoring.Remove($Context.State)
-    $installed
+    catch {
+        if ($script:Harness.OperationControl.Transition($flow, 'Inspect').State -in @('Prepared', 'Approved', 'Running')) {
+            $outcome = if ($Context.CancellationToken.IsCancellationRequested) {
+                'Cancel'
+            }
+            else {
+                'Fail'
+            }
+            $script:Harness.OperationControl.Transition($flow, $outcome)
+        }
+        throw
+    }
 }
 function Invoke-SelfExtend {
     param($Context)
@@ -116,19 +144,39 @@ function Invoke-SelfExtend {
             if (-not $approvals.Count) {
                 return 'Installation cancelled.'
             }
-            $null = $script:Authoring.Approve($preview.Id, $approvals)
-            $preview = $script:Authoring.DryLoad($preview.Id, $Context.State.Config.RunTimeoutSeconds, $Context.Pump, $Context.CancellationToken)
-            $preview | Add-Member NoteProperty ReferenceInfo $referenceInfo -Force
-            # An empty expected response displays a result without prompting in either frontend.
-            $null = & $Context.Confirm ("Dry-load " + $(if ($preview.DryLoaded) {
-                        'passed.'
+            $flow = $script:Harness.OperationControl.Prepare($Context.State, { }, $Context.State.Config.RunTimeoutSeconds)
+            try {
+                $script:Harness.OperationControl.Transition($flow, 'Approve', $Context.CancellationToken)
+                $script:Harness.OperationControl.Transition($flow, 'Start', $Context.CancellationToken)
+                $null = $script:Authoring.Approve($preview.Id, $approvals)
+                $preview = $script:Authoring.DryLoad($preview.Id, $Context.State.Config.RunTimeoutSeconds, $Context.Pump, $Context.CancellationToken)
+                $preview | Add-Member NoteProperty ReferenceInfo $referenceInfo -Force
+                # An empty expected response displays a result without prompting in either frontend.
+                $null = & $Context.Confirm ("Dry-load " + $(if ($preview.DryLoaded) {
+                            'passed.'
+                        }
+                        else {
+                            'failed.'
+                        }) + "`n" + (Format-AuthoringReview $preview)) ''
+                if ($preview.DryLoaded) {
+                    $null = $script:PendingAuthoring.Remove($Context.State)
+                    $installed = $script:Authoring.Install($preview.Id, $approvals)
+                    $script:Harness.OperationControl.Transition($flow, 'Complete')
+                    return $installed
+                }
+                $script:Harness.OperationControl.Transition($flow, 'Fail')
+            }
+            catch {
+                if ($script:Harness.OperationControl.Transition($flow, 'Inspect').State -in @('Prepared', 'Approved', 'Running')) {
+                    $outcome = if ($Context.CancellationToken.IsCancellationRequested) {
+                        'Cancel'
                     }
                     else {
-                        'failed.'
-                    }) + "`n" + (Format-AuthoringReview $preview)) ''
-            if ($preview.DryLoaded) {
-                $null = $script:PendingAuthoring.Remove($Context.State)
-                return $script:Authoring.Install($preview.Id, $approvals)
+                        'Fail'
+                    }
+                    $script:Harness.OperationControl.Transition($flow, $outcome)
+                }
+                throw
             }
         }
         $errors = @($preview.Diagnostics | Where-Object Severity -EQ Error | ForEach-Object { "line $($_.Line): $($_.Message)" }) -join "`n"

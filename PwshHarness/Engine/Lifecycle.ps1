@@ -67,6 +67,9 @@ function Remove-EngineModule {
 }
 function Remove-EngineRegistrations {
     param($Store, [string]$Name)
+    if ($Store.AgentTools -and $Store.AgentTools.Extension -ceq $Name) {
+        $Store.AgentTools = $null
+    }
     foreach ($category in $Store.Points.Keys) {
         foreach ($key in @($Store.Points[$category].Keys)) {
             if ($Store.Points[$category][$key].Extension -eq $Name) {

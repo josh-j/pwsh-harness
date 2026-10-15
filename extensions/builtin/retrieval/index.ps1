@@ -276,7 +276,7 @@ function Update-RetrievalIndex {
     $cacheRoot = [IO.Path]::GetFullPath($Request.Config.DataDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     foreach ($file in $inventory) {
         Invoke-DiscoveryCheckpoint $Request
-        if ($file.FullPath -and $file.FullPath.StartsWith($cacheRoot, $comparison)) {
+        if ($Corpus -eq 'project' -and $file.FullPath -and $file.FullPath.StartsWith($cacheRoot, $comparison)) {
             continue
         }
         $present[$file.Path] = $true
@@ -290,14 +290,9 @@ function Update-RetrievalIndex {
             $text = $file.Example.Text
         }
         else {
-            $bytes = [IO.File]::ReadAllBytes($file.FullPath)
-            if ($bytes -contains 0) {
-                $index.Files.Remove($file.Path)
-                $index.Search = $null; $index.Dirty = $true
-                continue
-            }
             try {
-                $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+                $content = Read-HarnessTextFile $file.FullPath 262144
+                $text = ($content.Bom ? [string][char]0xFEFF : '') + $content.Text
             }
             catch {
                 $index.Files.Remove($file.Path)

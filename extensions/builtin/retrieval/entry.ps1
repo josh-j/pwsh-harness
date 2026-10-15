@@ -7,6 +7,7 @@
 {
     param($Harness)
     $script:Harness = $Harness
+    $Harness.Events.Declare('ext.retrieval.IndexUpdated', 1, @{ SessionId = [string]; Files = [int]; Chunks = [int]; Status = [string]; Message = [string]; BuildMilliseconds = @{ Type = @([int], [double]) } })
     $script:Indexes = @{}
     Register-RetrievalCommands
     $Harness.Settings.Declare('ExamplePaths', [string[]], @())

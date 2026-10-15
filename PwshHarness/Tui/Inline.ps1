@@ -1,16 +1,27 @@
 #Requires -Version 7.6
 function Test-HarnessInlineRow {
     param($Left, $Right)
-    [string]::Equals(($Left.Segments | ConvertTo-Json -Compress), ($Right.Segments | ConvertTo-Json -Compress), [StringComparison]::Ordinal)
+    if ([object]::ReferenceEquals($Left, $Right)) {
+        return $true
+    }
+    $before = @($Left.Segments)
+    $after = @($Right.Segments)
+    if ($before.Count -ne $after.Count) {
+        return $false
+    }
+    for ($i = 0; $i -lt $before.Count; $i++) {
+        if (-not [string]::Equals($before[$i].Text, $after[$i].Text, [StringComparison]::Ordinal) -or $before[$i].Color -cne $after[$i].Color) {
+            return $false
+        }
+    }
+    $true
 }
 function Get-HarnessInlineDraw {
-    param($Previous, $Frame)
-    $all = @(if ($Frame.PSObject.Properties['AllTranscript']) {
-            @($Frame.AllTranscript)
-        }
-        else {
-            @()
-        })
+    param($Previous, $Frame, [scriptblock]$Checkpoint)
+    $all = @()
+    if ($Frame.PSObject.Properties['AllTranscript']) {
+        $all = $Frame.AllTranscript
+    }
     $start = if ($Frame.PSObject.Properties['TranscriptStart']) {
         $Frame.TranscriptStart
     }
@@ -36,8 +47,11 @@ function Get-HarnessInlineDraw {
         0
     }
     $restart = $Previous -and ($Previous.Width -ne $Frame.Width -or $Previous.Height -ne $Frame.Height -or $archived -gt $all.Count)
-    if ($Previous -and -not $restart) {
+    if ($Previous -and -not $restart -and -not [object]::ReferenceEquals($Previous.FullRows, $all)) {
         for ($i = 0; $i -lt $archived; $i++) {
+            if ($Checkpoint -and $i % 32 -eq 0) {
+                & $Checkpoint
+            }
             if (-not (Test-HarnessInlineRow $Previous.FullRows[$i] $all[$i])) {
                 $restart = $true; break
             }
@@ -75,6 +89,10 @@ function Get-HarnessInlineDraw {
         }
     }
     $end = [Math]::Max($oldCount, $drawRows.Count)
+    $cursorOnly = $Previous -and $first -eq $end -and -not $archiveRows.Count
+    if ($cursorOnly) {
+        $null = $builder.Clear()
+    }
     $position = if ($Previous) {
         $Previous.CursorRow
     }
@@ -90,6 +108,9 @@ function Get-HarnessInlineDraw {
             $null = $builder.Append("`e[$($delta)B")
         }
         for ($i = $first; $i -lt $end; $i++) {
+            if ($Checkpoint -and $i % 32 -eq 0) {
+                & $Checkpoint
+            }
             $null = $builder.Append("`r`e[2K")
             if ($i -lt $drawRows.Count) {
                 foreach ($segment in $drawRows[$i].Segments) {
@@ -99,7 +120,7 @@ function Get-HarnessInlineDraw {
                     else {
                         $PSStyle.Foreground.($segment.Color)
                     }
-                    $null = $builder.Append($color).Append($segment.Text)
+                    $null = $builder.Append($color).Append((ConvertTo-HarnessSafeText $segment.Text))
                 }
             }
             $null = $builder.Append($PSStyle.Reset)
@@ -116,7 +137,13 @@ function Get-HarnessInlineDraw {
     elseif ($delta -gt 0) {
         $null = $builder.Append("`e[$($delta)B")
     }
-    $null = $builder.Append("`r`e[$($Frame.CursorColumn + 1)G`e[?25h")
+    $null = $builder.Append("`r`e[$($Frame.CursorColumn + 1)G")
+    if (-not $cursorOnly) {
+        $null = $builder.Append("`e[?25h")
+    }
+    elseif ($Previous.CursorRow -eq $cursor -and $Previous.CursorColumn -eq $Frame.CursorColumn) {
+        $null = $builder.Clear()
+    }
     [pscustomobject]@{
         Text  = $builder.ToString()
         State = [pscustomobject]@{

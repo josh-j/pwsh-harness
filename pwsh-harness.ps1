@@ -16,6 +16,8 @@ param(
     [string[]]$IncludeFiles = @(),
     [switch]$IncludeDiff,
     [switch]$NoTui,
+    [switch]$Agent,
+    [ValidateSet('Approve', 'Auto')][string]$Autonomy,
     [switch]$SaveConfig,
     [switch]$PassThru,
     [switch]$Configure,
@@ -54,13 +56,16 @@ try {
         Set-PwshHarnessConfig -HarnessHost $instance @parameters
     }
     else {
-        foreach ($name in @('Path', 'IncludeFiles', 'IncludeDiff', 'SaveConfig')) {
+        foreach ($name in @('Path', 'IncludeFiles', 'IncludeDiff', 'SaveConfig', 'Agent', 'Autonomy')) {
             if ($PSBoundParameters.ContainsKey($name)) {
                 $parameters[$name] = $PSBoundParameters[$name]
             }
         }
         if ($PSBoundParameters.ContainsKey('Prompt')) {
             $session = $instance.NewSession()
+            if (-not $parameters.ContainsKey('Agent')) {
+                $parameters.Agent = [bool]$session.Config.'Agent.Enabled'
+            }
             $session.Persist = $true
             Invoke-PwshHarness -HarnessHost $instance -State $session -Prompt $Prompt -PassThru:$PassThru @parameters
         }

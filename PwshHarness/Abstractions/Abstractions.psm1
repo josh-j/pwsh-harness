@@ -3,6 +3,9 @@ Set-StrictMode -Version Latest
 $script:FrozenValues = @{}
 Set-Variable -Name HarnessApiVersion -Value '1.0' -Option Constant
 . (Join-Path $PSScriptRoot 'Fences.ps1')
+. (Join-Path $PSScriptRoot 'AgentContracts.ps1')
+. (Join-Path $PSScriptRoot 'SecretText.ps1')
+. (Join-Path $PSScriptRoot 'Filesystem.ps1')
 
 function New-HarnessFrozen {
     <#
@@ -95,6 +98,13 @@ function Copy-HarnessFrozenData {
     $existing = $null
     if ($Copies.TryGetValue($Value, [ref]$existing)) {
         return , $existing
+    }
+    if ($Value -is [byte[]]) {
+        # Exact operation bytes stay typed; avoid one boxed PowerShell object per byte.
+        $frozen = [Collections.ObjectModel.ReadOnlyCollection[byte]]::new([byte[]]$Value.Clone())
+        $Copies.Add($Value, $frozen)
+        $frozen.PSObject.TypeNames.Insert(0, 'Harness.Frozen')
+        return , $frozen
     }
     $isRecord = $Value -is [pscustomobject] -or $type.IsValueType
     if ($Value -is [Collections.IDictionary] -or $isRecord) {
@@ -776,6 +786,13 @@ function Assert-HarnessChunk {
     }
 }
 Export-ModuleMember -Function @(
+    'Get-HarnessPathSnapshot', 'Read-HarnessTextFile'
+    'Get-HarnessSecretPatterns', 'Get-HarnessSecretSuffixLength', 'Protect-HarnessText'
+    'New-HarnessToolCall', 'Assert-HarnessToolCall',
+    'New-HarnessToolResult', 'Assert-HarnessToolResult',
+    'New-HarnessAgentRun', 'Assert-HarnessAgentRun',
+    'New-HarnessAgentRunSummary', 'Assert-HarnessAgentRunSummary',
+    'New-HarnessPreparedOperation', 'Assert-HarnessPreparedOperation',
     'Get-HarnessFencedBlock',
     'New-HarnessChunk', 'Assert-HarnessChunk',
     'New-HarnessFixResult',

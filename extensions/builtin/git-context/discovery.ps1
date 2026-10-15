@@ -60,7 +60,7 @@ function Get-DiscoveryRootReason {
     ''
 }
 function Get-DiscoveryListing {
-    param([string]$Root, [int]$Limit = 200, [int]$Depth = 1, [int]$Milliseconds = 150, [switch]$SkipGitMetadata, $Request)
+    param([string]$Root, [int]$Limit = 200, [int]$Depth = 1, [int]$Milliseconds = 150, $Request)
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $entries = [Collections.Generic.List[object]]::new()
     $pending = [Collections.Generic.Queue[object]]::new()
@@ -84,9 +84,6 @@ function Get-DiscoveryListing {
                     $truncated = $true; break
                 }
                 $item = $iterator.Current
-                if ($SkipGitMetadata -and $item.Name -eq '.git') {
-                    continue
-                }
                 $entries.Add($item)
                 if ($directory.Level -lt $Depth -and ($item.Attributes -band [IO.FileAttributes]::Directory)) {
                     $pending.Enqueue(@{ Path = $item.FullName; Level = $directory.Level + 1 })
@@ -118,4 +115,61 @@ function Test-DiscoveryRepositoryCandidate {
         $directory = $directory.Parent
     }
     $false
+}
+
+function Invoke-HarnessGit {
+    param([string]$Path, [string[]]$Arguments, $Request = $script:DiscoveryRequest, [switch]$RawOutput, [switch]$Result)
+    if (-not (Get-Command git -ErrorAction Ignore)) {
+        return $null
+    }
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = (Get-Command git).Source
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $info.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $info.Environment['GIT_TERMINAL_PROMPT'] = '0'
+    foreach ($flag in @('-c', 'core.quotepath=off', '-c', 'color.ui=never', '--no-pager')) {
+        $info.ArgumentList.Add($flag)
+    }
+    $info.ArgumentList.Add('-C')
+    $info.ArgumentList.Add($Path)
+    foreach ($argument in $Arguments) {
+        $info.ArgumentList.Add($argument)
+    }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    try {
+        $null = $process.Start()
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        while (-not $process.WaitForExit(25)) {
+            Invoke-DiscoveryCheckpoint $Request
+            if ($watch.ElapsedMilliseconds -ge 5000) {
+                throw 'Git context query timed out.'
+            }
+        }
+        $text = $outputTask.GetAwaiter().GetResult()
+        $null = $errorTask.GetAwaiter().GetResult()
+        if ($Result) {
+            return @{ ExitCode = $process.ExitCode; Text = $text }
+        }
+        if ($process.ExitCode -ne 0) {
+            return $null
+        }
+        if ($RawOutput) {
+            $text
+        }
+        else {
+            $text.Replace("`r", '').TrimEnd("`n")
+        }
+    }
+    finally {
+        if (-not $process.HasExited) {
+            $process.Kill($true)
+        }
+        $process.Dispose()
+    }
 }

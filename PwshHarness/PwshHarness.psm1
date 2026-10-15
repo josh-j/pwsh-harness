@@ -47,7 +47,7 @@ function New-HarnessHost {
         $configDir = $ConfigDirectory
     }
     elseif ($ConfigPath) {
-        $configDir = Split-Path ($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ConfigPath)) -Parent
+        $configDir = Split-Path ([IO.Path]::GetFullPath($ConfigPath)) -Parent
     }
     if ($DataDirectory) {
         $dataDir = $DataDirectory
@@ -78,7 +78,46 @@ function New-HarnessHost {
     $hostInstance.Settings.Declare('Tui.ToolPreviewLines', [int], 4, { param($v) $v -ge 1 -and $v -le 100 })
     $hostInstance.Settings.Declare('Tui.ReviewOnEmptyEnter', [bool], $true)
     $hostInstance.Renderers.Add('Default', (Get-Command PwshHarness.Tui\Get-HarnessRenderModel).ScriptBlock, 100)
+    $agentControl = $hostInstance.AgentControl
+    foreach ($name in @('mode', 'agent')) {
+        $command = $name
+        $hostInstance.Commands.Add($name, {
+                param($context)
+                if ($context.UserInitiated -cne $true) {
+                    throw 'Mode and agent commands require explicit user input.'
+                }
+                if ($command -ceq 'agent') {
+                    if ($context.Arguments) {
+                        if ($context.Arguments -cnotin @('on', 'off')) {
+                            throw 'Use /agent on or /agent off.'
+                        }
+                        $null = $agentControl.SetEnabled($context.State, $context.Arguments -ceq 'on', 'Command')
+                    }
+                    return 'Agent: ' + $(if ($context.State.Config.'Agent.Enabled') {
+                            'on'
+                        }
+                        else {
+                            'off'
+                        })
+                }
+                if ($context.Arguments) {
+                    $null = $agentControl.SelectMode($context.State, $context.Arguments, 'Command')
+                }
+                $mode = $agentControl.GetState($context.State)
+                'Mode: ' + $mode.Mode.ToUpperInvariant() + $(if ($mode.ActivationSource) {
+                        ' (' + $mode.ActivationSource + '). Auto runs commands with your user permissions.'
+                    }
+                    else {
+                        ''
+                    })
+            }.GetNewClosure(), 'Show or change /' + $name + ' for this conversation.')
+    }
     $hostInstance.ExtensionLoader.Load($ExtensionPaths)
+    foreach ($eventName in @('ext.core-commands.ConversationReset', 'ext.core-commands.ConversationRestored')) {
+        $hostInstance.Events.Subscribe($eventName, 'root-agent-authority-' + $eventName, {
+                param($payload) $agentControl.RevokeConversation($payload.SessionId)
+            }.GetNewClosure())
+    }
     $references = $script:Hosts
     $cache = $script:ImplicitHosts
     $dispose = $hostInstance.PSObject.Methods['Dispose']
@@ -109,19 +148,52 @@ function New-HarnessHost {
     $script:Hosts[$hostInstance.Id] = [WeakReference]::new($hostInstance)
     $hostInstance
 }
+function Resolve-HarnessAgentSelection {
+    param([hashtable]$Options, [hashtable]$BoundParameters)
+    $Options = $Options.Clone()
+    $source = if ($BoundParameters.ContainsKey('Autonomy')) {
+        'Parameter'
+    }
+    else {
+        'Options'
+    }
+    $mode = if ($source -ceq 'Parameter') {
+        $BoundParameters['Autonomy']
+    }
+    elseif ($Options.ContainsKey('Autonomy')) {
+        $Options.Autonomy
+    }
+    else {
+        $null
+    }
+    $Options.Remove('Autonomy')
+    if ($BoundParameters.ContainsKey('SaveConfig') -and $BoundParameters['SaveConfig'] -and $mode -ceq 'Auto') {
+        throw 'Autonomy=Auto cannot be persisted; select it explicitly for each conversation.'
+    }
+    if ($BoundParameters.ContainsKey('Agent')) {
+        $Options['Agent.Enabled'] = [bool]$BoundParameters['Agent']
+    }
+    if ($mode -ceq 'Auto') {
+        $Options['Agent.Enabled'] = $true
+    }
+    [pscustomobject]@{ Mode = $mode; Source = $source; Options = $Options }
+}
 function Invoke-PwshHarness {
     <#
     .SYNOPSIS
-    Generate one response through an isolated host without executing generated code.
+    Return one proposal, or run the explicitly requested bounded agent.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Prompt, [string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey, [switch]$SaveConfig, [switch]$NoValidate, [switch]$PassThru,
+    param([Parameter(Mandatory)][string]$Prompt, [string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey, [switch]$SaveConfig, [switch]$NoValidate, [switch]$PassThru, [switch]$Agent, [ValidateSet('Approve', 'Auto')][string]$Autonomy,
         [hashtable]$Config, [string]$ConfigPath, [string]$Path, [string[]]$IncludeFiles = @(), [switch]$IncludeDiff,
         [hashtable]$Options = @{
         }, [object]$State, [object]$HarnessHost, [scriptblock]$OnToken,
         [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
+    $selectedMode = $null
     try {
-        $Options = $Options.Clone()
+        $selection = Resolve-HarnessAgentSelection $Options $PSBoundParameters
+        $Options = $selection.Options
+        $selectedMode = $selection.Mode
         foreach ($name in @('Provider', 'Model', 'BaseUrl', 'Behavior')) {
             if ($PSBoundParameters.ContainsKey($name)) {
                 $Options[$name] = if ($name -eq 'Behavior') {
@@ -163,6 +235,10 @@ function Invoke-PwshHarness {
                 $Config[$name] = $Options[$name]
             }
         }
+        if (-not $Options.ContainsKey('Agent.Enabled')) {
+            # Scripting compatibility is invocation-local, not an implicitly saved preference.
+            $Config['Agent.Enabled'] = $false
+        }
         if ($NoValidate) {
             $Config.Validate = $false
         }
@@ -171,11 +247,13 @@ function Invoke-PwshHarness {
             $State = $HarnessHost.NewSession($Config)
         }
         Initialize-HarnessConnection $HarnessHost $State $Config -ApiKey $ApiKey -Interactive $false -SaveConfig:$SaveConfig -ConfigPath $ConfigPath -Options $Options
+        if ($Options.ContainsKey('Agent.Enabled')) {
+            $null = $HarnessHost.AgentControl.SetEnabled($State, $Options['Agent.Enabled'], 'Options')
+        }
         $State.Config = $Config
         if ($Path) {
             $State.Context.Path = $Path
         }
-        $State.Context.Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($State.Context.Path)
         foreach ($file in $IncludeFiles) {
             if (-not $State.Context.IncludeFiles.Contains($file)) {
                 $State.Context.IncludeFiles.Add($file)
@@ -184,8 +262,14 @@ function Invoke-PwshHarness {
         if ($IncludeDiff) {
             $State.Context.IncludeDiff = $true
         }
+        if ($selectedMode) {
+            $null = $HarnessHost.AgentControl.SelectMode($State, $selectedMode, $selection.Source)
+        }
         $result = if ($Prompt -match '^/extend(?:\s|$)') {
             $HarnessHost.Commands.Invoke($Prompt, $State, $null)
+        }
+        elseif ($State.Config.'Agent.Enabled') {
+            $HarnessHost.SendAgent($Prompt, $State, $OnToken, $CancellationToken)
         }
         else {
             $HarnessHost.Send($Prompt, $State, $OnToken, $CancellationToken)
@@ -195,6 +279,11 @@ function Invoke-PwshHarness {
     catch {
         Invoke-HarnessPublicError $PSCmdlet $_
     }
+    finally {
+        if ($selectedMode -ceq 'Auto' -and $State -and $HarnessHost) {
+            $HarnessHost.AgentControl.Revoke($State)
+        }
+    }
 }
 function Start-PwshHarness {
     <#
@@ -202,10 +291,12 @@ function Start-PwshHarness {
     Start the terminal assistant with explicit user actions.
     #>
     [CmdletBinding()]
-    param([switch]$NoTui, [string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey, [switch]$SaveConfig, [string]$ConfigPath, [hashtable]$Options = @{
+    param([switch]$NoTui, [string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey, [switch]$SaveConfig, [switch]$Agent, [ValidateSet('Approve', 'Auto')][string]$Autonomy, [string]$ConfigPath, [hashtable]$Options = @{
         }, [string]$Resume,
         [string]$Path, [string[]]$IncludeFiles = @(), [switch]$IncludeDiff, [string]$Renderer = 'Default', [switch]$NoPersist, [object]$HarnessHost)
     $arguments = @{} + $PSBoundParameters
+    $arguments.Remove('Agent')
+    $arguments.Remove('Autonomy')
     $connectionParameters = @{}
     foreach ($name in @('ApiKey', 'SaveConfig', 'BaseUrl', 'Provider', 'Model', 'Behavior')) {
         if ($name -in @('BaseUrl', 'Provider', 'Model') -and $PSBoundParameters.ContainsKey($name)) {
@@ -213,7 +304,9 @@ function Start-PwshHarness {
         }
         $arguments.Remove($name)
     }
-    $Options = $Options.Clone()
+    $selection = Resolve-HarnessAgentSelection $Options $PSBoundParameters
+    $Options = $selection.Options
+    $selectedMode = $selection.Mode
     foreach ($name in @('Provider', 'Model', 'BaseUrl', 'Behavior')) {
         if ($PSBoundParameters.ContainsKey($name)) {
             $Options[$name] = if ($name -eq 'Behavior') {
@@ -238,6 +331,9 @@ function Start-PwshHarness {
         $HarnessHost.ExtensionLoader.Load($config.ExtensionPaths)
         $session = $HarnessHost.NewSession($config)
         Initialize-HarnessConnection $HarnessHost $session $config -ApiKey $ApiKey -Interactive (Test-HarnessInteractive) -SaveConfig:$SaveConfig -ConfigPath $ConfigPath -ConnectionParameters $connectionParameters -Options $Options
+        if ($selectedMode) {
+            $null = $HarnessHost.AgentControl.SelectMode($session, $selectedMode, $selection.Source)
+        }
         $arguments.HarnessHost = $HarnessHost
         $arguments.Config = $config
         $arguments.Session = $session
@@ -249,6 +345,7 @@ function Start-PwshHarness {
     }
     finally {
         if ($session) {
+            $HarnessHost.AgentControl.Revoke($session)
             $HarnessHost.Credentials.Set($session, $null)
         }
         if ($ownsHost -and $HarnessHost) {
@@ -299,4 +396,5 @@ $ExecutionContext.SessionState.Module.OnRemove = {
 }
 Set-Alias -Name pwsh-harness -Value Start-PwshHarness
 Export-ModuleMember -Alias pwsh-harness -Function Set-PwshHarnessConfig, Remove-PwshHarnessCredential, Remove-HarnessHost, New-HarnessFrozen, New-HarnessHost, Invoke-PwshHarness, Start-PwshHarness, Get-HarnessSession, Test-HarnessCode, `
+    Get-HarnessPathSnapshot, Read-HarnessTextFile, Get-HarnessSecretPatterns, Get-HarnessSecretSuffixLength, Protect-HarnessText, `
     New-Harness*, Assert-Harness* -Variable HarnessApiVersion

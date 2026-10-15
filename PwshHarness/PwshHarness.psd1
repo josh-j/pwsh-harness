@@ -11,6 +11,13 @@
     Description       = 'Instance-based terminal assistant with transactional language packs.'
     PowerShellVersion = '7.6'
     FunctionsToExport = @(
+        'Get-HarnessPathSnapshot', 'Read-HarnessTextFile',
+        'Get-HarnessSecretPatterns', 'Get-HarnessSecretSuffixLength', 'Protect-HarnessText',
+        'New-HarnessToolCall', 'Assert-HarnessToolCall',
+        'New-HarnessToolResult', 'Assert-HarnessToolResult',
+        'New-HarnessAgentRun', 'Assert-HarnessAgentRun',
+        'New-HarnessAgentRunSummary', 'Assert-HarnessAgentRunSummary',
+        'New-HarnessPreparedOperation', 'Assert-HarnessPreparedOperation',
         'New-HarnessHost',
         'Remove-HarnessHost',
         'Invoke-PwshHarness',

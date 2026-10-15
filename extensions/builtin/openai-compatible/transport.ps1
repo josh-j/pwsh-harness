@@ -1,10 +1,38 @@
 function New-HarnessRequestBody {
     param([object]$Context, [switch]$DisableReasoning, [switch]$DisableTools)
-    # Deliberately enumerate a closed allowlist, including only the proposal tool.
+    # Deliberately enumerate a closed wire-field allowlist.
     $messages = @($Context.Messages | ForEach-Object { @{
                 role    = $_.Role
                 content = $_.Content
             } })
+    $agent = $Context.PSObject.Properties['AgentTools'] -and $Context.AgentTools
+    if ($agent -and $Context.PSObject.Properties['AgentMessages']) {
+        $messages = @(foreach ($message in $Context.AgentMessages) {
+                if ($message.role -cnotin @('system', 'user', 'assistant', 'tool')) {
+                    throw 'Invalid agent message role.'
+                }
+                $wire = @{ role = [string]$message.role; content = $message.content }
+                if ($message.role -ceq 'assistant' -and $message.tool_calls) {
+                    $wire.tool_calls = @(foreach ($call in $message.tool_calls) {
+                            @{ id = [string]$call.id; type = 'function'; function = @{
+                                    name = [string]$call.function.name; arguments = [string]$call.function.arguments
+                                }
+                            }
+                        })
+                }
+                if ($message.role -ceq 'tool') {
+                    $wire.tool_call_id = [string]$message.tool_call_id
+                }
+                if ($DisableTools -and ($wire.ContainsKey('tool_calls') -or $wire.role -ceq 'tool')) {
+                    $wire.content = [string]$wire.content + "`n" + ($wire.ContainsKey('tool_calls') ?
+                        ($wire.tool_calls | ConvertTo-Json -Depth 30 -Compress) : ('Tool result: ' + $wire.tool_call_id))
+                    $wire.role = $wire.role -ceq 'tool' ? 'user' : 'assistant'
+                    $wire.Remove('tool_calls')
+                    $wire.Remove('tool_call_id')
+                }
+                $wire
+            })
+    }
     $modelProfile = if ($Context.PSObject.Properties['Profile']) {
         $Context.Profile
     }
@@ -60,12 +88,26 @@ function New-HarnessRequestBody {
                     }
                 }
             })
+        if ($agent) {
+            $names = @($Context.AgentTools | ForEach-Object { $_.function.name })
+            if ($names.Count -ne 4 -or @('read', 'write', 'edit', 'pwsh' | Where-Object { $_ -cnotin $names }).Count -or
+                @($names | Select-Object -Unique).Count -ne 4) {
+                throw 'Agent schemas must contain the four built-in tools.'
+            }
+            $body.tools = @(foreach ($tool in $Context.AgentTools) {
+                    @{ type = 'function'; function = @{
+                            name = [string]$tool.function.name; description = [string]$tool.function.description
+                            parameters = $tool.function.parameters
+                        }
+                    }
+                })
+        }
         $body.tool_choice = 'auto'
     }
     $body | ConvertTo-Json -Depth 30 -Compress
 }
 function Add-HarnessToolDeltas {
-    param([hashtable]$Calls, $StreamEvent, [bool]$Enabled)
+    param([hashtable]$Calls, $StreamEvent, [bool]$Enabled, [switch]$Agent)
     if (-not $StreamEvent.Raw -or -not $StreamEvent.Raw.ContainsKey('choices')) {
         return
     }
@@ -87,14 +129,27 @@ function Add-HarnessToolDeltas {
         }
         foreach ($delta in $choice.delta.tool_calls) {
             if ($delta -isnot [Collections.IDictionary] -or -not $delta.ContainsKey('index') -or
-                $delta.index -isnot [long] -and $delta.index -isnot [int] -or $delta.index -lt 0 -or $delta.index -ge 64) {
+                $delta.index -isnot [long] -and $delta.index -isnot [int] -or $delta.index -lt 0 -or $delta.index -ge ($Agent ? 8 : 64)) {
                 throw 'Invalid tool call index.'
             }
             $index = [int]$delta.index
             if (-not $Calls.ContainsKey($index)) {
-                $Calls[$index] = @{ Name = ''; Arguments = [Text.StringBuilder]::new() }
+                $Calls[$index] = @{ Id = ''; Name = ''; Arguments = [Text.StringBuilder]::new(); ArgumentDeltas = 0; Bytes = 0; Encoder = [Text.Encoding]::UTF8.GetEncoder() }
             }
-            if ($delta.ContainsKey('type') -and $delta.type -ne 'function') {
+            if ($Agent) {
+                if (@($delta.Keys | Where-Object { $_ -cnotin @('index', 'id', 'type', 'function') }).Count -or
+                    ($delta.function -and @($delta.function.Keys | Where-Object { $_ -cnotin @('name', 'arguments') }).Count)) {
+                    throw 'Unknown tool call field.'
+                }
+                if ($delta.ContainsKey('id')) {
+                    if ($delta.id -isnot [string] -or $delta.id -cnotmatch '^[A-Za-z0-9_-]{1,128}$' -or
+                        ($Calls[$index].Id -and $Calls[$index].Id -cne $delta.id)) {
+                        throw 'Invalid or changed tool call ID.'
+                    }
+                    $Calls[$index].Id = $delta.id
+                }
+            }
+            if ($delta.ContainsKey('type') -and $delta.type -cne 'function') {
                 throw 'Unsupported tool call type.'
             }
             if ($delta.ContainsKey('function') -and $delta.function) {
@@ -109,16 +164,70 @@ function Add-HarnessToolDeltas {
                     if ($function.arguments -isnot [string]) {
                         throw 'Invalid tool arguments.'
                     }
-                    $total = $function.arguments.Length
+                    $count = $Calls[$index].Encoder.GetByteCount($function.arguments.ToCharArray(), 0, $function.arguments.Length, $false)
+                    $Calls[$index].Bytes += $count
+                    $total = $Agent ? 0 : $function.arguments.Length
                     foreach ($call in $Calls.Values) {
-                        $total += $call.Arguments.Length
+                        $total += $Agent ? $call.Bytes : $call.Arguments.Length
                     }
-                    if ($total -gt 1048576) {
+                    if (($Agent -and ($Calls[$index].Bytes -gt 2097152 -or $total -gt 8388608)) -or
+                        (-not $Agent -and $total -gt 1048576)) {
                         throw 'Tool arguments exceed the size limit.'
                     }
                     $null = $Calls[$index].Arguments.Append($function.arguments)
+                    $Calls[$index].ArgumentDeltas++
                 }
             }
+        }
+    }
+}
+function Assert-HarnessToolJson {
+    param([Text.Json.JsonElement]$Value)
+    if ($Value.ValueKind -eq 'Object') {
+        $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($field in $Value.EnumerateObject()) {
+            if (-not $names.Add($field.Name)) {
+                throw 'Duplicate tool argument key.'
+            }
+            Assert-HarnessToolJson $field.Value
+        }
+    }
+    elseif ($Value.ValueKind -eq 'Array') {
+        foreach ($item in $Value.EnumerateArray()) {
+            Assert-HarnessToolJson $item
+        }
+    }
+}
+function ConvertFrom-HarnessAgentCalls {
+    param([hashtable]$Calls, [string]$FinishReason, [bool]$Done, [string[]]$Redact)
+    if (($Calls.Count -or $FinishReason -ceq 'tool_calls') -and
+        (-not $Calls.Count -or $FinishReason -cne 'tool_calls' -or -not $Done)) {
+        throw 'Incomplete agent tool call response.'
+    }
+    $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($index in @($Calls.Keys | Sort-Object)) {
+        if ($index -ne $ids.Count) {
+            throw 'Noncontiguous tool call indices.'
+        }
+        $call = $Calls[$index]
+        if ($call.Name -cnotin @('read', 'write', 'edit', 'pwsh') -or -not $call.Id -or -not $ids.Add($call.Id)) {
+            throw 'Unknown tool or duplicate/missing tool call ID.'
+        }
+        $json = $call.Arguments.ToString()
+        if ((Protect-HarnessText ($call.Id + $call.Name + $json) $Redact) -cne ($call.Id + $call.Name + $json)) {
+            throw 'Agent tool call contains a credential.'
+        }
+        $document = [Text.Json.JsonDocument]::Parse($json)
+        try {
+            if ($document.RootElement.ValueKind -ne 'Object') {
+                throw 'Tool arguments must be an object.'
+            }
+            Assert-HarnessToolJson $document.RootElement
+            $arguments = $call.Arguments.ToString() | ConvertFrom-Json -AsHashtable -Depth 30 -ErrorAction Stop
+            New-HarnessFrozen (New-HarnessToolCall -Id $call.Id -Name $call.Name -Arguments $arguments)
+        }
+        finally {
+            $document.Dispose()
         }
     }
 }
@@ -163,8 +272,8 @@ function ConvertFrom-HarnessToolProposals {
                 $file.path -match '[\x00-\x1f\x7f]') {
                 throw 'Invalid PowerShell proposal.'
             }
-            $code = Protect-HarnessProviderText $file.code $Redact
-            $path = Protect-HarnessProviderText $file.path $Redact
+            $code = Protect-HarnessText $file.code $Redact
+            $path = Protect-HarnessText $file.path $Redact
             if ($path) {
                 $code = '# File: ' + $path + "`n" + $code
             }
@@ -177,24 +286,6 @@ function ConvertFrom-HarnessToolProposals {
         }
     }
     $blocks -join "`n`n"
-}
-function Protect-HarnessProviderText {
-    param([string]$Text, [string[]]$Redact)
-    $marker = '[REDACTED]'
-    foreach ($candidate in @('[REDACTED]', '***', '???', '###', [string][char]0x2588)) {
-        if (-not @($Redact | Where-Object {
-                    $_ -and ($candidate.Contains($_) -or $_.Contains($candidate[0]) -or $_.Contains($candidate[-1]))
-                }).Count) {
-            $marker = $candidate
-            break
-        }
-    }
-    foreach ($value in $Redact) {
-        if ($value) {
-            $Text = $Text.Replace($value, $marker)
-        }
-    }
-    $Text
 }
 function Get-HarnessProviderFailureMessage {
     param([Exception]$Exception, [string[]]$Redact)
@@ -213,7 +304,7 @@ function Get-HarnessProviderFailureMessage {
         }
         $Exception = $Exception.InnerException
     }
-    $detail = Protect-HarnessProviderText ($messages -join ' -> ') $Redact
+    $detail = Protect-HarnessText ($messages -join ' -> ') $Redact
     if ($detail.Length -gt 4096) {
         $detail = $detail.Substring(0, 4096) + '...'
     }
@@ -225,7 +316,7 @@ function Get-HarnessProviderFailureMessage {
 function Protect-HarnessProviderData {
     param($Value, [string[]]$Redact, [switch]$PropertyNames, [string[]]$PreserveNames = @())
     if ($Value -is [string]) {
-        return Protect-HarnessProviderText $Value $Redact
+        return Protect-HarnessText $Value $Redact
     }
     if ($Value -is [Collections.IDictionary]) {
         if ($PropertyNames) {
@@ -236,7 +327,7 @@ function Protect-HarnessProviderData {
                     $name
                 }
                 else {
-                    Protect-HarnessProviderText $name $Redact
+                    Protect-HarnessText $name $Redact
                 }
                 $names[$name] = $safeName
                 if ($safeName -ceq $name) {
@@ -246,7 +337,7 @@ function Protect-HarnessProviderData {
             $copy = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
             $pattern = @($Redact | Where-Object { $_ } | Select-Object -First 1)
             $suffix = if ($pattern.Count) {
-                Protect-HarnessProviderText $pattern[0] $Redact
+                Protect-HarnessText $pattern[0] $Redact
             }
             else {
                 ''
@@ -291,17 +382,10 @@ function Protect-HarnessProviderData {
 }
 function Protect-HarnessStreamingText {
     param([hashtable]$Redaction, [string]$Text, [switch]$Final)
-    $safe = Protect-HarnessProviderText ($Redaction.Pending + $Text) $Redaction.Patterns
+    $safe = Protect-HarnessText ($Redaction.Pending + $Text) $Redaction.Patterns
     $held = 0
     if (-not $Final) {
-        foreach ($pattern in $Redaction.Patterns) {
-            for ($length = [Math]::Min($safe.Length, $pattern.Length - 1); $length -gt $held; $length--) {
-                if ($safe.EndsWith($pattern.Substring(0, $length), [StringComparison]::Ordinal)) {
-                    $held = $length
-                    break
-                }
-            }
-        }
+        $held = Get-HarnessSecretSuffixLength $safe $Redaction.Patterns
     }
     # Hold only a possible credential prefix; complete matches are already replaced.
     $Redaction.Pending = $safe.Substring($safe.Length - $held)
@@ -309,11 +393,10 @@ function Protect-HarnessStreamingText {
 }
 function Get-HarnessCredentialPatterns {
     param([string]$Value)
-    @($Value, [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value)),
-        [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Value)))
+    Get-HarnessSecretPatterns $Value
 }
 function ConvertFrom-HarnessSseEvent {
-    param([string[]]$Data, [string[]]$Redact = @())
+    param([string[]]$Data, [string[]]$Redact = @(), [switch]$Agent)
     if (-not $Data -or $Data.Count -eq 0) {
         return
     }
@@ -328,10 +411,22 @@ function ConvertFrom-HarnessSseEvent {
         }
     }
     try {
+        if ($Agent) {
+            $document = [Text.Json.JsonDocument]::Parse($payload)
+            try {
+                Assert-HarnessToolJson $document.RootElement
+            }
+            finally {
+                $document.Dispose()
+            }
+        }
         $json = $payload | ConvertFrom-Json -AsHashtable -ErrorAction Stop
     }
     catch {
         throw 'Invalid SSE JSON event.'
+    }
+    $original = if ($Agent -and $Redact.Count) {
+        $payload | ConvertFrom-Json -AsHashtable -ErrorAction Stop
     }
     if ($Redact.Count) {
         $json = Protect-HarnessProviderData $json $Redact
@@ -343,7 +438,7 @@ function ConvertFrom-HarnessSseEvent {
         else {
             [string]$json.error
         }
-        $message = Protect-HarnessProviderText ([string]$message) $Redact
+        $message = Protect-HarnessText ([string]$message) $Redact
         throw "Provider error: $message"
     }
     $text = ''
@@ -370,7 +465,10 @@ function ConvertFrom-HarnessSseEvent {
             'prompt_tokens', 'completion_tokens', 'total_tokens', 'prompt_tokens_details',
             'completion_tokens_details')
     }
-    $raw = if ($Redact.Count) {
+    $raw = if ($original) {
+        $original
+    }
+    elseif ($Redact.Count) {
         Protect-HarnessProviderData $json $Redact -PropertyNames
     }
     else {
@@ -456,6 +554,7 @@ function Wait-HarnessBackoff {
 function Invoke-HarnessHttpProvider {
     param([object]$Context, [scriptblock]$OnToken, [System.Threading.CancellationToken]$CancellationToken)
     $config = $Context.Config
+    $agent = [bool]($Context.PSObject.Properties['AgentTools'] -and $Context.AgentTools)
     $reasoningDisabled = $Context.State -and $Context.State.PSObject.Properties['ReasoningEffortUnsupported'] -and
     $Context.State.ReasoningEffortUnsupported
     if (-not $config.BaseUrl) {
@@ -474,7 +573,7 @@ function Invoke-HarnessHttpProvider {
         }) -SavedKeyReader { if (Get-Variable Credentials -Scope Script -ErrorAction Ignore) {
             $script:Credentials.GetSaved($Context.State, $config)
         } }
-    $redact = Get-HarnessCredentialPatterns $key
+    $redact = Get-HarnessSecretPatterns $key
     $client = [Net.Http.HttpClient]::new()
     $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
     $linked = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($CancellationToken)
@@ -484,6 +583,7 @@ function Invoke-HarnessHttpProvider {
     $response = $null
     $reader = $null
     $stream = $null
+    $usage = $null
     try {
         for ($attempt = 0; ; $attempt++) {
             $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, $uri)
@@ -494,6 +594,9 @@ function Invoke-HarnessHttpProvider {
             $request.Headers.Authorization = $authorization
             $request.Headers.Accept.ParseAdd('text/event-stream')
             $request.Content = [Net.Http.StringContent]::new((New-HarnessRequestBody $Context -DisableReasoning:$reasoningDisabled -DisableTools:$toolsDisabled), [Text.Encoding]::UTF8, 'application/json')
+            if ($Context.PSObject.Properties['BeforeRequest'] -and $Context.BeforeRequest) {
+                $null = & $Context.BeforeRequest
+            }
             $response = Wait-HarnessTask ($client.SendAsync($request,
                     [Net.Http.HttpCompletionOption]::ResponseHeadersRead,
                     $token)) $token $Context
@@ -509,7 +612,7 @@ function Invoke-HarnessHttpProvider {
             }
             if (-not $response.IsSuccessStatusCode) {
                 $body = Wait-HarnessTask ($response.Content.ReadAsStringAsync($token)) $token $Context
-                $message = Protect-HarnessProviderText $body $redact
+                $message = Protect-HarnessText $body $redact
                 try {
                     $errorBody = Protect-HarnessProviderData ($body | ConvertFrom-Json -AsHashtable) $redact
                     $message = Protect-HarnessProviderData $errorBody $redact -PropertyNames | ConvertTo-Json -Depth 30 -Compress
@@ -523,7 +626,7 @@ function Invoke-HarnessHttpProvider {
                     }
                 }
                 catch {
-                    $message = Protect-HarnessProviderText $body $redact
+                    $message = Protect-HarnessText $body $redact
                 }
                 if ($statusCode -in @(400, 404, 422) -and -not $toolsDisabled -and
                     [string]$message -match '(?i)\b(tools?|tool_choice|function calling)\b' -and
@@ -559,7 +662,7 @@ function Invoke-HarnessHttpProvider {
                     continue
                 }
                 # Replace the secret even when a faulty gateway reflects it.
-                $message = Protect-HarnessProviderText ([string]$message) $redact
+                $message = Protect-HarnessText ([string]$message) $redact
                 throw "HTTP $statusCode`: $message"
             }
             break
@@ -581,20 +684,26 @@ function Invoke-HarnessHttpProvider {
         $data = [Collections.Generic.List[string]]::new()
         $text = [Text.StringBuilder]::new()
         $redaction = @{ Pending = ''; Patterns = @($redact | Where-Object { $_ }) }
-        $usage = $null
         $done = $false
         $finishReason = ''
         $toolCalls = @{}
+        $responseBytes = 0
         while (-not $done) {
             $line = Wait-HarnessTask ($reader.ReadLineAsync($token).AsTask()) $token $Context
+            if ($agent -and $null -ne $line) {
+                $responseBytes += [Text.Encoding]::UTF8.GetByteCount($line) + 1
+                if ($responseBytes -gt 8388608) {
+                    throw 'Agent response exceeds 8 MiB.'
+                }
+            }
             if ($null -eq $line -or $line -eq '') {
                 if ($data.Count) {
-                    $eventName = ConvertFrom-HarnessSseEvent $data.ToArray() -Redact $redact
+                    $eventName = ConvertFrom-HarnessSseEvent $data.ToArray() -Redact $redact -Agent:$agent
                     $data.Clear()
-                    Add-HarnessToolDeltas $toolCalls $eventName (-not $toolsDisabled)
                     if ($eventName.Usage) {
                         $usage = $eventName.Usage
                     }
+                    Add-HarnessToolDeltas $toolCalls $eventName (-not $toolsDisabled) -Agent:$agent
                     if ($eventName.FinishReason) {
                         $finishReason = $eventName.FinishReason
                     }
@@ -630,7 +739,15 @@ function Invoke-HarnessHttpProvider {
                 $null = & $OnToken $fragment $Context.State
             }
         }
-        $proposal = ConvertFrom-HarnessToolProposals $toolCalls $finishReason $redact
+        $wireFinishReason = $finishReason
+        $agentCalls = @()
+        $proposal = ''
+        if ($agent) {
+            $agentCalls = @(ConvertFrom-HarnessAgentCalls $toolCalls $finishReason $done $redact)
+        }
+        else {
+            $proposal = ConvertFrom-HarnessToolProposals $toolCalls $finishReason $redact
+        }
         if ($proposal) {
             $null = $text.Append("`n`n" + $proposal)
             $Context.State.StreamingText = $text.ToString()
@@ -640,21 +757,30 @@ function Invoke-HarnessHttpProvider {
             $finishReason = 'stop'
         }
         [pscustomobject]@{
-            Text         = $text.ToString()
-            Usage        = $usage
-            FinishReason = $finishReason
+            Text               = $text.ToString()
+            Usage              = $usage
+            FinishReason       = $finishReason
+            # Numeric wire observations for opt-in diagnostics; no arguments or secrets.
+            WireFinishReason   = $wireFinishReason
+            NativeToolCalls    = $toolCalls.Count
+            ToolArgumentDeltas = [int](($toolCalls.Values | Measure-Object ArgumentDeltas -Sum).Sum)
+            Metadata           = New-HarnessFrozen @{ ToolCalls = $agentCalls; FinishReason = $wireFinishReason; ToolFallback = [bool]($agent -and $toolsDisabled) }
         }
     }
     catch {
-        if ($CancellationToken.IsCancellationRequested -or $linked.IsCancellationRequested) {
-            if ($CancellationToken.IsCancellationRequested) {
-                throw [OperationCanceledException]::new('Request cancelled.',
-                    $CancellationToken)
-            }
-            throw [TimeoutException]::new("Provider timed out after $($config.TimeoutSeconds) seconds.")
+        $failure = if ($CancellationToken.IsCancellationRequested) {
+            [OperationCanceledException]::new('Request cancelled.', $CancellationToken)
         }
-        $safeMessage = Get-HarnessProviderFailureMessage $_.Exception $redact
-        throw [InvalidOperationException]::new($safeMessage)
+        elseif ($linked.IsCancellationRequested) {
+            [TimeoutException]::new("Provider timed out after $($config.TimeoutSeconds) seconds.")
+        }
+        else {
+            [InvalidOperationException]::new((Get-HarnessProviderFailureMessage $_.Exception $redact))
+        }
+        if ($usage) {
+            $failure.Data['Usage'] = New-HarnessFrozen $usage
+        }
+        throw $failure
     }
     finally {
         if ($reader) {

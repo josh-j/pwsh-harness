@@ -17,7 +17,7 @@ function New-HarnessViewState {
     [pscustomobject]@{
 
 
-        Editor       = [pscustomobject]@{
+        Editor              = [pscustomobject]@{
 
 
             Text         =''
@@ -26,7 +26,7 @@ function New-HarnessViewState {
             HistoryIndex =0
             Paste        =$false
         }
-        Viewport     = [pscustomobject]@{
+        Viewport            = [pscustomobject]@{
 
 
             ScrollOffset =0
@@ -34,9 +34,11 @@ function New-HarnessViewState {
             PaneHeight   =10
             Width        =0
         }
-        StatusBar    = [pscustomobject]@{
+        StatusBar           = [pscustomobject]@{
 
 
+            Mode                  = 'APPROVE'
+            Steps                 = ''
             Text                  ='Ready'
             ExtensionNotice       = ''
             Profile               =''
@@ -57,12 +59,12 @@ function New-HarnessViewState {
             ToolPreviewLines      =4
             ConfiguredExpandTools =$false
         }
-        Spinner      = [pscustomobject]@{
+        Spinner             = [pscustomobject]@{
 
 
             Index =0
         }
-        Panels       = [pscustomobject]@{
+        Panels              = [pscustomobject]@{
 
 
             ShowDiff           =$false
@@ -71,7 +73,7 @@ function New-HarnessViewState {
             CodeLine           =1
             ExpandTools        =$false
         }
-        SessionView  = [pscustomobject]@{
+        SessionView         = [pscustomobject]@{
 
 
             SessionId         =if ($Session) {
@@ -89,12 +91,15 @@ function New-HarnessViewState {
             Operation         =$null
             NextPromptSummary =''
         }
-        RenderCache  = [pscustomobject]@{ Width = 0; Ascii = $false; Expanded = $false; PreviewLines = 4; Start = 0; Records = @() }
-        ReviewMode   =$false
-        Quit         =$false
-        LastControlC =-2000L
-        Renderer     ='Default'
-        Dirty        =$true
+        RenderCache         = [pscustomobject]@{ Width = 0; Height = 0; Ascii = $false; Expanded = $false; PreviewLines = 4; Start = 0; Records = @(); Transcript = $null; Streaming = $null }
+        ValidatedTranscript = $null
+        InputRevision       = 0L
+        RenderInterrupted   = $false
+        ReviewMode          =$false
+        Quit                =$false
+        LastControlC        =-2000L
+        Renderer            ='Default'
+        Dirty               =$true
     }
 }
 function Update-HarnessSessionView {
@@ -196,6 +201,11 @@ function Get-HarnessGlyphWidth {
     param([string]$Glyph)
     if (-not $Glyph) {
         return 0
+    }
+    # A provider/editor fragment can end between UTF-16 surrogate halves. The next
+    # frame will contain the complete grapheme; render the partial unit defensively.
+    if ($Glyph.Length -eq 1 -and [char]::IsSurrogate($Glyph[0])) {
+        return 1
     }
     $value = [char]::ConvertToUtf32($Glyph, 0)
     if ($value -in @(0x200D, 0xFE0F) -or [Globalization.CharUnicodeInfo]::GetUnicodeCategory($Glyph, 0) -in @('NonSpacingMark', 'EnclosingMark', 'Format')) {
@@ -304,6 +314,22 @@ function Split-HarnessStatus {
         $line
     }
 }
+function Get-HarnessFittedHints {
+    param([string[]]$Hints, [int]$Width)
+    $text = ''
+    foreach ($hint in $Hints) {
+        $candidate = if ($text) {
+            $text + ' | ' + $hint
+        }
+        else {
+            $hint
+        }
+        if ((Get-HarnessTextWidth $candidate) -le $Width) {
+            $text = $candidate
+        }
+    }
+    $text
+}
 function Get-HarnessRenderModel {
     <# .SYNOPSIS
     Render a ViewModel and size into a pure frame of styled segment rows.
@@ -312,7 +338,6 @@ function Get-HarnessRenderModel {
     param([Parameter(Mandatory)]$State, [int]$Width = 80, [int]$Height = 24)
     $Width = [Math]::Max(20, $Width)
     $Height = [Math]::Max(8, $Height)
-    $all = [Collections.Generic.List[object]]::new()
     $records = @($State.SessionView.Records.ToArray())
     if ($State.SessionView.Busy) {
         $records += [pscustomobject]@{
@@ -325,161 +350,237 @@ function Get-HarnessRenderModel {
     $result = $State.SessionView.LastResult
     $hasInlineCode = $false
     $cache = $State.RenderCache
-    $cacheStart = [Math]::Max(0, $records.Count - 64)
-    $cachedRecords = [Collections.Generic.List[object]]::new()
-    $cachedRowCount = 0
-    $recordIndex = -1
-    foreach ($record in $records) {
-        $recordIndex++
-        if ($record.Role -eq 'continuation') {
-            if ($recordIndex -ge $cacheStart) {
-                $cachedRecords.Add($null)
+    $streamingCache = $cache.Streaming
+    # Snapshot text as well as role: headless callers can edit a record in place.
+    # Reuse immutable aggregate rows when only editor/status/scroll state changes.
+    $resultCode = if ($result) {
+        ($result.CodeBlocks | ForEach-Object { $_.Code }) -join "`0"
+    }
+    else {
+        ''
+    }
+    $diffKey = if ($result -and $State.Panels.ShowDiff) {
+        $result | ConvertTo-Json -Depth 12 -Compress
+    }
+    else {
+        ''
+    }
+    $diagnosticKey = if ($State.Panels.ShowDiagnostics) {
+        $State.SessionView.Diagnostics | ConvertTo-Json -Depth 6 -Compress
+    }
+    else {
+        ''
+    }
+    $layoutKey = "$Height|$($State.ReviewMode)|$($State.Panels.ShowDiff)|$($State.Panels.ShowDiagnostics)|$($State.Panels.CodeLine)|$($State.Panels.SelectedDiagnostic)|$resultCode|$diffKey|$diagnosticKey"
+    $reuseTranscript = $null -ne $cache.Transcript -and $cache.Width -eq $Width -and $cache.Ascii -eq $State.StatusBar.Ascii -and
+    $cache.Expanded -eq $State.Panels.ExpandTools -and $cache.PreviewLines -eq $State.StatusBar.ToolPreviewLines -and
+    [string]::Equals($cache.LayoutKey, $layoutKey, [StringComparison]::Ordinal) -and $cache.Busy -eq $State.SessionView.Busy -and $cache.Sources.Count -eq $records.Count
+    if ($reuseTranscript) {
+        for ($i = 0; $i -lt $records.Count; $i++) {
+            if (-not [string]::Equals($cache.Sources[$i].Role, $records[$i].Role, [StringComparison]::Ordinal) -or
+                -not [string]::Equals($cache.Sources[$i].Text, $records[$i].Text, [StringComparison]::Ordinal)) {
+                $reuseTranscript = $false
+                break
             }
-            continue
-        }
-        $all.Add((New-HarnessFrameRow "[$($record.Role)]" -Color Cyan))
-        $blocks = @()
-        if ($record.Role -eq 'assistant' -and -not $State.SessionView.Busy -and $result -and
-            (($result -is [Collections.IDictionary] -and $result.ContainsKey('Text')) -or $result.PSObject.Properties['Text']) -and $record.Text -ceq $result.Text) {
-            $blocks = @($result.CodeBlocks)
-        }
-        $blocksText = ($blocks | ForEach-Object { $_.Code }) -join "`0"
-        $cacheIndex = $recordIndex - $cache.Start
-        $cached = if ($cacheIndex -ge 0 -and $cacheIndex -lt $cache.Records.Count) {
-            $cache.Records[$cacheIndex]
-        }
-        else {
-            $null
-        }
-        $recordRows = if ($cache.Width -eq $Width -and $cache.Ascii -eq $State.StatusBar.Ascii -and $cache.Expanded -eq $State.Panels.ExpandTools -and $cache.PreviewLines -eq $State.StatusBar.ToolPreviewLines -and $cached -and
-            $cached.Role -ceq $record.Role -and $cached.Text -ceq $record.Text -and $cached.BlocksText -ceq $blocksText) {
-            $cached.Rows
-        }
-        elseif ($record.Role -eq 'assistant') {
-            @(Get-HarnessMarkdownRows $record.Text $Width $State.StatusBar.Ascii $blocks)
-        }
-        elseif (-not $State.ReviewMode -and -not $State.Panels.ExpandTools -and $record.Role -in @('approval', 'patch', 'patch-rollback', 'run', 'action', 'operation')) {
-            $lines = @([regex]::Split((ConvertTo-HarnessSafeText $record.Text), '\r\n|\n|\r'))
-            $limit = if ($record.Role -eq 'approval') {
-                1
-            }
-            else {
-                $State.StatusBar.ToolPreviewLines
-            }
-            $preview = @($lines | Select-Object -First $limit)
-            @(foreach ($line in $preview) {
-                    $length = [Math]::Min($line.Length, $Width * 3)
-                    if ($length -gt 0 -and [char]::IsHighSurrogate($line[$length - 1])) {
-                        $length--
-                    }
-                    $text = if ($length -lt $line.Length) {
-                        $line.Substring(0, $length) + ' ...'
-                    }
-                    else {
-                        $line
-                    }
-                    foreach ($part in @(Split-HarnessDisplayLine $text $Width)) {
-                        New-HarnessFrameRow $part
-                    }
-                }
-                if ($lines.Count -gt $limit) {
-                    New-HarnessFrameRow '... Ctrl+O expand | F12 full log' -Color BrightBlack
-                })
-        }
-        else {
-            @(foreach ($line in [regex]::Split($record.Text, '\r\n|\n|\r')) {
-                    foreach ($part in @(Split-HarnessDisplayLine (ConvertTo-HarnessSafeText $line) $Width)) {
-                        New-HarnessFrameRow $part
-                    }
-                })
-        }
-        $recordRows = @($recordRows)
-        if ($blocks.Count) {
-            $hasInlineCode = @($recordRows | Where-Object { $_.Text -match '^--- (powershell|pwsh|ps1) #\d+ ---$' }).Count -gt 0
-        }
-        foreach ($row in $recordRows) {
-            $all.Add($row)
-        }
-        if ($recordIndex -ge $cacheStart) {
-            # Keep bounded frontend-only data; the pure renderer returns the next cache.
-            $entry = $null
-            if ($cachedRowCount + $recordRows.Count -le 8192) {
-                $entry = [pscustomobject]@{ Role = $record.Role; Text = $record.Text; BlocksText = $blocksText; Rows = $recordRows }
-                $cachedRowCount += $recordRows.Count
-            }
-            $cachedRecords.Add($entry)
         }
     }
-    if (-not $State.SessionView.Busy -and $result -and $result.CodeBlocks.Count -and (-not $hasInlineCode -or $State.Panels.ShowDiff -or $State.Panels.CodeLine -gt 1)) {
-        $heading = if ($State.StatusBar.Ascii) {
-            '--- Fixed code ---'
-        }
-        else {
-            '─ Fixed code ─'
-        }
-        $all.Add((New-HarnessFrameRow $heading -Color Cyan))
-        $lineNumber = 0
-        foreach ($line in (ConvertTo-HarnessSafeText $result.CodeBlocks[0].Code).Split("`n")) {
-            $lineNumber++
-            if ($lineNumber -lt $State.Panels.CodeLine -or $lineNumber -ge $State.Panels.CodeLine + [Math]::Max(1, $Height - 7)) {
+    if ($reuseTranscript) {
+        $allRows = $cache.Transcript
+        $nextCache = $cache
+    }
+    else {
+        $all = [Collections.Generic.List[object]]::new()
+        $cacheStart = [Math]::Max(0, $records.Count - 2048)
+        $cachedRecords = [Collections.Generic.List[object]]::new()
+        $cachedRowCount = 0
+        $recordIndex = -1
+        foreach ($record in $records) {
+            $recordIndex++
+            if ($record.Role -eq 'continuation') {
+                if ($recordIndex -ge $cacheStart) {
+                    $cachedRecords.Add($null)
+                }
                 continue
             }
-            foreach ($part in @(Split-HarnessDisplayLine ('{0,4} | {1}' -f $lineNumber, $line) $Width)) {
-                $all.Add((New-HarnessFrameRow $part $true))
+            $blocks = @()
+            if ($record.Role -eq 'assistant' -and -not $State.SessionView.Busy -and $result -and
+                (($result -is [Collections.IDictionary] -and $result.ContainsKey('Text')) -or $result.PSObject.Properties['Text']) -and $record.Text -ceq $result.Text) {
+                $blocks = @($result.CodeBlocks)
             }
-        }
-        if ($State.Panels.ShowDiff) {
-            $all.Add((New-HarnessFrameRow '--- FixDiff ---' -Color Yellow))
-            $diff = if (($result -is [Collections.IDictionary] -and $result.ContainsKey('FixDiff')) -or $result.PSObject.Properties['FixDiff']) {
-                $result.FixDiff
+            $blocksText = ($blocks | ForEach-Object { $_.Code }) -join "`0"
+            $cacheIndex = $recordIndex - $cache.Start
+            $cached = if ($cacheIndex -ge 0 -and $cacheIndex -lt $cache.Records.Count) {
+                $cache.Records[$cacheIndex]
             }
             else {
-                ($result.Edits | ForEach-Object { "@@ line $($_.Line): $($_.Rule) @@`n- $($_.Before)`n+ $($_.After)" }) -join "`n"
+                $null
             }
-            if (-not $diff) {
-                $diff = '(no deterministic edits)'
+            $headingRow = if ($cached -and $cached.Role -ceq $record.Role) {
+                $cached.Heading
             }
-            foreach ($line in (ConvertTo-HarnessSafeText $diff).Split("`n")) {
-                foreach ($part in @(Split-HarnessDisplayLine $line $Width)) {
-                    $all.Add((New-HarnessFrameRow $part -Color Yellow))
+            else {
+                New-HarnessFrameRow "[$($record.Role)]" -Color Cyan
+            }
+            $all.Add($headingRow)
+            $recordRows = if ($cache.Width -eq $Width -and $cache.Ascii -eq $State.StatusBar.Ascii -and $cache.Expanded -eq $State.Panels.ExpandTools -and $cache.PreviewLines -eq $State.StatusBar.ToolPreviewLines -and $cached -and
+                [string]::Equals($cached.Role, $record.Role, [StringComparison]::Ordinal) -and
+                [string]::Equals($cached.Text, $record.Text, [StringComparison]::Ordinal) -and
+                [string]::Equals($cached.BlocksText, $blocksText, [StringComparison]::Ordinal)) {
+                $cached.Rows
+            }
+            elseif ($record.Role -eq 'assistant') {
+                if ($State.SessionView.Busy -and $recordIndex -eq $records.Count - 1) {
+                    $stream = Get-HarnessStreamingMarkdown $record.Text $Width $State.StatusBar.Ascii $streamingCache
+                    $streamingCache = $stream.Cache
+                    $stream.Rows
+                }
+                else {
+                    @(Get-HarnessMarkdownRows $record.Text $Width $State.StatusBar.Ascii $blocks)
+                }
+            }
+            elseif (-not $State.ReviewMode -and -not $State.Panels.ExpandTools -and $record.Role -in @('approval', 'patch', 'patch-rollback', 'run', 'action', 'operation')) {
+                $lines = @([regex]::Split((ConvertTo-HarnessSafeText $record.Text), '\r\n|\n|\r'))
+                $limit = if ($record.Role -eq 'approval') {
+                    1
+                }
+                else {
+                    $State.StatusBar.ToolPreviewLines
+                }
+                $preview = @($lines | Select-Object -First $limit)
+                @(foreach ($line in $preview) {
+                        $length = [Math]::Min($line.Length, $Width * 3)
+                        if ($length -gt 0 -and [char]::IsHighSurrogate($line[$length - 1])) {
+                            $length--
+                        }
+                        $text = if ($length -lt $line.Length) {
+                            $line.Substring(0, $length) + ' ...'
+                        }
+                        else {
+                            $line
+                        }
+                        foreach ($part in @(Split-HarnessDisplayLine $text $Width)) {
+                            New-HarnessFrameRow $part
+                        }
+                    }
+                    if ($lines.Count -gt $limit) {
+                        New-HarnessFrameRow '... Ctrl+O expand | F12 full log' -Color BrightBlack
+                    })
+            }
+            else {
+                @(foreach ($line in [regex]::Split($record.Text, '\r\n|\n|\r')) {
+                        foreach ($part in @(Split-HarnessDisplayLine (ConvertTo-HarnessSafeText $line) $Width)) {
+                            New-HarnessFrameRow $part
+                        }
+                    })
+            }
+            $recordRows = @($recordRows)
+            if ($blocks.Count) {
+                $hasInlineCode = @($recordRows | Where-Object { $_.Text -match '^--- (powershell|pwsh|ps1) #\d+ ---$' }).Count -gt 0
+            }
+            $all.AddRange([object[]]$recordRows)
+            if ($recordIndex -ge $cacheStart) {
+                # Keep bounded frontend-only data; the pure renderer returns the next cache.
+                $entry = $null
+                if ($cachedRowCount + $recordRows.Count -le 32768) {
+                    $entry = [pscustomobject]@{ Role = $record.Role; Text = $record.Text; BlocksText = $blocksText; Rows = $recordRows; Heading = $headingRow }
+                    $cachedRowCount += $recordRows.Count
+                }
+                $cachedRecords.Add($entry)
+            }
+        }
+        if (-not $State.SessionView.Busy -and $result -and $result.CodeBlocks.Count -and (-not $hasInlineCode -or $State.Panels.ShowDiff -or $State.Panels.CodeLine -gt 1)) {
+            $heading = if ($State.StatusBar.Ascii) {
+                '--- Fixed code ---'
+            }
+            else {
+                '─ Fixed code ─'
+            }
+            $all.Add((New-HarnessFrameRow $heading -Color Cyan))
+            $lineNumber = 0
+            foreach ($line in (ConvertTo-HarnessSafeText $result.CodeBlocks[0].Code).Split("`n")) {
+                $lineNumber++
+                if ($lineNumber -lt $State.Panels.CodeLine -or $lineNumber -ge $State.Panels.CodeLine + [Math]::Max(1, $Height - 7)) {
+                    continue
+                }
+                foreach ($part in @(Split-HarnessDisplayLine ('{0,4} | {1}' -f $lineNumber, $line) $Width)) {
+                    $all.Add((New-HarnessFrameRow $part $true))
+                }
+            }
+            if ($State.Panels.ShowDiff) {
+                $all.Add((New-HarnessFrameRow '--- FixDiff ---' -Color Yellow))
+                $diff = if (($result -is [Collections.IDictionary] -and $result.ContainsKey('FixDiff')) -or $result.PSObject.Properties['FixDiff']) {
+                    $result.FixDiff
+                }
+                else {
+                    ($result.Edits | ForEach-Object { "@@ line $($_.Line): $($_.Rule) @@`n- $($_.Before)`n+ $($_.After)" }) -join "`n"
+                }
+                if (-not $diff) {
+                    $diff = '(no deterministic edits)'
+                }
+                foreach ($line in (ConvertTo-HarnessSafeText $diff).Split("`n")) {
+                    foreach ($part in @(Split-HarnessDisplayLine $line $Width)) {
+                        $all.Add((New-HarnessFrameRow $part -Color Yellow))
+                    }
                 }
             }
         }
-    }
-    if ($State.Panels.ShowDiagnostics -and $State.SessionView.Diagnostics.Count) {
-        $all.Add((New-HarnessFrameRow '--- Diagnostics (F8 next, F9 jump) ---' -Color Yellow))
-        $index = 0
-        $diagnosticStart = [Math]::Max(0, [Math]::Min($State.Panels.SelectedDiagnostic - 1, $State.SessionView.Diagnostics.Count - 4))
-        $index = $diagnosticStart
-        $displayDiagnostics = @($State.SessionView.Diagnostics | Select-Object -Skip $diagnosticStart -First 4)
-        foreach ($diagnostic in $displayDiagnostics) {
-            $mark = if ($index -eq $State.Panels.SelectedDiagnostic) {
-                '>'
+        if ($State.Panels.ShowDiagnostics -and $State.SessionView.Diagnostics.Count) {
+            $all.Add((New-HarnessFrameRow '--- Diagnostics (F8 next, F9 jump) ---' -Color Yellow))
+            $index = 0
+            $diagnosticStart = [Math]::Max(0, [Math]::Min($State.Panels.SelectedDiagnostic - 1, $State.SessionView.Diagnostics.Count - 4))
+            $index = $diagnosticStart
+            $displayDiagnostics = @($State.SessionView.Diagnostics | Select-Object -Skip $diagnosticStart -First 4)
+            foreach ($diagnostic in $displayDiagnostics) {
+                $mark = if ($index -eq $State.Panels.SelectedDiagnostic) {
+                    '>'
+                }
+                else {
+                    ' '
+                }
+                $index++
+                $hint = if ($diagnostic.Fix) {
+                    $diagnostic.Fix
+                }
+                else {
+                    $diagnostic.Message
+                }
+                $text = "$mark $($diagnostic.Severity) $($diagnostic.Code) L$($diagnostic.Line): $hint"
+                foreach ($part in @(Split-HarnessDisplayLine (ConvertTo-HarnessSafeText $text) $Width)) {
+                    $all.Add((New-HarnessFrameRow $part -Color $(if ($diagnostic.Severity -eq 'Error') {
+                                    'Red'
+                                }
+                                else {
+                                    'Yellow'
+                                })))
+                }
             }
-            else {
-                ' '
-            }
-            $index++
-            $hint = if ($diagnostic.Fix) {
-                $diagnostic.Fix
-            }
-            else {
-                $diagnostic.Message
-            }
-            $text = "$mark $($diagnostic.Severity) $($diagnostic.Code) L$($diagnostic.Line): $hint"
-            foreach ($part in @(Split-HarnessDisplayLine (ConvertTo-HarnessSafeText $text) $Width)) {
-                $all.Add((New-HarnessFrameRow $part -Color $(if ($diagnostic.Severity -eq 'Error') {
-                                'Red'
-                            }
-                            else {
-                                'Yellow'
-                            })))
+            if ($State.SessionView.Diagnostics.Count -gt $displayDiagnostics.Count) {
+                $remaining = $State.SessionView.Diagnostics.Count - $displayDiagnostics.Count
+                foreach ($part in @(Split-HarnessDisplayLine "$remaining more diagnostics | F8 next | F7 hide" $Width)) {
+                    $all.Add((New-HarnessFrameRow $part -Color BrightBlack))
+                }
             }
         }
-        if ($State.SessionView.Diagnostics.Count -gt $displayDiagnostics.Count) {
-            $remaining = $State.SessionView.Diagnostics.Count - $displayDiagnostics.Count
-            foreach ($part in @(Split-HarnessDisplayLine "$remaining more diagnostics | F8 next | F7 hide" $Width)) {
-                $all.Add((New-HarnessFrameRow $part -Color BrightBlack))
+        $allRows = $all.ToArray()
+        $nextCache = [pscustomobject]@{
+            Width = $Width; Height = $Height; Ascii = $State.StatusBar.Ascii; Expanded = $State.Panels.ExpandTools
+            PreviewLines = $State.StatusBar.ToolPreviewLines; Start = $cacheStart; Records = $cachedRecords.ToArray()
+            LayoutKey = $layoutKey; Busy = $State.SessionView.Busy; Streaming = if ($State.SessionView.Busy) {
+                $streamingCache
+            }
+            else {
+                $null
+            }
+            Sources    = @(if ($records.Count -le 2048) {
+                    foreach ($record in $records) {
+                        [pscustomobject]@{ Role = $record.Role; Text = $record.Text }
+                    }
+                })
+            Transcript = if ($allRows.Count -le 32768 -and $records.Count -le 2048) {
+                , $allRows
+            }
+            else {
+                $null
             }
         }
     }
@@ -515,16 +616,33 @@ function Get-HarnessRenderModel {
     if ($State.ReviewMode) {
         $status = 'Review the exact files, command and risks before approval.'
     }
+    $status = $bar.Mode + ' | ' + $(if ($bar.Steps) {
+            $bar.Steps + ' | '
+        }) + $status
     $statusRows = @(Split-HarnessStatus $status $Width | Select-Object -First 3)
     $operation = $State.SessionView.Operation
+    $reviewKey = if ($State.StatusBar.ReviewOnEmptyEnter -and -not $State.Editor.Text.Trim()) {
+        'Enter'
+    }
+    else {
+        'F5'
+    }
     $actionText = if ($State.ReviewMode) {
         'Enter approve | Esc back | PgUp/PgDn scroll'
     }
     elseif ($State.SessionView.Busy) {
-        'Working | Ctrl+C cancel | ' + $bar.LogText
+        'Working | Esc/Ctrl+C cancel | ' + $bar.LogText
     }
     elseif ($operation -and $operation.Status -eq 'Ready') {
-        "$(if ($State.StatusBar.ReviewOnEmptyEnter) { 'Enter' } else { 'F5' }) Review & $($operation.Label.ToLowerInvariant()) | F10 Discard | F12 Logs"
+        if ($State.Editor.Paste) {
+            'F2 finish paste | Proposal ready'
+        }
+        elseif ($Width -lt 40) {
+            "$reviewKey Review | F10 drop | F12 logs"
+        }
+        else {
+            "$reviewKey Review & $($operation.Label.ToLowerInvariant()) | F10 Discard | F12 Logs"
+        }
     }
     elseif ($operation) {
         "$($operation.Label): $($operation.Status) | F12 Logs | $($bar.LogText)"
@@ -539,15 +657,15 @@ function Get-HarnessRenderModel {
     }
     $inputRows = @(Split-HarnessEditorLines $State.Editor.Text ($Width - 2))
     $actionHeight = [Math]::Max(1, [Math]::Min(2, $Height - $statusRows.Count - [Math]::Min(2, $inputRows.Count) - 2))
-    $actionRows = @(Split-HarnessDisplayLine (ConvertTo-HarnessSafeText $actionText) $Width | Select-Object -First $actionHeight)
+    $actionRows = @(Split-HarnessStatus (ConvertTo-HarnessSafeText $actionText) $Width | Select-Object -First $actionHeight)
     $inputHeight = [Math]::Min([Math]::Min(6, $Height - $statusRows.Count - $actionRows.Count - 2), [Math]::Max(1, $inputRows.Count))
     $paneHeight = $Height - $inputHeight - $statusRows.Count - $actionRows.Count - 1
-    $maxScroll = [Math]::Max(0, $all.Count - $paneHeight)
+    $maxScroll = [Math]::Max(0, $allRows.Count - $paneHeight)
     $scroll = [Math]::Min($maxScroll, [Math]::Max(0, $State.Viewport.ScrollOffset))
-    $end = [Math]::Max(0, $all.Count - $scroll)
+    $end = [Math]::Max(0, $allRows.Count - $scroll)
     $start = [Math]::Max(0, $end - $paneHeight)
     $visible = if ($end -gt $start) {
-        @($all.ToArray()[$start..($end - 1)])
+        @($allRows[$start..($end - 1)])
     }
     else {
         @()
@@ -571,24 +689,36 @@ function Get-HarnessRenderModel {
     $inputStart = [Math]::Max(0, [Math]::Min($inputRows.Count - $inputHeight, $cursorLine - $inputHeight + 1))
     $display = @($inputRows[$inputStart..([Math]::Min($inputRows.Count - 1, $inputStart + $inputHeight - 1))])
     foreach ($line in $display) {
-        $rows.Add((New-HarnessFrameRow "> $line"))
+        $rows.Add((New-HarnessFrameRow $(if ($State.ReviewMode) {
+                        ''
+                    }
+                    else {
+                        "> $line"
+                    })))
     }
     while ($rows.Count -lt $Height - 1) {
         $rows.Add((New-HarnessFrameRow '> '))
     }
-    $help = if ($State.ReviewMode) {
-        'Enter approve | Esc back | PgUp/PgDn scroll'
+    $hints = if ($State.ReviewMode) {
+        @('PgUp/PgDn scroll', 'Home top', 'End bottom')
     }
     elseif ($State.SessionView.Busy) {
-        'Esc/Ctrl+C cancel | Ctrl+O output | PgUp/PgDn scroll'
+        @('Esc/Ctrl+C cancel', 'Ctrl+O output', 'PgUp/PgDn scroll')
+    }
+    elseif ($State.Editor.Paste) {
+        @('Enter newline', 'F2 finish paste', '/help')
+    }
+    elseif ($operation -and $operation.Status -eq 'Ready' -and -not $State.Editor.Text.Trim() -and $State.StatusBar.ReviewOnEmptyEnter) {
+        @('Enter review', 'F5 review', 'F10 discard', 'F12 logs')
     }
     elseif ($scroll) {
-        'PgUp/PgDn scroll | Ctrl+Home top | Ctrl+End latest | Enter send'
+        @('PgUp/PgDn scroll', 'Ctrl+Home top', 'Ctrl+End latest', 'Enter send')
     }
     else {
-        'Enter send | Ctrl+J newline | Esc cancel | Ctrl+O output | /help'
+        @('Enter send', 'Ctrl+J newline', 'F2 paste', 'Ctrl+O output', '/help')
     }
-    $rows.Add((New-HarnessFrameRow (@(Split-HarnessDisplayLine $help $Width)[0]) -Color BrightBlack))
+    $help = Get-HarnessFittedHints $hints $Width
+    $rows.Add((New-HarnessFrameRow $help -Color BrightBlack))
     [pscustomobject]@{
 
 
@@ -598,14 +728,14 @@ function Get-HarnessRenderModel {
         CursorRow       =$paneHeight + $actionRows.Count + $statusRows.Count + [Math]::Max(0, $cursorLine - $inputStart)
         CursorColumn    =[Math]::Min($Width - 1, 2 + (Get-HarnessTextWidth $cursorLines[-1]))
         Transcript      =$visible
-        AllTranscript   =$all.ToArray()
+        AllTranscript   =$allRows
         TranscriptStart =$start
         PaneHeight      =$paneHeight
         InputRows       =$display
         InputHeight     =$inputHeight
         MaxScroll       =$maxScroll
         ScrollOffset    =$scroll
-        RenderCache     = [pscustomobject]@{ Width = $Width; Ascii = $State.StatusBar.Ascii; Expanded = $State.Panels.ExpandTools; PreviewLines = $State.StatusBar.ToolPreviewLines; Start = $cacheStart; Records = $cachedRecords.ToArray() }
+        RenderCache     = $nextCache
         StatusRows      = $statusRows
         ActionRows      = $actionRows
         Status          =$status
@@ -615,6 +745,7 @@ function Get-HarnessRenderModel {
 function Update-HarnessEditor {
     param($View, [ConsoleKeyInfo]$Key, [bool]$MoreKeys = $false, [long]$Now = ([Environment]::TickCount64))
     $editor = $View.Editor
+    $awaitingApproval = (Test-HarnessRecordProperty $View.SessionView.LastResult 'AgentSummary') -and $View.SessionView.LastResult.AgentSummary.StopReason -ceq 'AwaitingApproval'
     $control = ($Key.Modifiers -band [ConsoleModifiers]::Control) -ne 0
     if ($control -and $Key.Key -eq 'C') {
         $action = if ($Now - $View.LastControlC -le 1000) {
@@ -633,6 +764,7 @@ function Update-HarnessEditor {
         if ($action -eq 'Clear') {
             $editor.Text = ''
             $editor.Cursor = 0
+            $View.Dirty = $true
         }
         return [pscustomobject]@{
 
@@ -690,12 +822,12 @@ function Update-HarnessEditor {
     }
     switch ($Key.Key) {
         F5 {
-            if (-not $View.SessionView.Busy -and -not $editor.Paste -and $View.SessionView.Operation -and $View.SessionView.Operation.Status -eq 'Ready') {
+            if ((-not $View.SessionView.Busy -or $awaitingApproval) -and -not $editor.Paste -and $View.SessionView.Operation -and $View.SessionView.Operation.Status -eq 'Ready') {
                 return [pscustomobject]@{ Action = 'Review'; Prompt = '/approve' }
             }
         }
         F10 {
-            if (-not $View.SessionView.Busy -and -not $editor.Paste -and $View.SessionView.Operation -and $View.SessionView.Operation.Status -eq 'Ready') {
+            if ((-not $View.SessionView.Busy -or $awaitingApproval) -and -not $editor.Paste -and $View.SessionView.Operation -and $View.SessionView.Operation.Status -eq 'Ready') {
                 return [pscustomobject]@{ Action = 'Shortcut'; Prompt = '/cancel' }
             }
         }
@@ -744,7 +876,7 @@ function Update-HarnessEditor {
             $View.Viewport.ScrollOffset = [Math]::Max(0, $View.Viewport.ScrollOffset - [Math]::Max(1, $View.Viewport.PaneHeight - 1))
         }
         default {
-            if ($View.SessionView.Busy) {
+            if ($View.SessionView.Busy -and $Key.Key -eq 'Enter' -and -not ($awaitingApproval -and (-not $editor.Text -or $editor.Text -match '^/(approve|cancel)(?:\s|$)')) -and $editor.Text -notmatch '^/(mode|agent)(?:\s|$)|^/config\s+set\s+Autonomy\s') {
                 return
             }
             switch ($Key.Key) {
@@ -838,6 +970,12 @@ function Update-HarnessEditor {
 
 function Format-HarnessActionOutput {
     param($Result)
+    if (Test-HarnessRecordProperty $Result 'AgentSummary') {
+        if ($Result.AgentSummary.StopReason -ceq 'AwaitingApproval' -and (Test-HarnessRecordProperty $Result 'OperationReview')) {
+            return $Result.OperationReview
+        }
+        return $Result.Text
+    }
     if ($Result -is [string]) {
         return $Result
     }

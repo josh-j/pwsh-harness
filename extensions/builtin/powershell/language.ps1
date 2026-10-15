@@ -5,6 +5,7 @@ if (-not (Test-Path -LiteralPath $sharedFences)) {
     $sharedFences = Join-Path $moduleRoot 'PowerShellFences.ps1'
 }
 . $sharedFences
+. (Join-Path $PSScriptRoot 'analyzer.ps1')
 function Get-HarnessCodeBlock {
     [CmdletBinding()]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [string[]]$FenceLanguages = @('powershell', 'pwsh', 'ps1'))
@@ -20,7 +21,7 @@ function Get-HarnessCodeBlock {
 }
 function Test-PackCode {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Code, [switch]$NoAnalyzer, [string[]]$AnalyzerRules = @())
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Code, [switch]$NoAnalyzer, [string[]]$AnalyzerRules = @(), $AnalyzerConfig)
     $tokens = $null
     $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseInput($Code, [ref]$tokens, [ref]$errors)
@@ -60,7 +61,7 @@ function Test-PackCode {
                 }
                 break
             }
-            '^(Format-Volume|Format-Disk)$' {
+            '^Format-' {
                 $risk = 'Formatting command: review target carefully (Format-Volume destroys data).'
                 break
             }
@@ -135,16 +136,12 @@ function Test-PackCode {
     }
     $analysis = @()
     $analyzerError = $null
-    if (-not $NoAnalyzer -and (Get-Module -ListAvailable PSScriptAnalyzer)) {
+    if (-not $NoAnalyzer) {
         try {
-            $parameters = @{
-                ScriptDefinition = $Code
-                ErrorAction      = 'Stop'
+            if (-not $AnalyzerConfig) {
+                $AnalyzerConfig = $script:Harness.ConfigService.Resolve()
             }
-            if ($AnalyzerRules.Count) {
-                $parameters.IncludeRule = $AnalyzerRules
-            }
-            $analysis = @(Invoke-ScriptAnalyzer @parameters |
+            $analysis = @(Invoke-PackAnalyzer $Code $AnalyzerConfig $AnalyzerRules |
                     ForEach-Object {
                         [pscustomobject]@{
                             RuleName = $_.RuleName

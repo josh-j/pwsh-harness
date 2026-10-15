@@ -1,6 +1,10 @@
 function Add-PackBehaviorPrompt {
     param($Request)
     $mode = $Request.Config.Behavior
+    if ($Request.PSObject.Properties['AgentTools']) {
+        $Request.Messages[0].Content += "`nUse the four tools for project work in any language; answer conversational requests directly."
+        return
+    }
     if ($mode -eq 'code') {
         return
     }

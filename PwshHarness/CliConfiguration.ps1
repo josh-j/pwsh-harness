@@ -79,6 +79,9 @@ function Assert-HarnessSavedOptions {
     param($HarnessHost, [hashtable]$Options)
     $declared = $HarnessHost.GetRegistry().Settings
     foreach ($name in $Options.Keys) {
+        if ($name -eq 'Autonomy' -and $Options[$name] -eq 'Auto') {
+            throw 'Autonomy=Auto cannot be persisted; select it explicitly for each conversation.'
+        }
         if ($name -match '(ApiKey|AccessToken|RefreshToken|Authorization|Password|ClientSecret|Credential|Credentials|Secret|Token|Key)$' -or
             $Options[$name] -is [Security.SecureString]) {
             throw 'Secret values must be supplied only through -ApiKey (SecureString), not -Options.'
@@ -182,7 +185,7 @@ function Set-PwshHarnessConfig {
     #>
     [CmdletBinding()]
     param([string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey,
-        [hashtable]$Options = @{}, [string]$ConfigPath, [object]$HarnessHost)
+        [hashtable]$Options = @{}, [string]$ConfigPath)
     $Options = $Options.Clone()
     foreach ($name in @('Provider', 'Model', 'BaseUrl', 'Behavior')) {
         if ($PSBoundParameters.ContainsKey($name)) {
@@ -194,12 +197,9 @@ function Set-PwshHarnessConfig {
             }
         }
     }
-    $instance = $HarnessHost
-    $ownsHost = -not $HarnessHost
+    $instance = $null
     try {
-        if ($ownsHost) {
-            $instance = New-HarnessHost -ConfigPath $ConfigPath
-        }
+        $instance = New-HarnessHost -ConfigPath $ConfigPath
         Assert-HarnessSavedOptions $instance $Options
         $config = $instance.ConfigService.Resolve($Options, $ConfigPath)
         $connectionKeys = @('Provider', 'Model', 'BaseUrl')
@@ -216,7 +216,7 @@ function Set-PwshHarnessConfig {
         Invoke-HarnessPublicError $PSCmdlet $_
     }
     finally {
-        if ($ownsHost -and $instance) {
+        if ($instance) {
             $instance.Dispose()
         }
     }

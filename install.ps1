@@ -25,10 +25,10 @@ function Test-HarnessInstalledModule {
     param([string]$ManifestPath)
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = Join-Path $PSHOME $(if ($IsWindows) {
-            'pwsh.exe'
+            'pwsh.exe' 
         }
         else {
-            'pwsh'
+            'pwsh' 
         })
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
