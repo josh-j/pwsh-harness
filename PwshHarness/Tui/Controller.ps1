@@ -159,8 +159,7 @@ function Invoke-HarnessFrontend {
             $Terminal.Enter($false)
             $Terminal.WriteText("PowerShell harness line mode. /help for commands; /quit (/exit) or EOF exits.`n")
             while (-not $View.Quit) {
-                $Terminal.WriteText('[' + $HarnessHost.AgentControl.GetState($Session).Mode.ToUpperInvariant() + '] ')
-                $line = Read-HarnessLine -View $View -Terminal $Terminal
+                $line = Read-HarnessLine -Prompt ('[' + $HarnessHost.AgentControl.GetState($Session).Mode.ToUpperInvariant() + '] pwsh> ') -View $View -Terminal $Terminal
                 if ($null -eq $line) {
                     break
                 }

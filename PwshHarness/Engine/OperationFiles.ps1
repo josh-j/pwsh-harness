@@ -26,14 +26,14 @@ function Assert-EngineOperationTarget {
     if ([IO.Directory]::Exists($path)) {
         throw 'A patch target changed into a directory since review.'
     }
-    $exists = [IO.File]::Exists($path)
-    [byte[]]$bytes = @()
-    if ($exists) {
-        if ([IO.FileInfo]::new($path).Length -ne $File.BeforeBytes.Count) {
-            throw 'A patch target changed since review. Prepare the operation again.'
-        }
-        $bytes = [IO.File]::ReadAllBytes($path)
+    try {
+        $current = Read-HarnessFileBytes $path $File.BeforeBytes.Count -AllowMissing -NoHardLinks
     }
+    catch {
+        throw ('A patch target changed since review or cannot be read safely. ' + $_.Exception.Message)
+    }
+    $exists = $current.Exists
+    [byte[]]$bytes = $current.Bytes
     $hash = (Get-HarnessSha256 $bytes)
     if ($exists -ne $File.BeforeExists -or $hash -cne $File.BeforeHash) {
         throw 'A patch target changed since review. Prepare the operation again.'

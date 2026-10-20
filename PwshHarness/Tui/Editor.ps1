@@ -6,9 +6,29 @@ function Test-HarnessControlShortcut {
         ($Key.Modifiers -band [ConsoleModifiers]::Alt) -and
         [int]$Key.KeyChar -ge 32 -and -not [char]::IsControl($Key.KeyChar))
 }
+function Add-HarnessEditorText {
+    param($View, [string]$Text)
+    $View.Editor.InsertText($Text)
+    $View.Completion.Text = ''; $View.Completion.Selected = 0; $View.Completion.Closed = $false
+    $View.Dirty = $true
+}
 function Update-HarnessEditor {
     param($View, [ConsoleKeyInfo]$Key, [bool]$MoreKeys = $false, [long]$Now = ([Environment]::TickCount64))
     $editor = $View.Editor
+    if ([int]$Key.KeyChar -ge 32 -and -not (Test-HarnessControlShortcut $Key)) {
+        Add-HarnessEditorText $View ([string]$Key.KeyChar); return
+    }
+    if (-not $View.SessionView.Busy -and -not (Test-HarnessControlShortcut $Key)) {
+        if ($Key.Key -eq 'Tab' -and $editor.Paste) {
+            Add-HarnessEditorText $View "`t"; return
+        }
+        if (($Key.Key -eq 'Enter' -and ($editor.Paste -or $MoreKeys -or $Key.Modifiers -ne 0)) -or [int]$Key.KeyChar -eq 10) {
+            if (-not $editor.Paste -and $MoreKeys -and $Key.Modifiers -eq 0 -and -not $editor.HasText()) {
+                $editor.Text = ''; $editor.Cursor = 0; $View.Dirty = $true; return
+            }
+            Add-HarnessEditorText $View "`n"; return
+        }
+    }
     if (Update-HarnessCommandCompletion $View $Key $MoreKeys) {
         return
     }
@@ -238,12 +258,6 @@ function Update-HarnessEditor {
                         ''
                     }
                     $editor.Cursor = $editor.Text.Length
-                }
-                default {
-                    if (-not $control -and [int]$Key.KeyChar -ge 32) {
-                        $editor.Text = $editor.Text.Insert($editor.Cursor, [string]$Key.KeyChar)
-                        $editor.Cursor++
-                    }
                 }
             }
         }

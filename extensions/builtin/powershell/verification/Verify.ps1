@@ -2,6 +2,8 @@
 [CmdletBinding()]
 param([string]$CandidatePath, [string]$TestsPath, [string]$Sandbox)
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 $env:OPENAI_API_KEY = $null; $env:OPENAI_BASE_URL = $null
 $pester = Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -eq 5 } | Sort-Object Version -Descending | Select-Object -First 1
 if ($pester) {

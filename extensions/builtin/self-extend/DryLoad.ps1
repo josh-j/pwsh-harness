@@ -3,6 +3,8 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$ModulePath, [Parameter(Mandatory)][string]$StageDirectory, [Parameter(Mandatory)][string]$ResultPath)
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 $temporary = Join-Path $StageDirectory 'isolated'
 $env:XDG_CONFIG_HOME = Join-Path $temporary 'config'; $env:XDG_DATA_HOME = Join-Path $temporary 'data'
 $env:APPDATA = Join-Path $temporary 'config'; $env:LOCALAPPDATA = Join-Path $temporary 'data'

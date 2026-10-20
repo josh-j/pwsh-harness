@@ -1,4 +1,5 @@
 #Requires -Version 7.6
+$script:PackUtf8Prelude = '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; '
 function Invoke-SaveGitQuery {
     param([string]$Directory, [string[]]$Arguments)
     $git = Get-Command git -ErrorAction Ignore
@@ -89,11 +90,15 @@ function Get-WindowsSaveText {
 function Get-WindowsChildStartInfo {
     param([string]$ScriptPath, [switch]$WhatIf, [string]$Command = '', [switch]$WideOutput)
     if ($WideOutput) {
-        $invocation = $Command ? ('& { ' + $Command + "`n}") : ("& '" + $ScriptPath.Replace("'", "''") + "'")
+        $invocation = $Command ? ('& { ' + $Command + "`n}") : ("& '" + $ScriptPath.Replace("'", "''") + "'" + ($WhatIf ? ' -WhatIf' : ''))
         $Command = '$ErrorActionPreference = ''Stop''; ' + $invocation + ' | Out-String -Stream -Width 4096; $harnessSucceeded = $?; if ($LASTEXITCODE) { exit $LASTEXITCODE }; if (-not $harnessSucceeded) { exit 1 }'
     }
     if ($IsWindows) {
         Test-WindowsExecutionPolicies (Get-ExecutionPolicy -List)
+        if (-not $Command) {
+            $Command = "& '" + $ScriptPath.Replace("'", "''") + "'" + ($WhatIf ? ' -WhatIf' : '') + '; exit $LASTEXITCODE'
+        }
+        $Command = $script:PackUtf8Prelude + $Command
     }
     $info = [Diagnostics.ProcessStartInfo]::new()
     $info.FileName = Join-Path $PSHOME $(if ($IsWindows) {
@@ -103,6 +108,7 @@ function Get-WindowsChildStartInfo {
             'pwsh'
         })
     $info.UseShellExecute = $false
+    $info.CreateNoWindow = $IsWindows
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $info.StandardOutputEncoding = [Text.Encoding]::UTF8
@@ -122,7 +128,7 @@ function Get-WindowsChildStartInfo {
         $info.ArgumentList.Add('-File')
         $info.ArgumentList.Add($ScriptPath)
     }
-    if ($WhatIf) {
+    if ($WhatIf -and -not ($IsWindows -or $WideOutput)) {
         $info.ArgumentList.Add('-WhatIf')
     }
     $info

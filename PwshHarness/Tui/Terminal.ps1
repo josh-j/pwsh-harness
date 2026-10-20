@@ -1,4 +1,9 @@
 #Requires -Version 7.6
+function Format-HarnessLineFrame {
+    param([string]$Prompt, [string]$Line, [string]$Prefix, [int]$Padding)
+    $parts = @($Prompt, $Line, $Prefix | ForEach-Object { (ConvertTo-HarnessSafeText $_) -replace '[\r\n]', '' })
+    "`r" + $parts[0] + $parts[1] + (' ' * [Math]::Max(0, $Padding)) + "`r" + $parts[0] + $parts[2]
+}
 function Test-HarnessTerminalInput {
     param($Terminal)
     ($Terminal.PSObject.Properties['DeferredKeys'] -and $Terminal.DeferredKeys.Count -gt 0) -or $Terminal.Available()
@@ -142,6 +147,8 @@ function New-HarnessFakeTerminal {
     }.GetNewClosure()
     $safeText = ${function:ConvertTo-HarnessSafeText}
     $terminal | Add-Member ScriptMethod WriteText { param($Text) $this.Messages.Add((& $safeText ([string]$Text))) }.GetNewClosure()
+    $lineFrame = ${function:Format-HarnessLineFrame}
+    $terminal | Add-Member ScriptMethod RewriteLine { param($prompt, $line, $prefix, $padding) $this.Messages.Add((& $lineFrame $prompt $line $prefix $padding)) }.GetNewClosure()
     $terminal
 }
 function New-HarnessConsoleApi {
@@ -360,8 +367,8 @@ function New-HarnessConsoleTerminal {
         Inline = $false; InlineActive = $false; InlineState = $null
     }
     $terminal | Add-Member ScriptMethod GetSize { [pscustomobject]@{
-            Width  = [Math]::Max(20, $this.Api.Get('WindowWidth'))
-            Height = [Math]::Max(8, $this.Api.Get('WindowHeight'))
+            Width  = [Math]::Max(0, $this.Api.Get('WindowWidth'))
+            Height = [Math]::Max(0, $this.Api.Get('WindowHeight'))
         } }
     $terminal | Add-Member ScriptMethod Available { $this.Api.Get('KeyAvailable') }
     $terminal | Add-Member ScriptMethod ReadKey { $this.Api.ReadKey() }
@@ -398,6 +405,12 @@ function New-HarnessConsoleTerminal {
     $writeFrame = ${function:Write-HarnessTerminalFrameText}
     $terminal | Add-Member ScriptMethod Draw {
         param($Frame, [scriptblock]$ServiceInput)
+        if ($Frame.PSObject.Properties['SmallViewport']) {
+            $this.Previous = $null; $this.InlineState = $null
+            if (-not $Frame.Width -or -not $Frame.Height) {
+                return
+            }
+        }
         if ($this.Inline) {
             $draw = & $inlineDraw $this.InlineState $Frame $ServiceInput
             & $writeFrame $this.Api $draw.Text $ServiceInput
@@ -434,6 +447,8 @@ function New-HarnessConsoleTerminal {
     }.GetNewClosure()
     $safeText = ${function:ConvertTo-HarnessSafeText}
     $terminal | Add-Member ScriptMethod WriteText { param($Text) $this.Api.Write((& $safeText ([string]$Text))) }.GetNewClosure()
+    $lineFrame = ${function:Format-HarnessLineFrame}
+    $terminal | Add-Member ScriptMethod RewriteLine { param($prompt, $line, $prefix, $padding) $this.Api.Write((& $lineFrame $prompt $line $prefix $padding)) }.GetNewClosure()
     $terminal
 }
 

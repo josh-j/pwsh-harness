@@ -308,7 +308,7 @@ function New-ComposedCatalog {
         $modules = @($core.Modules)
         $resolver = {
             param($name)
-            $command = Get-Command -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            $command = Get-Command -Name $name -ErrorAction Ignore | Select-Object -First 1
             if ($command) {
                 ConvertTo-CatalogEntry $command 'Live'
             }

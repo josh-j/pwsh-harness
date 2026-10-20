@@ -127,7 +127,7 @@ function Invoke-PackAgentTask {
             $script:Harness.Clock.Wait(25, $record.Task)
         } while ($true)
         # Finalization and its completion notice remain owned by the next agent poll.
-        $data = $record.Done ? $record.Task.Result : @{ Output = $script:Harness.OperationControl.ProtectText($Context.State, $record.Task.Stdout.Text.ToString()); ErrorOutput = $script:Harness.OperationControl.ProtectText($Context.State, $record.Task.Stderr.Text.ToString()) }
+        $data = $record.Done ? $record.Task.Result : @{ Output = $script:Harness.OperationControl.ProtectText($Context.State, (ConvertTo-HarnessSafeText $record.Task.Stdout.Text.ToString())); ErrorOutput = $script:Harness.OperationControl.ProtectText($Context.State, (ConvertTo-HarnessSafeText $record.Task.Stderr.Text.ToString())) }
         $cursor = @(0, 0)
         if ($arguments.Cursor) {
             if ($arguments.Cursor -cnotmatch '^\d{1,7}:\d{1,7}$') {

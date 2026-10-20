@@ -14,21 +14,40 @@ function New-HarnessViewState {
     Create frontend state independently of the engine session.
     #>
     param($Session, $HarnessHost)
+    $editor = [pscustomobject]@{
+
+
+        Cursor       =0
+        History      =[Collections.Generic.List[string]]::new()
+        HistoryIndex =0
+        Paste        =$false
+    }
+    $draft = @{ Buffer = [Text.StringBuilder]::new(); Snapshot = ''; Dirty = $false; HasText = $false }
+    $editor | Add-Member ScriptProperty Text {
+        if ($draft.Dirty) {
+            $draft.Snapshot = $draft.Buffer.ToString(); $draft.Dirty = $false
+        }
+        $draft.Snapshot
+    }.GetNewClosure() {
+        param($value)
+        $draft.Snapshot = [string]$value
+        $draft.HasText = $draft.Snapshot -match '\S'
+        $null = $draft.Buffer.Clear().Append($draft.Snapshot); $draft.Dirty = $false
+    }.GetNewClosure()
+    $editor | Add-Member ScriptMethod InsertText {
+        param([string]$value)
+        $null = $draft.Buffer.Insert($this.Cursor, $value)
+        $this.Cursor += $value.Length; $draft.Dirty = $true
+        $draft.HasText = $draft.HasText -or $value -match '\S'
+    }.GetNewClosure()
+    $editor | Add-Member ScriptMethod HasText { $draft.HasText }.GetNewClosure()
     [pscustomobject]@{
 
 
         Commands            = @()
         Highlighters        = (New-HarnessHighlightContext ($HarnessHost ? $HarnessHost.Highlighters.Snapshot() : @()))
         Completion          = [pscustomobject]@{ Text = ''; Selected = 0; Closed = $false }
-        Editor              = [pscustomobject]@{
-
-
-            Text         =''
-            Cursor       =0
-            History      =[Collections.Generic.List[string]]::new()
-            HistoryIndex =0
-            Paste        =$false
-        }
+        Editor              = $editor
         Viewport            = [pscustomobject]@{
 
 

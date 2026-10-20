@@ -38,8 +38,21 @@ function Get-HarnessRenderModel {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$State, [int]$Width = 80, [int]$Height = 24, [switch]$PrepareLayout)
     $highlighters = @{ Scripts = $State.Highlighters.Scripts; Compiled = @{}; Faults = @{} + $State.Highlighters.Faults }
-    $Width = [Math]::Max(20, $Width)
-    $Height = [Math]::Max(8, $Height)
+    $Width = [Math]::Max(0, $Width)
+    $Height = [Math]::Max(0, $Height)
+    if ($Width -lt 20 -or $Height -lt 8) {
+        $status = Get-HarnessSingleLine ($State.StatusBar.Mode + ' | Resize terminal') $Width $State.StatusBar.Ascii
+        $rows = @(for ($i = 0; $i -lt $Height; $i++) {
+                New-HarnessFrameRow ($i -eq 0 ? $status : '')
+            })
+        return [pscustomobject]@{
+            Width = $Width; Height = $Height; Rows = $rows; CursorRow = 0; CursorColumn = 0
+            Status = $status; SmallViewport = $true; HighlightFaults = @()
+            Transcript = @(); AllTranscript = @(); TranscriptStart = 0; PaneHeight = 0
+            InputRows = @(); InputHeight = 0; MaxScroll = $State.Viewport.MaxScroll
+            ScrollOffset = $State.Viewport.ScrollOffset; RenderCache = $State.RenderCache
+        }
+    }
     $records = @($State.SessionView.Records.ToArray())
     if ($State.SessionView.Busy) {
         $records += [pscustomobject]@{
@@ -171,7 +184,14 @@ function Get-HarnessRenderModel {
                     system         = @{ Color = 'Cyan' }
                     'agent-stop'   = @{ Color = 'Red' }
                 }[$record.Role]
-                $lines = $format.ContainsKey('Prefix') ? @(Split-HarnessDisplayLine ($format.Prefix + (ConvertTo-HarnessSafeText $record.Text)) $Width) : @(Get-HarnessSingleLine $record.Text $Width $State.StatusBar.Ascii)
+                $lines = if ($format.ContainsKey('Prefix')) {
+                    foreach ($line in ($record.Text -split '\r\n|\n|\r')) {
+                        Split-HarnessDisplayLine ($format.Prefix + (ConvertTo-HarnessSafeText $line)) $Width
+                    }
+                }
+                else {
+                    Get-HarnessSingleLine $record.Text $Width $State.StatusBar.Ascii
+                }
                 @(foreach ($line in $lines) {
                         New-HarnessFrameRow $line -Color $format.Color
                     })

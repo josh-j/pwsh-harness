@@ -80,6 +80,9 @@ function Get-HarnessActiveRenderModel {
         [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)
     $View.PreparedLayout = $null
     try {
+        if ($Width -lt 20 -or $Height -lt 8) {
+            return Get-HarnessRenderModel $View $Width $Height
+        }
         $registrations = @($HarnessHost.Highlighters.Snapshot())
         if (($registrations.Revision -join ',') -cne $View.Highlighters.Revision) {
             $View.Highlighters = New-HarnessHighlightContext $registrations
@@ -162,50 +165,77 @@ function Get-HarnessActiveRenderModel {
         $View.PreparedLayout = $null
     }
 }
+function Write-HarnessLineEditor {
+    param($View, $Terminal, [string]$Prompt, [int]$PreviousWidth)
+    $width = [Math]::Max(0, $Terminal.GetSize().Width - 1)
+    $promptText = Get-HarnessSingleLine $Prompt $width $View.StatusBar.Ascii
+    $available = $width - (Get-HarnessTextWidth $promptText)
+    $raw = $View.Editor.Text
+    $display = @(foreach ($part in @($raw, $raw.Substring(0, $View.Editor.Cursor))) {
+            ConvertTo-HarnessSafeText ($part.Replace("`r`n", "`n").Replace("`r", "`n").Replace("`n", '\n').Replace("`t", '\t'))
+        })
+    $offset = 0
+    if ($available -gt 0) {
+        foreach ($chunk in (@(Split-HarnessEditorLines $display[1] $available) | Select-Object -SkipLast 1)) {
+            $offset += $chunk.Length
+        }
+    }
+    $line = Get-HarnessSingleLine ($display[0].Substring($offset)) $available $View.StatusBar.Ascii
+    $prefix = $available -gt 0 ? $display[1].Substring($offset) : ''
+    $length = (Get-HarnessTextWidth $promptText) + (Get-HarnessTextWidth $line)
+    if ($Terminal.PSObject.Methods['RewriteLine']) {
+        $Terminal.RewriteLine($promptText, $line, $prefix, [Math]::Max(0, [Math]::Min($width, $PreviousWidth) - $length))
+    }
+    else {
+        $Terminal.WriteText($promptText + $line + "`n")
+    }
+    $length
+}
 function Read-HarnessLine {
     param([string]$Prompt = 'pwsh> ', $View = $null, $Terminal)
     if (-not $Terminal.Interactive) {
+        $Terminal.WriteText($Prompt)
         return $Terminal.ReadLine()
     }
-    $Terminal.WriteText($Prompt)
     if (-not $View) {
         $View = New-HarnessViewState
     }
-    while (-not $view.Quit) {
+    $shown = Write-HarnessLineEditor $View $Terminal $Prompt 0
+    $lastEcho = $Terminal.Now()
+    while (-not $View.Quit) {
         $key = Read-HarnessTerminalKey $Terminal
         if ($key.Key -eq 'Escape') {
-            $view.Editor.Text = ''; $view.Editor.Cursor = 0
-            $Terminal.WriteText("`n")
-            return ''
+            $View.Editor.Text = ''; $View.Editor.Cursor = 0
+            $Terminal.WriteText("`n"); return ''
         }
-        if ($key.Key -eq 'Tab' -and $view.Editor.Text.Trim() -match '^/\S*$') {
-            $items = @(Get-HarnessCommandMatches $view)
+        if ($key.Key -eq 'Tab' -and $View.Editor.Text.Trim() -match '^/\S*$') {
+            $items = @(Get-HarnessCommandMatches $View)
             if ($items.Count -eq 1) {
-                $view.Editor.Text = '/' + $items[0].Name; $view.Editor.Cursor = $view.Editor.Text.Length
-                $Terminal.WriteText("`r$Prompt" + $view.Editor.Text)
+                $View.Editor.Text = '/' + $items[0].Name; $View.Editor.Cursor = $View.Editor.Text.Length
             }
             else {
-                $Terminal.WriteText("`n" + (($items | ForEach-Object { '/' + $_.Name + '  ' + $_.Description }) -join "`n") + "`n$Prompt" + $view.Editor.Text)
+                $Terminal.WriteText("`n" + (($items | ForEach-Object { '/' + $_.Name + '  ' + $_.Description }) -join "`n") + "`n")
+                $shown = 0
             }
+            $shown = Write-HarnessLineEditor $View $Terminal $Prompt $shown
             continue
         }
-        if ($key.Key -eq 'Enter' -and -not $view.Editor.Paste -and $key.Modifiers -eq 0 -and -not (Test-HarnessTerminalInput $Terminal) -and $view.Editor.Text.Trim() -match '^/\S*$') {
-            $Terminal.WriteText("`n"); return $view.Editor.Text.Trim()
+        $more = Test-HarnessTerminalInput $Terminal
+        if ($key.Key -eq 'Enter' -and -not $View.Editor.Paste -and $key.Modifiers -eq 0 -and -not $more -and $View.Editor.Text.Trim() -match '^/\S*$') {
+            $null = Write-HarnessLineEditor $View $Terminal $Prompt $shown
+            $Terminal.WriteText("`n"); return $View.Editor.Text.Trim()
         }
-        $action = Update-HarnessEditor $view $key (Test-HarnessTerminalInput $Terminal)
+        $action = Update-HarnessEditor $View $key $more
         if ($action -and $action.Action -eq 'Send') {
-            $Terminal.WriteText("`n")
-            return $action.Prompt
+            $null = Write-HarnessLineEditor $View $Terminal $Prompt $shown
+            $Terminal.WriteText("`n"); return $action.Prompt
         }
         if ($action -and $action.Action -eq 'Clear') {
-            $Terminal.WriteText("^C`n")
-            return ''
+            $Terminal.WriteText("^C`n"); return ''
         }
-        if ($key.Key -eq 'Enter' -or [int]$key.KeyChar -eq 10) {
-            $Terminal.WriteText("`n")
-        }
-        elseif ([int]$key.KeyChar -ge 32) {
-            $Terminal.WriteText($key.KeyChar)
+        if (-not $more -or [int]$key.KeyChar -lt 32 -or $Terminal.Now() - $lastEcho -ge 34) {
+            $shown = Write-HarnessLineEditor $View $Terminal $Prompt $shown
+            $lastEcho = $Terminal.Now()
         }
     }
     $null
@@ -471,9 +501,17 @@ function Read-HarnessFrontendBatch {
         return
     }
     $read = 0
+    $text = [Text.StringBuilder]::new()
     while (-not $View.Quit -and $read -lt 128 -and (Test-HarnessTerminalInput $Terminal)) {
         $read++
-        $action = Update-HarnessEditor $View (Read-HarnessTerminalKey $Terminal) (Test-HarnessTerminalInput $Terminal) ($Terminal.Now())
+        $key = Read-HarnessTerminalKey $Terminal
+        if ([int]$key.KeyChar -ge 32 -and -not (Test-HarnessControlShortcut $key)) {
+            $null = $text.Append($key.KeyChar); $View.InputRevision++; $View.Dirty = $true; continue
+        }
+        if ($text.Length) {
+            Add-HarnessEditorText $View ($text.ToString()); $null = $text.Clear()
+        }
+        $action = Update-HarnessEditor $View $key (Test-HarnessTerminalInput $Terminal) ($Terminal.Now())
         $View.InputRevision++
         if ($action -and $action.Action -in @('Cancel', 'Quit') -and $Cancellation) {
             $Cancellation.Cancel()
@@ -491,6 +529,9 @@ function Read-HarnessFrontendBatch {
             $View.RenderInterrupted = $true
             break
         }
+    }
+    if ($text.Length) {
+        Add-HarnessEditorText $View ($text.ToString())
     }
 }
 function Read-HarnessRenderInput {

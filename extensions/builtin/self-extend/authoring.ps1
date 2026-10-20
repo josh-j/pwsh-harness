@@ -264,6 +264,7 @@ function Invoke-AuthoringDryLoad {
             'pwsh'
         })
     $start.UseShellExecute = $false; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $start.CreateNoWindow = $IsWindows
     $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false); $start.StandardErrorEncoding = $start.StandardOutputEncoding
     foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Store.Worker,
             '-ModulePath', $Store.ModulePath, '-StageDirectory', $candidate, '-ResultPath', $resultFile)) {

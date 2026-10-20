@@ -71,6 +71,7 @@ function Invoke-PackVerificationCore {
             'pwsh'
         })
     $start.UseShellExecute = $false; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    $start.CreateNoWindow = $IsWindows
     $start.WorkingDirectory = $directory
     $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false); $start.StandardErrorEncoding = $start.StandardOutputEncoding
     foreach ($arg in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $worker,

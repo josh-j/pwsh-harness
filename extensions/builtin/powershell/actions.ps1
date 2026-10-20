@@ -220,6 +220,9 @@ function Invoke-HarnessRun {
                 $location = "'" + $workingDirectory.Replace("'", "''") + "'"
                 $wrapper = '$global:LASTEXITCODE=0; $ErrorActionPreference=''Stop''; try { Set-Location -LiteralPath ' + $location + '; [Environment]::CurrentDirectory=' + $location + '; . ''' + $Task.ScriptFile.Replace("'", "''") + '''; $harness_rc=$LASTEXITCODE } catch { [Console]::Error.WriteLine($_); $harness_rc=1 }; [Console]::Out.WriteLine("`n' + $task.Marker + ':$harness_rc"); [Console]::Error.WriteLine(''' + $task.Marker + ':done'')'
             }
+            if ($IsWindows -and $Shell -ceq 'PowerShell') {
+                $wrapper = $script:PackUtf8Prelude + $wrapper
+            }
             $task.Process.StandardInput.WriteLine($wrapper)
             $task.Process.StandardInput.Flush()
         }
