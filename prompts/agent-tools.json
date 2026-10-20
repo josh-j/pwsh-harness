@@ -1,0 +1,272 @@
+[
+  {
+    "Name": "view_file",
+    "Description": "View the contents of a file from the local filesystem. This tool supports UTF-8 text files.\nText file usage:\n- The lines of the file are 1-indexed\n- You can view at most 800 lines at a time\n- Specify StartLine and EndLine to view the lines of the file using slice notation:\n  - Omit both to view the entire file, or the first 800 lines of the file, whichever is smaller.\n  - Specify StartLine only to view the remaining lines of the file, or the next 800 lines, whichever is smaller\n  - Specify EndLine only to view the remaining preceding lines of the file, or the previous 800 lines, whichever is smaller\n  - Specify both to view a precise line range. This range must be smaller than 800 lines or only the first 800 lines of the range will be shown.\n- Content is limited to 46080 bytes per view. If content is truncated, use the ContentOffset parameter to view the remaining content",
+    "Parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "AbsolutePath": {
+          "description": "Path to file to view. Must be an absolute path.",
+          "type": "string"
+        },
+        "ContentOffset": {
+          "description": "Optional. Byte offset into the content. Use this to view content beyond the initial byte limit when the tool output indicates content was truncated.",
+          "type": "integer"
+        },
+        "EndLine": {
+          "description": "Optional. Endline to view, 1-indexed, inclusive. When specified, this value must be greater than or equal to StartLine.",
+          "type": "integer"
+        },
+        "StartLine": {
+          "description": "Optional. Startline to view, 1-indexed, inclusive. When specified, this value must be less than or equal to EndLine.",
+          "type": "integer"
+        },
+        "toolAction": {
+          "description": "Brief 2-5 word phrase in -ing form describing the specific action. Capitalize like a sentence. Some examples: 'Analyzing directory', 'Searching the web', 'Checking git status', 'Running tests', 'Searching code'.",
+          "type": "string"
+        },
+        "toolSummary": {
+          "description": "Brief 2-5 word noun phrase describing the specific task. Capitalize like a sentence. Some examples: 'Directory analysis', 'Web search', 'Git status check', 'Test execution', 'Code search'.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "AbsolutePath"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "Name": "run_command",
+    "Description": "PROPOSE a command to run on behalf of the user. Operating System: {{OS}}. Shell: {{SHELL}}.\n**NEVER PROPOSE A cd COMMAND**.\nIf you have this tool, note that you DO have the ability to run commands directly on the USER's system.\nMake sure to specify CommandLine exactly as it should be run in the shell.\nFor PowerShell-only checks from bash, use `pwsh -NoLogo -NoProfile -File <script>` or a here-doc with `pwsh -NoLogo -NoProfile -Command -`.\nIf the step doesn't return the command output, it means that the command was sent to the background as a task. You will receive messages with the command's output as it runs. To interact with a running command, use the manage_task tool. Use `send_input` to send stdin, `kill` to terminate the command, and `status` to check current status. Avoid repeated immediate status polls. If current output is needed, use one blocking status call with WaitMs and the last Cursor. The system will automatically notify you with a message when the command finishes. Simply proceed with other work or stop calling tools after launching a command.\nCommands will be run with PAGER=cat. You may want to limit the length of output for commands that usually rely on paging and may contain very long output (e.g. git log, use git log -n <N>).\nIMPORTANT: The Cwd (working directory) MUST be within the user's workspace. Do NOT use /tmp, /home, or any path outside the workspace. If you need a temporary directory, use the scratch/ directory in your artifact directory.\nEvery command has a hard {{COMMAND_TIMEOUT}}-second execution deadline (the run deadline may be shorter). Background execution preserves that deadline. Prefer the workspace's focused checks; a full release gate can exceed this command bound.",
+    "Parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "BypassSandbox": {
+          "description": "Set to true to run the command outside of the sandbox environment. This host has no OS sandbox; this flag does not change permissions or approval.",
+          "type": "boolean"
+        },
+        "CommandLine": {
+          "description": "The exact command line string to execute.",
+          "type": "string"
+        },
+        "Cwd": {
+          "description": "The current working directory for the command",
+          "type": "string"
+        },
+        "IsDaemon": {
+          "description": "Set to true for long-running support processes that are meant to keep running in the background indefinitely and are not expected to finish on their own (e.g., dev servers, file watchers, tunnels). Leave false (the default) for normal commands that are expected to terminate.",
+          "type": "boolean"
+        },
+        "RequestedTerminalID": {
+          "description": "Optional ID of a persistent terminal to reuse. Specify a TerminalID returned from a previous persistent run_command to share its variables. Can only be used when RunPersistent is true. Leave this empty with RunPersistent set to true to create a new persistent terminal.",
+          "type": "string"
+        },
+        "RunPersistent": {
+          "description": "Set to true to run this command in a persistent terminal that preserves environment and shell variables between invocations. Returns a TerminalID that can be specified in future run_command calls to share the environment. Note: persistent terminals share variables but are separate bash -c invocations; shell state like working directory, aliases, and functions are not shared.",
+          "type": "boolean"
+        },
+        "WaitMsBeforeAsync": {
+          "description": "This specifies the number of milliseconds to wait after starting the command before sending it to the background. If you want the command to complete execution synchronously, set this to a large enough value that you expect the command to complete in that time under ordinary circumstances. If you're starting an interactive or long-running command, set it to a large enough value that it would cause possible failure cases to execute synchronously (e.g. 500ms). Keep the value as small as possible, with a maximum of 10000ms. Values outside 0..10000 are clamped to that range.",
+          "type": "integer"
+        },
+        "toolAction": {
+          "description": "Brief 2-5 word phrase in -ing form describing the specific action. Capitalize like a sentence. Some examples: 'Analyzing directory', 'Searching the web', 'Checking git status', 'Running tests', 'Searching code'.",
+          "type": "string"
+        },
+        "toolSummary": {
+          "description": "Brief 2-5 word noun phrase describing the specific task. Capitalize like a sentence. Some examples: 'Directory analysis', 'Web search', 'Git status check', 'Test execution', 'Code search'.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "Cwd",
+        "WaitMsBeforeAsync",
+        "CommandLine"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "Name": "manage_task",
+    "Description": "Manage background tasks. Use this tool to list running tasks or interact with tasks that were sent to the background.\n\nActions:\n- 'list': List all currently running background tasks\n- 'kill': Cancel the task's execution\n- 'status': Check the task's current status and log file location\n- 'send_input': Send input to a running task\n\nWhen mentioning tasks to the user, avoid using full task IDs and start timestamps; keep them human-readable.\nStatus waits up to WaitMs (default 10000, clamped to 0..60000) while servicing cancellation, and returns an output Cursor. Pass that Cursor on the next status call to receive only new stdout/stderr. Completion notices are still automatic.",
+    "Parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "Action": {
+          "description": "The action to perform: 'list' (list all running tasks), 'kill' (cancel the task), 'status' (check the task status and log URI), 'send_input' (send input to a running task).",
+          "enum": [
+            "list",
+            "kill",
+            "status",
+            "send_input"
+          ],
+          "type": "string"
+        },
+        "Input": {
+          "description": "The input to send to the task. Required when Action is 'send_input'.",
+          "type": "string"
+        },
+        "TaskId": {
+          "description": "The task ID to manage. Required when Action is 'kill', 'status', or 'send_input'.",
+          "type": "string"
+        },
+        "toolAction": {
+          "description": "Brief 2-5 word phrase in -ing form describing the specific action. Capitalize like a sentence. Some examples: 'Analyzing directory', 'Searching the web', 'Checking git status', 'Running tests', 'Searching code'.",
+          "type": "string"
+        },
+        "toolSummary": {
+          "description": "Brief 2-5 word noun phrase describing the specific task. Capitalize like a sentence. Some examples: 'Directory analysis', 'Web search', 'Git status check', 'Test execution', 'Code search'.",
+          "type": "string"
+        },
+        "WaitMs": {
+          "type": "integer",
+          "description": "For status, wait up to this many milliseconds for completion; default 10000, clamped to 0..60000. Use 0 for an immediate snapshot."
+        },
+        "Cursor": {
+          "type": "string",
+          "description": "For status, the prior returned Cursor (stdout:stderr character offsets). Omit to read output from the beginning."
+        }
+      },
+      "required": [
+        "Action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "Name": "replace_file_content",
+    "Description": "Use this tool to edit an existing file. Follow these rules:\n1. Use this tool ONLY when you are making a SINGLE CONTIGUOUS block of edits to the same file (i.e. replacing a single contiguous block of text).\n2. Do NOT make multiple parallel calls to this tool for the same file.\n3. To edit multiple, non-adjacent lines of code in the same file, make multiple calls to this tool.\n4. For the ReplacementChunk, specify StartLine, EndLine, TargetContent and ReplacementContent. StartLine and EndLine should specify a range of lines containing precisely the instances of TargetContent that you wish to edit. To edit a single instance of the TargetContent, the range should be such that it contains that specific instance of the TargetContent and no other instances. In TargetContent, specify the precise lines of code to edit. These lines MUST EXACTLY MATCH text in the existing file content. In ReplacementContent, specify the replacement content for the specified target content. This must be a complete drop-in replacement of the TargetContent, with necessary modifications made.\n5. If you are making multiple edits across a single file, make multiple calls to this tool. DO NOT try to replace the entire existing content with the new content, this is very expensive.\n6. You may not edit file extensions: [.ipynb]",
+    "Parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "AllowMultiple": {
+          "description": "If true, multiple occurrences of 'targetContent' will be replaced by 'replacementContent' if they are found. Otherwise if multiple occurrences are found, an error will be returned.",
+          "type": "boolean"
+        },
+        "Description": {
+          "description": "Brief, user-facing explanation of what this change did. Focus on non-obvious rationale, design decisions, or important context. Don't just restate what the code does.",
+          "type": "string"
+        },
+        "EndLine": {
+          "description": "The ending line number of the chunk (1-indexed). Should be at or after the last line containing the target content. Must satisfy StartLine <= EndLine <= number of lines in the file. The target content is searched for within the [StartLine, EndLine] range.",
+          "type": "integer"
+        },
+        "Instruction": {
+          "description": "A description of the changes that you are making to the file.",
+          "type": "string"
+        },
+        "ReplacementContent": {
+          "description": "The content to replace the target content with.",
+          "type": "string"
+        },
+        "StartLine": {
+          "description": "The starting line number of the chunk (1-indexed). Should be at or before the first line containing the target content. Must satisfy 1 <= StartLine <= EndLine. The target content is searched for within the [StartLine, EndLine] range.",
+          "type": "integer"
+        },
+        "TargetContent": {
+          "description": "The exact string to be replaced. This must be the exact character-sequence to be replaced, including whitespace. Be very careful to include any leading whitespace otherwise this will not work at all. This must be a unique substring within the file, or else it will error.",
+          "type": "string"
+        },
+        "TargetFile": {
+          "description": "The target file to modify. Must be an absolute path. Always specify the target file as the very first argument.",
+          "type": "string"
+        },
+        "TargetLintErrorIds": {
+          "description": "If applicable, IDs of lint errors this edit aims to fix (they'll have been given in recent IDE feedback). If you believe the edit could fix lints, do specify lint IDs; if the edit is wholly unrelated, do not. A rule of thumb is, if your edit was influenced by lint feedback, include lint IDs. Exercise honest judgement here.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "toolAction": {
+          "description": "Brief 2-5 word phrase in -ing form describing the specific action. Capitalize like a sentence. Some examples: 'Analyzing directory', 'Searching the web', 'Checking git status', 'Running tests', 'Searching code'.",
+          "type": "string"
+        },
+        "toolSummary": {
+          "description": "Brief 2-5 word noun phrase describing the specific task. Capitalize like a sentence. Some examples: 'Directory analysis', 'Web search', 'Git status check', 'Test execution', 'Code search'.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "TargetFile",
+        "Instruction",
+        "Description",
+        "AllowMultiple",
+        "TargetContent",
+        "ReplacementContent",
+        "StartLine",
+        "EndLine"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "Name": "write_to_file",
+    "Description": "Use this tool to create new files. The file will be created if it does not already exist. Parent directories must exist. Existing-file changes require a prior view_file in this run; the host binds the observed file hash.\n\t\tFollow these instructions:\n\t\t1. By default this tool will error if TargetFile already exists. To overwrite an existing file, set Overwrite to true. To append to an existing file (or create it if it does not exist), set Append to true.\n\t\t2. When creating an artifact, always provide ArtifactMetadata. When creating non-artifact files, do not provide it.",
+    "Parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "Append": {
+          "description": "Set this to true to append CodeContent to the end of TargetFile (creating the file if it does not exist). Cannot be combined with Overwrite=true.",
+          "type": "boolean"
+        },
+        "ArtifactMetadata": {
+          "additionalProperties": false,
+          "description": "Metadata that defines artifact properties. ONLY provide when creating an artifact file in the artifact directory. Omit this field when creating non-artifact files.",
+          "properties": {
+            "RequestFeedback": {
+              "description": "Set to true if you'd like to request user feedback on this artifact and if the contents of this artifact are executable (e.g., a plan). The user will be provided with a 'Proceed' button to execute it.",
+              "type": "boolean"
+            },
+            "Summary": {
+              "description": "Detailed multi-line summary of the artifact file, after edits have been made. Summary does not need to mention the artifact name and should focus on the contents and purpose of the artifact.",
+              "type": "string"
+            },
+            "UserFacing": {
+              "description": "Set to true if this artifact should be presented to the user. Set to false for scratch scripts, temporary data files, or files that the user does not need to see",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "Summary",
+            "UserFacing",
+            "RequestFeedback"
+          ],
+          "type": "object"
+        },
+        "CodeContent": {
+          "description": "The code contents to write to the file.",
+          "type": "string"
+        },
+        "Description": {
+          "description": "Brief, user-facing explanation of what this change did. Focus on non-obvious rationale, design decisions, or important context. Don't just restate what the code does.",
+          "type": "string"
+        },
+        "Overwrite": {
+          "description": "Set this to true to overwrite an existing file. WARNING: This will replace the entire file contents. Only use when you explicitly intend to overwrite. Otherwise, use a code edit tool to modify existing files.",
+          "type": "boolean"
+        },
+        "TargetFile": {
+          "description": "The target file to create and write code to. Must be an absolute path.",
+          "type": "string"
+        },
+        "toolAction": {
+          "description": "Brief 2-5 word phrase in -ing form describing the specific action. Capitalize like a sentence. Some examples: 'Analyzing directory', 'Searching the web', 'Checking git status', 'Running tests', 'Searching code'.",
+          "type": "string"
+        },
+        "toolSummary": {
+          "description": "Brief 2-5 word noun phrase describing the specific task. Capitalize like a sentence. Some examples: 'Directory analysis', 'Web search', 'Git status check', 'Test execution', 'Code search'.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "TargetFile",
+        "Overwrite",
+        "CodeContent",
+        "Description"
+      ],
+      "type": "object"
+    }
+  }
+]

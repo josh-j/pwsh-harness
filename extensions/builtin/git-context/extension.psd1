@@ -1,0 +1,8 @@
+@{
+    Name              = 'git-context'
+    Version           = '1.0.0'
+    HarnessApiVersion = '1.0'
+    EntryPoint        = 'entry.ps1'
+    Requires          = @()
+    Description       = 'Built-in git-context extension'
+}

@@ -1,0 +1,58 @@
+[
+  {
+    "Name": "grep_search",
+    "Description": "Find exact pattern matches within workspace files or directories. Returns bounded, numbered context grouped by file. Use Includes to limit file patterns. Ignores protected paths. IsRegex defaults false; regex matching has a short timeout.",
+    "Parameters": {
+      "type": "object",
+      "properties": {
+        "Query": {
+          "type": "string"
+        },
+        "SearchPath": {
+          "type": "string",
+          "description": "Absolute workspace file or directory."
+        },
+        "Includes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "IsRegex": {
+          "type": "boolean"
+        },
+        "CaseInsensitive": {
+          "type": "boolean"
+        },
+        "MatchPerLine": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "Query",
+        "SearchPath"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "Name": "codebase_search",
+    "Description": "Find relevant functions or symbol chunks in the permitted workspace. Ranks with BM25; embeddings participate only when the user explicitly enables hybrid search and its separate USD budget. Returns whole bounded chunks and ranking provenance.",
+    "Parameters": {
+      "type": "object",
+      "properties": {
+        "Query": {
+          "type": "string"
+        },
+        "SearchPath": {
+          "type": "string",
+          "description": "Optional absolute confined scope."
+        }
+      },
+      "required": [
+        "Query"
+      ],
+      "additionalProperties": false
+    }
+  }
+]
