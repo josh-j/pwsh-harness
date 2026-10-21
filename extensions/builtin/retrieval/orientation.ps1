@@ -18,7 +18,7 @@ function Set-RetrievalOrientation {
             Set-RetrievalOrientationSkipped $Request 'input budget'
             return
         }
-        $index = Update-RetrievalIndex $Request -BuildBudgetMilliseconds 3000 -MemoryOnly
+        $index = Update-RetrievalIndex $Request -BuildBudgetMilliseconds 3000 -MetadataOnly
         $tracked = Invoke-RetrievalGit $index.Root @('ls-files', '--cached', '--exclude-standard', '-z') $Request
         $ignoredText = Invoke-RetrievalGit $index.Root @('ls-files', '--cached', '--ignored', '--exclude-standard', '-z') $Request
         if ($null -eq $tracked -or $null -eq $ignoredText) {

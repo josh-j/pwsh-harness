@@ -162,7 +162,7 @@ function Initialize-PackCommands {
         }, 'Send last prompt again.')
     $script:Harness.Commands.Add('config', {
             param($c) Invoke-PackConfigCommand $c
-        }, 'Show config; /config get Name; /config set Name JSON-value (session only). Persist with config.json or Set-PwshHarnessConfig.')
+        }, 'Show config; /config schema; /config get Name; /config set Name JSON-value (session only). Persist with config.json or Set-PwshHarnessConfig.')
     $script:Harness.Commands.Add('extensions', {
             param($c) $script:Harness.GetExtensionInfo() | Format-Table Name, Source, Generation, State -AutoSize | Out-String
         }, 'List extensions with source, generation and state.')
@@ -204,6 +204,9 @@ function Initialize-PackCommands {
 }
 function Invoke-PackConfigCommand {
     param($Context)
+    if ($Context.Arguments -ceq 'schema') {
+        return @($script:Harness.ConfigService.Describe()) | ConvertTo-Json -Depth 10
+    }
     if (-not $Context.Arguments) {
         return $Context.State.Config | ConvertTo-Json -Depth 10
     }

@@ -3,9 +3,9 @@ function Read-HarnessOperationReview {
     param($View, $Terminal, [string]$Text)
     $review = New-HarnessViewState
     $review.ReviewMode = $true
-    $review.StatusBar.Ascii = $View.StatusBar.Ascii
-    $review.StatusBar.Mode = $View.StatusBar.Mode
-    $review.StatusBar.Steps = $View.StatusBar.Steps
+    foreach ($property in $View.StatusBar.PSObject.Properties) {
+        $review.StatusBar.($property.Name) = $property.Value -is [hashtable] ? (@{} + $property.Value) : $property.Value
+    }
     $review.SessionView.Records.Add([pscustomobject]@{ Role = 'review'; Text = $Text })
     $review.Viewport.ScrollOffset = [int]::MaxValue
     $dimensions = ''
@@ -433,8 +433,11 @@ function Invoke-HarnessSafeFrontendInput {
             }
         }.GetNewClosure())
     $beforeId = $Session.SessionId
+    $completed = $false
     try {
         Invoke-HarnessFrontendInput $HarnessHost $Session $View $Terminal $Text $Pump $LineMode $ReviewedOperation $UserInitiated
+        # Request recovery is handled inside the frontend; command recovery is below.
+        $completed = $View.StatusBar.Text -notin @('Stopped', 'Request cancelled')
     }
     catch {
         $message = ConvertTo-HarnessSafeText (Get-HarnessFrontendErrorMessage $_)
@@ -460,7 +463,7 @@ function Invoke-HarnessSafeFrontendInput {
         $HarnessHost.Events.Unsubscribe('Notice', $noticeName)
     }
     $View.Commands = @($HarnessHost.Commands.List())
-    if ($pending.Ready -and $HarnessHost.Commands.Contains('continue') -and $UserInitiated -and $Text.Trim().StartsWith('/') -and
+    if ($completed -and $pending.Ready -and $HarnessHost.Commands.Contains('continue') -and $UserInitiated -and $Text.Trim().StartsWith('/') -and
         -not $HarnessHost.AgentControl.GetState($Session).HasRun -and
         $View.StatusBar.ContinueAfterAction -and -not $View.Quit -and [string]::Equals($beforeId, $Session.SessionId, [StringComparison]::Ordinal)) {
         Invoke-HarnessSafeFrontendInput $HarnessHost $Session $View $Terminal '/continue --auto' $Pump $LineMode $null $false

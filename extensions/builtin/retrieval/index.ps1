@@ -303,11 +303,14 @@ function Save-RetrievalIndex {
     }
 }
 function Update-RetrievalIndex {
-    param($Request, [switch]$Complete, [string]$Corpus = 'project', [ValidateRange(1, 5000)][int]$BuildBudgetMilliseconds = 650, [switch]$MemoryOnly)
+    param($Request, [switch]$Complete, [string]$Corpus = 'project', [ValidateRange(1, 5000)][int]$BuildBudgetMilliseconds = 650, [switch]$MemoryOnly, [switch]$MetadataOnly)
     $watch = Start-RetrievalClock $Request build
     $comparison = Get-HarnessPathComparison
     $identity = Get-RetrievalIndexIdentity $Request $Corpus
     $root = $identity.Root; $key = $identity.Key
+    if ($MetadataOnly) {
+        $key += ':metadata'
+    }
     if (-not $script:Indexes.ContainsKey($key)) {
         $script:Indexes[$key] = New-RetrievalIndex $Request $Corpus
     }
@@ -362,7 +365,8 @@ function Update-RetrievalIndex {
             continue
         }
         $present[$file.Path] = $true
-        if ($index.Files.ContainsKey($file.Path) -and $index.Files[$file.Path].Revision -eq $file.Revision -and $index.Files[$file.Path].Frequencies -is [array] -and $index.Files[$file.Path].Frequencies.Count -eq $index.Files[$file.Path].Chunks.Count) {
+        if ($index.Files.ContainsKey($file.Path) -and $index.Files[$file.Path].Revision -eq $file.Revision -and
+            ($MetadataOnly -or ($index.Files[$file.Path].Frequencies -is [array] -and $index.Files[$file.Path].Frequencies.Count -eq $index.Files[$file.Path].Chunks.Count))) {
             $phases.ReusedFiles++; continue
         }
         if (-not $Complete -and $watch.ElapsedMilliseconds -gt $BuildBudgetMilliseconds) {
@@ -408,7 +412,7 @@ function Update-RetrievalIndex {
         $phases.ReadMilliseconds += $phase.Elapsed.TotalMilliseconds
         $phase.Restart()
         $frequencies = [Collections.Generic.List[object]]::new()
-        foreach ($chunk in $valid) {
+        foreach ($chunk in ($MetadataOnly ? @() : $valid)) {
             $frequencies.Add((Get-RetrievalFrequency $chunk $Request))
             $phases.TokenizedChunks++
         }
@@ -427,10 +431,12 @@ function Update-RetrievalIndex {
         }
     }
     $phase.Restart()
-    $null = Initialize-RetrievalSearch $index $Request
+    if (-not $MetadataOnly) {
+        $null = Initialize-RetrievalSearch $index $Request
+    }
     $phases.PostingsMilliseconds = $phase.Elapsed.TotalMilliseconds
     $index.Ready = $pending -eq 0
-    if (-not $MemoryOnly) {
+    if (-not $MemoryOnly -and -not $MetadataOnly) {
         $phase.Restart()
         Save-RetrievalIndex $index
         $phases.PersistMilliseconds = $phase.Elapsed.TotalMilliseconds

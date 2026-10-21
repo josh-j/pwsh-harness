@@ -164,9 +164,10 @@
     $Harness.Actions.Add('copy', { param($c) Copy-HarnessCode $c.State -CodeBlock $c.Block }, $false)
     $Harness.Actions.Add('run', { param($c) Invoke-HarnessRun $c.State -Confirm $c.Confirm -CodeBlock $c.Block -Pump $c.Pump -CancellationToken $c.CancellationToken -ScriptPath $c.Arguments -ReviewedSettings $c.ReviewData }, $true, '', '', ${function:Get-PackRunReview})
     $Harness.Actions.Add('whatif', { param($c) Invoke-HarnessRun $c.State -WhatIf -Confirm $c.Confirm -CodeBlock $c.Block -Pump $c.Pump -CancellationToken $c.CancellationToken -ReviewedSettings $c.ReviewData }, $true, '', '', { param($c) Get-PackRunReview $c -WhatIf })
-    $Harness.Settings.Declare('CommandCatalogPath', [string], (Join-Path $PSScriptRoot 'windows-7.6.json'))
+    $Harness.Settings.Declare('CommandCatalogPath', [string], '')
     $catalogConfig = $Harness.ConfigService.Resolve()
-    $catalog = New-ComposedCatalog $catalogConfig.CommandCatalogPath $catalogConfig.DataDirectory -Live:$IsWindows
+    $catalogPath = $catalogConfig.CommandCatalogPath ? $catalogConfig.CommandCatalogPath : (Join-Path $PSScriptRoot 'windows-7.6.json')
+    $catalog = New-ComposedCatalog $catalogPath $catalogConfig.DataDirectory -Live:$IsWindows
     $Harness.TargetProfiles.Add('Windows', (New-PackTargetProfile -OS Windows -EOL CRLF -CommandCatalog $catalog))
     $Harness.TargetProfiles.Select('Windows')
 }

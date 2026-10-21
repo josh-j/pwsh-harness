@@ -7,6 +7,7 @@ function New-EngineFacade {
     $publish = ${function:Publish-EngineEvent}
     $resolve = ${function:Resolve-EngineSettings}
     $newSetting = ${function:New-EngineSetting}
+    $copyConfig = ${function:Copy-EngineConfigValue}
     $candidatePoints = ${function:Get-EnginePointCandidate}
     $invokePoint = ${function:Invoke-EnginePoint}
     $fault = ${function:Write-EngineFault}
@@ -351,6 +352,14 @@ function New-EngineFacade {
     $facade | Add-Member NoteProperty Settings $settings
     $service = [pscustomobject]@{
     }
+    $service | Add-Member ScriptMethod Describe {
+        & $assertActive $Store
+        $declarations = & $candidatePoints $Store Settings '' $Target.Points.Settings
+        foreach ($name in ($declarations.Keys | Sort-Object)) {
+            $entry = $declarations[$name]
+            [pscustomobject]@{ Name = $name; Type = $entry.Type.FullName; Default = (& $copyConfig $entry.Default); Environment = $entry.Env; Extension = $entry.Extension }
+        }
+    }.GetNewClosure()
     $service | Add-Member ScriptMethod Resolve {
         param([hashtable]$Parameters = @{
             }, [string]$Path)
