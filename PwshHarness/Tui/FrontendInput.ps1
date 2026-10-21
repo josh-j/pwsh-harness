@@ -47,7 +47,7 @@ function Read-HarnessOperationReview {
                 $review.Viewport.ScrollOffset = 0
             }
             elseif ($key.Key -in @('PageUp', 'PageDown')) {
-                $null = Update-HarnessEditor $review $key
+                $null = Update-HarnessEditor $review $key $false ($Terminal.Now())
             }
             $review.Dirty = $true
         }
@@ -221,14 +221,12 @@ function Read-HarnessLine {
             continue
         }
         $more = Test-HarnessTerminalInput $Terminal
-        if ($key.Key -eq 'Enter' -and -not $View.Editor.Paste -and $key.Modifiers -eq 0 -and -not $more -and $View.Editor.Text.Trim() -match '^/\S*$') {
-            $null = Write-HarnessLineEditor $View $Terminal $Prompt $shown
-            $Terminal.WriteText("`n"); return $View.Editor.Text.Trim()
-        }
-        $action = Update-HarnessEditor $View $key $more
+        $action = Update-HarnessEditor $View $key $more ($Terminal.Now())
         if ($action -and $action.Action -eq 'Send') {
             $null = Write-HarnessLineEditor $View $Terminal $Prompt $shown
-            $Terminal.WriteText("`n"); return $action.Prompt
+            $View.Editor.Text = ''; $View.Editor.Cursor = 0
+            $Terminal.WriteText("`n")
+            return $action.Prompt -match '^\s*/\S*\s*$' ? $action.Prompt.Trim() : $action.Prompt
         }
         if ($action -and $action.Action -eq 'Clear') {
             $Terminal.WriteText("^C`n"); return ''

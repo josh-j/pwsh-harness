@@ -76,6 +76,7 @@ function Invoke-HarnessRenderWarmup {
     if (-not $Worker -or -not $ServiceInput -or $View.Renderer -ne 'Default') {
         return $true
     }
+    $Width = [Math]::Max(20, $Width); $Height = [Math]::Max(8, $Height)
     $cache = $View.RenderCache
     if ($cache.Width -ne $Width -and (Test-HarnessRecordProperty $cache 'OtherWidths')) {
         foreach ($layout in $cache.OtherWidths) {
@@ -85,10 +86,10 @@ function Invoke-HarnessRenderWarmup {
         }
     }
     $count = $View.SessionView.Records.Count + [int]$View.SessionView.Busy
-    $changed = -not $cache.Transcript -or $cache.Width -ne $Width -or $cache.Height -ne $Height -or
-    (Get-HarnessDisplayValue $cache ReviewMode $false) -ne $View.ReviewMode -or
-    $cache.Ascii -ne $View.StatusBar.Ascii -or $cache.Expanded -ne $View.Panels.ExpandTools -or
-    $cache.PreviewLines -ne $View.StatusBar.ToolPreviewLines -or $cache.Sources.Count -ne $count
+    $changed = -not $cache.Transcript -or $cache.Width -ne $Width -or -not (Test-HarnessRenderHighlighters $cache $View) -or
+    $cache.Ascii -ne $View.StatusBar.Ascii -or $cache.Expanded -ne $View.Panels.ExpandTools -or $cache.Busy -ne $View.SessionView.Busy -or
+    $cache.PreviewLines -ne $View.StatusBar.ToolPreviewLines -or $cache.Sources.Count -ne $count -or
+    -not [string]::Equals($cache.LayoutKey, (Get-HarnessRenderLayoutKey $View $Height), [StringComparison]::Ordinal)
     if (-not $changed) {
         for ($i = 0; $i -lt $View.SessionView.Records.Count; $i++) {
             if (-not [string]::Equals($cache.Sources[$i].Text, $View.SessionView.Records[$i].Text, [StringComparison]::Ordinal) -or

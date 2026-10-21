@@ -154,7 +154,7 @@ function Update-PackAgentTasks {
     $null = Get-PackAgentTaskStore $Context -Stopping:($Mode -ceq 'Stop')
     try {
         do {
-            $waiting = $false
+            $waiting = $null
             foreach ($record in @($store.Tasks.Values | Where-Object { -not $_.Done })) {
                 $task = $record.Task
                 try {
@@ -167,7 +167,7 @@ function Update-PackAgentTasks {
                     $task.Failure = $_; $finished = $true
                 }
                 if (-not $finished) {
-                    $waiting = $waiting -or -not $record.IsDaemon; continue
+                    $waiting = $waiting ? $waiting : ($record.IsDaemon ? $null : $task); continue
                 }
                 try {
                     $data = Complete-PackRunTask $task
@@ -195,7 +195,7 @@ function Update-PackAgentTasks {
                 if ($Context.Pump) {
                     $null = & $Context.Pump
                 }
-                $script:Harness.Clock.Wait(25, $record.Task)
+                $script:Harness.Clock.Wait(25, $waiting)
             }
         } while ($waiting -and $Mode -ceq 'Wait')
     }

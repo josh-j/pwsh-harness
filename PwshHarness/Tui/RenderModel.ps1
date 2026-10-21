@@ -31,6 +31,16 @@ function Test-HarnessRenderHighlighters {
     }
     $true
 }
+function Get-HarnessRenderLayoutKey {
+    param($State, [int]$Height)
+    $result = $State.SessionView.LastResult
+    $resultCode = $result ? (@{ Text = (Get-HarnessDisplayValue $result Text); Blocks = (Get-HarnessRenderBlocksKey @($result.CodeBlocks)) } | ConvertTo-Json -Compress) : ''
+    $diffKey = ($result -and $State.Panels.ShowDiff) ? ((Test-HarnessRecordProperty $result 'FixDiff') ? ('fixed:' + [string]$result.FixDiff) : ('edits:' + (@(foreach ($edit in $result.Edits) {
+                        @{ Line = $edit.Line; Rule = $edit.Rule; Before = $edit.Before; After = $edit.After }
+                    }) | ConvertTo-Json -Depth 3 -Compress))) : ''
+    $diagnosticKey = $State.Panels.ShowDiagnostics ? ($State.SessionView.Diagnostics | ConvertTo-Json -Depth 6 -Compress) : ''
+    "$Height|$($State.ReviewMode)|$($State.Panels.ShowDiff)|$($State.Panels.ShowDiagnostics)|$($State.Panels.CodeLine)|$($State.Panels.SelectedDiagnostic)|$resultCode|$diffKey|$diagnosticKey"
+}
 function Get-HarnessRenderModel {
     <# .SYNOPSIS
     Render a ViewModel and size into a pure frame of styled segment rows.
@@ -55,12 +65,7 @@ function Get-HarnessRenderModel {
     }
     $records = @($State.SessionView.Records.ToArray())
     if ($State.SessionView.Busy) {
-        $records += [pscustomobject]@{
-
-
-            Role ='assistant'
-            Text =$State.SessionView.StreamingText
-        }
+        $records += [pscustomobject]@{ Role = 'assistant'; Text = $State.SessionView.StreamingText }
     }
     $result = $State.SessionView.LastResult
     $hasInlineCode = $false
@@ -76,32 +81,7 @@ function Get-HarnessRenderModel {
     $streamingCache = $cache.Streaming
     # Snapshot text as well as role: headless callers can edit a record in place.
     # Reuse immutable aggregate rows when only editor/status/scroll state changes.
-    $resultCode = if ($result) {
-        @{ Text = (Get-HarnessDisplayValue $result Text); Blocks = (Get-HarnessRenderBlocksKey @($result.CodeBlocks)) } | ConvertTo-Json -Compress
-    }
-    else {
-        ''
-    }
-    $diffKey = if ($result -and $State.Panels.ShowDiff) {
-        if (Test-HarnessRecordProperty $result 'FixDiff') {
-            'fixed:' + [string]$result.FixDiff
-        }
-        else {
-            'edits:' + (@(foreach ($edit in $result.Edits) {
-                        @{ Line = $edit.Line; Rule = $edit.Rule; Before = $edit.Before; After = $edit.After }
-                    }) | ConvertTo-Json -Depth 3 -Compress)
-        }
-    }
-    else {
-        ''
-    }
-    $diagnosticKey = if ($State.Panels.ShowDiagnostics) {
-        $State.SessionView.Diagnostics | ConvertTo-Json -Depth 6 -Compress
-    }
-    else {
-        ''
-    }
-    $layoutKey = "$Height|$($State.ReviewMode)|$($State.Panels.ShowDiff)|$($State.Panels.ShowDiagnostics)|$($State.Panels.CodeLine)|$($State.Panels.SelectedDiagnostic)|$resultCode|$diffKey|$diagnosticKey"
+    $layoutKey = Get-HarnessRenderLayoutKey $State $Height
     $prepared = $State.PreparedLayout
     $preparedMatches = $State.Renderer -eq 'Default' -and $null -ne $prepared -and (Test-HarnessRenderHighlighters $prepared $State)
     if (-not (Test-HarnessRenderHighlighters $cache $State)) {
