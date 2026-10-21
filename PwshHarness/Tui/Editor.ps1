@@ -182,7 +182,8 @@ function Update-HarnessEditor {
                     if (-not $text -and -not $editor.Paste -and $Key.Modifiers -eq 0 -and $MoreKeys) {
                         $editor.Text = ''; $editor.Cursor = 0; $View.Dirty = $true; return
                     }
-                    if ($Key.Modifiers -ne 0 -or $MoreKeys -or $editor.Paste -or $editor.Text.TrimEnd().EndsWith('`')) {
+                    if ($Key.Modifiers -ne 0 -or $MoreKeys -or $editor.Paste -or
+                        ($editor.Text.TrimEnd().EndsWith('`') -and $editor.Text.TrimEnd() -notmatch '(?m)^ {0,3}`{3,}\z')) {
                         $editor.Text = $editor.Text.Insert($editor.Cursor, "`n")
                         $editor.Cursor++
                     }

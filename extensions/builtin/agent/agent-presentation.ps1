@@ -99,7 +99,8 @@ function Invoke-PackPresentedTool {
     }
     $mapped = switch ($Call.Name) {
         grep_search {
-            if ($arguments.Includes.Count -gt 20 -or @($arguments.Includes | Where-Object { $_ -isnot [string] -or $_.Length -gt 128 }).Count) {
+            $includes = $arguments.ContainsKey('Includes') ? $arguments.Includes : @()
+            if ($includes.Count -gt 20 -or @($includes | Where-Object { $_ -isnot [string] -or $_.Length -gt 128 }).Count) {
                 throw 'Invalid search includes.'
             }
             @{ Name = 'search'; Arguments = @{ query = $arguments.Query; scope = ([string]::Equals($arguments.SearchPath, $root, (Get-HarnessPathComparison)) ? '.' : (Resolve-PackPresentedPath $Context $arguments.SearchPath)); mode = 'exact'; regex = [bool]$arguments.IsRegex; ignore_case = [bool]$arguments.CaseInsensitive; includes = ($arguments.Includes ? ($arguments.Includes -join ';') : '*'); per_line = ($arguments.ContainsKey('MatchPerLine') ? $arguments.MatchPerLine : $true) } }

@@ -386,6 +386,7 @@ function Invoke-HarnessFrontendInput {
         }
         Assert-HarnessFrontendAgentResult $result $Session
         $View.SessionView.RetryPrompt = ''
+        $View.StatusBar.Text = $View.StatusBar.ExtensionNotice ? $View.StatusBar.ExtensionNotice : 'Ready'
         if ($LineMode) {
             $Terminal.WriteText("`n")
             $snapshot = $HarnessHost.GetConversationSnapshot($Session)
