@@ -136,7 +136,7 @@
   },
   {
     "Name": "replace_file_content",
-    "Description": "Use this tool to edit an existing file. Follow these rules:\n1. Use this tool ONLY when you are making a SINGLE CONTIGUOUS block of edits to the same file (i.e. replacing a single contiguous block of text).\n2. Do NOT make multiple parallel calls to this tool for the same file.\n3. To edit multiple, non-adjacent lines of code in the same file, make multiple calls to this tool.\n4. For the ReplacementChunk, specify StartLine, EndLine, TargetContent and ReplacementContent. StartLine and EndLine should specify a range of lines containing precisely the instances of TargetContent that you wish to edit. To edit a single instance of the TargetContent, the range should be such that it contains that specific instance of the TargetContent and no other instances. In TargetContent, specify the precise lines of code to edit. These lines MUST EXACTLY MATCH text in the existing file content. In ReplacementContent, specify the replacement content for the specified target content. This must be a complete drop-in replacement of the TargetContent, with necessary modifications made.\n5. If you are making multiple edits across a single file, make multiple calls to this tool. DO NOT try to replace the entire existing content with the new content, this is very expensive.\n6. You may not edit file extensions: [.ipynb]",
+    "Description": "Edit one existing file. Supply either one replacement (StartLine, EndLine, TargetContent, ReplacementContent, AllowMultiple), or ReplacementChunks for 1-64 atomic edits. Chunk line ranges refer to the ORIGINAL file: ascending, nonoverlapping and within the file. Each chunk must match TargetContent exactly once; copy exact whitespace without numbered prefixes. All chunks succeed together under one hash and approval; failure writes nothing. ExpectedSha256 may bind an explicit original-file hash; otherwise first view the file in this run. Never make parallel calls editing the same file; wait for the result. Do not use for .ipynb files.",
     "Parameters": {
       "additionalProperties": false,
       "properties": {
@@ -186,17 +186,50 @@
         "toolSummary": {
           "description": "Brief 2-5 word noun phrase describing the specific task. Capitalize like a sentence. Some examples: 'Directory analysis', 'Web search', 'Git status check', 'Test execution', 'Code search'.",
           "type": "string"
+        },
+        "ExpectedSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Optional SHA-256 of original file bytes; omitted only after viewing it in this run."
+        },
+        "ReplacementChunks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "description": "Atomic replacements against ascending nonoverlapping original-file line ranges; do not mix with single replacement fields.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "StartLine",
+              "EndLine",
+              "TargetContent",
+              "ReplacementContent"
+            ],
+            "properties": {
+              "StartLine": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "EndLine": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "TargetContent": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ReplacementContent": {
+                "type": "string"
+              }
+            }
+          }
         }
       },
       "required": [
         "TargetFile",
         "Instruction",
-        "Description",
-        "AllowMultiple",
-        "TargetContent",
-        "ReplacementContent",
-        "StartLine",
-        "EndLine"
+        "Description"
       ],
       "type": "object"
     }

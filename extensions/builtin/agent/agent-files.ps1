@@ -1,4 +1,47 @@
 #Requires -Version 7.6
+function ConvertFrom-PackEditHunks {
+    param($Value, [switch]$Presented)
+    if ($Value.ValueKind -ne 'Array' -or $Value.GetArrayLength() -lt 1 -or $Value.GetArrayLength() -gt 64) {
+        throw 'Supply between 1 and 64 edit hunks.'
+    }
+    $names = $Presented ? @{ StartLine = 'start_line'; EndLine = 'end_line'; TargetContent = 'before'; ReplacementContent = 'after' } :
+    @{ start_line = 'start_line'; end_line = 'end_line'; before = 'before'; after = 'after' }
+    $hunks = [Collections.Generic.List[object]]::new()
+    foreach ($item in $Value.EnumerateArray()) {
+        if ($item.ValueKind -ne 'Object') {
+            throw 'Each edit hunk must be an object.'
+        }
+        $hunk = @{}
+        foreach ($field in $item.EnumerateObject()) {
+            if ($field.Name -cnotin @($names.Keys) -or $hunk.ContainsKey($names[$field.Name])) {
+                throw 'Unknown or duplicate edit hunk field.'
+            }
+            $name = $names[$field.Name]
+            if ($name -in @('before', 'after')) {
+                if ($field.Value.ValueKind -ne 'String') {
+                    throw 'Edit hunk text must be a string.'
+                }
+                $text = $field.Value.GetString()
+                if ($text.Contains([char]0) -or ($name -ceq 'before' -and -not $text)) {
+                    throw 'Invalid edit hunk text.'
+                }
+                $hunk[$name] = $text
+            }
+            else {
+                $number = 0
+                if ($field.Value.ValueKind -ne 'Number' -or -not $field.Value.TryGetInt32([ref]$number) -or $number -lt 1) {
+                    throw 'Invalid edit hunk line bound.'
+                }
+                $hunk[$name] = $number
+            }
+        }
+        if ($hunk.Count -ne 4) {
+            throw 'Each edit hunk requires before, after and both line bounds.'
+        }
+        $hunks.Add($hunk)
+    }
+    , $hunks.ToArray()
+}
 function Resolve-PackToolPath {
     param($State, [string]$Root, [string]$Path, $Context)
     if ($Path -match '[\p{Cc}\p{Cf}:]|^[\\/]|(^|[\\/])\.\.([\\/]|$)') {

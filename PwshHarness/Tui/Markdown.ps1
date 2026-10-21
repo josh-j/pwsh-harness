@@ -152,9 +152,8 @@ function Get-HarnessMarkdownLineRows {
     $rows
 }
 
-function Get-HarnessMarkdownRows {
-    param([AllowEmptyString()][string]$Text, [int]$Width, [bool]$Ascii = $false, [object[]]$CodeBlocks = @(),
-        [hashtable]$LineCache, [hashtable]$NextLineCache, $Highlighters)
+function Get-HarnessMarkdownLogicalLines {
+    param([AllowEmptyString()][string]$Text, [bool]$Ascii, [object[]]$CodeBlocks, $Highlighters, [bool]$Tokenize)
     $lines = [regex]::Split($Text, '\r\n|\n|\r')
     # Share extraction boundaries, including PowerShell here-strings containing fences.
     $fences = @(Get-HarnessDisplayFences $Text $Highlighters)
@@ -175,14 +174,7 @@ function Get-HarnessMarkdownRows {
                 $blockIndex++
                 $heading = "--- $language #$blockIndex ---"
             }
-            if ($null -eq $LineCache -and $null -eq $NextLineCache) {
-                foreach ($part in @(Split-HarnessDisplayLine $heading $Width)) {
-                    New-HarnessFrameRow $part -Color Cyan
-                }
-            }
-            else {
-                Get-HarnessMarkdownLineRows $heading $Width '' Cyan $false '' $true $LineCache $NextLineCache $Highlighters
-            }
+            [pscustomobject]@{ Text = $heading; Prefix = ''; Color = 'Cyan'; Literal = $true; Rule = $false; Code = $false; Language = ''; Segments = @() }
             $prefix = if ($Ascii) {
                 '| '
             }
@@ -191,12 +183,12 @@ function Get-HarnessMarkdownRows {
             }
             foreach ($line in [regex]::Split($code, '\r\n|\n|\r')) {
                 $safe = ConvertTo-HarnessSafeText $line
-                if ($null -eq $LineCache -and $null -eq $NextLineCache) {
-                    Split-HarnessStyledRows @(Get-HarnessHighlightedLine $safe $language $Highlighters) $Width $prefix
-                }
-                else {
-                    Get-HarnessMarkdownLineRows $safe $Width $prefix Default $true $language $false $LineCache $NextLineCache $Highlighters
-                }
+                $segments = @(if ($Tokenize) {
+                        foreach ($segment in @(Get-HarnessHighlightedLine $safe $language $Highlighters)) {
+                            [pscustomobject]@{ Text = $segment.Text; Color = $segment.Color }
+                        }
+                    })
+                [pscustomobject]@{ Text = $safe; Prefix = $prefix; Color = 'Default'; Literal = $false; Rule = $false; Code = $true; Language = $language; Segments = $segments }
             }
             $index = $fence.EndLine - 1
             continue
@@ -204,6 +196,7 @@ function Get-HarnessMarkdownRows {
         $line = ConvertTo-HarnessSafeText $lines[$index]
         $color = 'Default'
         $prefix = ''
+        $rule = $false
         $heading = [regex]::Match($line, '^ {0,3}#{1,6}\s+(?<text>.*?)(?:\s+#+)?\s*$')
         if ($line.Trim() -and $index + 1 -lt $lines.Count -and $lines[$index + 1] -match '^ {0,3}(?:=+|-+)\s*$') {
             $index++
@@ -214,12 +207,13 @@ function Get-HarnessMarkdownRows {
             $color = 'BrightCyan'
         }
         elseif ($line -match '^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$') {
+            $rule = $true
             $line = $(if ($Ascii) {
                     '-'
                 }
                 else {
                     '─'
-                }) * [Math]::Min(24, $Width)
+                }) * 24
             $color = 'BrightBlack'
         }
         elseif ($line -match '^\s*>\s?(?<quote>.*)$') {
@@ -239,11 +233,48 @@ function Get-HarnessMarkdownRows {
                     '• '
                 }) + $Matches.item
         }
-        if ($null -eq $LineCache -and $null -eq $NextLineCache) {
-            Split-HarnessStyledRows @(Get-HarnessMarkdownInlineSegments $line $color) $Width $prefix
+        $segments = @(if ($Tokenize) {
+                Get-HarnessMarkdownInlineSegments $line $color
+            })
+        [pscustomobject]@{ Text = $line; Prefix = $prefix; Color = $color; Literal = $false; Rule = $rule; Code = $false; Language = ''; Segments = $segments }
+    }
+}
+
+function Get-HarnessMarkdownRows {
+    param([AllowEmptyString()][string]$Text, [int]$Width, [bool]$Ascii = $false, [object[]]$CodeBlocks = @(),
+        [hashtable]$LineCache, [hashtable]$NextLineCache, $Highlighters)
+    $tokenize = $null -eq $LineCache -and $null -eq $NextLineCache
+    $cache = ($tokenize -and $Highlighters -and -not $Highlighters.Faults.Count -and $Highlighters.ContainsKey('Logical') -and -not $CodeBlocks.Count) ? $Highlighters.Logical : $null
+    $key = "$Ascii|$Text"
+    $lines = if ($cache -and $cache.Entries.ContainsKey($key)) {
+        $cache.Entries[$key]
+    }
+    else {
+        $parsed = @(Get-HarnessMarkdownLogicalLines $Text $Ascii $CodeBlocks $Highlighters $tokenize)
+        $segments = 0
+        foreach ($line in $parsed) {
+            $segments += $line.Segments.Count + 1
+        }
+        if ($cache -and -not $Highlighters.Faults.Count -and $key.Length -le 16384 -and $cache.Entries.Count -lt 2048 -and
+            $cache.Chars + $key.Length -le 2000000 -and $cache.Segments + $segments -le 32768) {
+            $cache.Entries[$key] = $parsed
+            $cache.Chars += $key.Length; $cache.Segments += $segments
+        }
+        $parsed
+    }
+    foreach ($line in $lines) {
+        if (-not $tokenize) {
+            $textLine = $line.Rule ? $line.Text.Substring(0, [Math]::Min(24, $Width)) : $line.Text
+            Get-HarnessMarkdownLineRows $textLine $Width $line.Prefix $line.Color $line.Code $line.Language $line.Literal $LineCache $NextLineCache $Highlighters
+        }
+        elseif ($line.Literal) {
+            foreach ($part in @(Split-HarnessDisplayLine $line.Text $Width)) {
+                New-HarnessFrameRow $part -Color $line.Color
+            }
         }
         else {
-            Get-HarnessMarkdownLineRows $line $Width $prefix $color $false '' $false $LineCache $NextLineCache $Highlighters
+            $segments = $line.Rule ? @([pscustomobject]@{ Text = $line.Text.Substring(0, [Math]::Min(24, $Width)); Color = $line.Color }) : $line.Segments
+            Split-HarnessStyledRows $segments $Width $line.Prefix
         }
     }
 }

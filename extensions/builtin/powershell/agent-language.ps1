@@ -22,7 +22,7 @@ function Format-PackToolSource {
                 $region = $null
                 if (-not $clean) {
                     $formatNote = "Info FormatSkipped: file did not already match $($policy.FormatSource); run a dedicated format step if wanted"
-                    if ($Tool.Spec.Edit) {
+                    if ($Tool.Spec.Edit -and -not $arguments.ContainsKey('hunks')) {
                         $first = $arguments.allow_multiple ? $start : $offset
                         $last = $arguments.allow_multiple ? ($end + $text.Length - $file.Text.Length) : ($offset + $arguments.after.Length)
                         $region = Get-PackToolFormatRegion $text $first $last

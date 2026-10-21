@@ -48,6 +48,14 @@ function Get-HarnessRenderModel {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$State, [int]$Width = 80, [int]$Height = 24, [switch]$PrepareLayout)
     $highlighters = @{ Scripts = $State.Highlighters.Scripts; Compiled = @{}; Faults = @{} + $State.Highlighters.Faults }
+    # Copy the bounded logical-line cache: workers and earlier frames stay immutable.
+    $logicalCache = @{ Entries = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal); Chars = 0; Segments = 0 }
+    if ((Test-HarnessRenderHighlighters $State.RenderCache $State) -and (Test-HarnessRecordProperty $State.RenderCache 'HighlightLines')) {
+        $previous = $State.RenderCache.HighlightLines
+        $logicalCache.Entries = [Collections.Generic.Dictionary[string, object]]::new($previous.Entries, [StringComparer]::Ordinal)
+        $logicalCache.Chars = $previous.Chars; $logicalCache.Segments = $previous.Segments
+    }
+    $highlighters.Logical = $logicalCache
     $Width = [Math]::Max(0, $Width)
     $Height = [Math]::Max(0, $Height)
     if ($Width -lt 20 -or $Height -lt 8) {
@@ -314,6 +322,7 @@ function Get-HarnessRenderModel {
             PreviewLines = $State.StatusBar.ToolPreviewLines; Start = $cacheStart; Records = $cachedRecords.ToArray()
             HighlighterRevision = $State.Highlighters.Revision; Highlighters = @{} + $State.Highlighters.Scripts
             HighlightFaults = @($highlighters.Faults.Keys)
+            HighlightLines  = $logicalCache
             LayoutKey = $layoutKey; Busy = $State.SessionView.Busy; Streaming = if ($State.SessionView.Busy) {
                 $streamingCache
             }

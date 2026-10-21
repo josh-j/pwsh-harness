@@ -51,6 +51,20 @@ function ConvertFrom-PackPresentedArguments {
                     throw 'Invalid tool line bound.'
                 }
             }
+            if ($Name -ceq 'replace_file_content' -and $field.Name -ceq 'ReplacementChunks') {
+                $null = ConvertFrom-PackEditHunks $field.Value -Presented
+            }
+        }
+        if ($Name -ceq 'replace_file_content') {
+            $single = @('StartLine', 'EndLine', 'TargetContent', 'ReplacementContent', 'AllowMultiple')
+            if ($seen.Contains('ReplacementChunks')) {
+                if (@($single | Where-Object { $seen.Contains($_) }).Count) {
+                    throw 'Use ReplacementChunks or a single replacement, not both.'
+                }
+            }
+            elseif (@($single | Where-Object { -not $seen.Contains($_) }).Count) {
+                throw 'Missing required replacement fields.'
+            }
         }
         foreach ($required in $schema.required) {
             if (-not $seen.Contains($required)) {
@@ -117,7 +131,19 @@ function Invoke-PackPresentedTool {
             @{ Name = 'read'; Arguments = @{ path = $path; start_line = $start; line_count = [Math]::Min(800, $end - $start + 1); content_offset = ($arguments.ContainsKey('ContentOffset') ? $arguments.ContentOffset : 0) } }
         }
         replace_file_content {
-            @{ Name = 'edit'; Arguments = @{ path = $path; before = $arguments.TargetContent; after = $arguments.ReplacementContent; start_line = $arguments.StartLine; end_line = $arguments.EndLine; allow_multiple = $arguments.AllowMultiple } }
+            $edit = @{ path = $path }
+            if ($arguments.ContainsKey('ReplacementChunks')) {
+                $edit.hunks = @(foreach ($chunk in $arguments.ReplacementChunks) {
+                        @{ start_line = $chunk.StartLine; end_line = $chunk.EndLine; before = $chunk.TargetContent; after = $chunk.ReplacementContent }
+                    })
+            }
+            else {
+                $edit += @{ before = $arguments.TargetContent; after = $arguments.ReplacementContent; start_line = $arguments.StartLine; end_line = $arguments.EndLine; allow_multiple = $arguments.AllowMultiple }
+            }
+            if ($arguments.ContainsKey('ExpectedSha256')) {
+                $edit.expected_sha256 = $arguments.ExpectedSha256
+            }
+            @{ Name = 'edit'; Arguments = $edit }
         }
         write_to_file {
             if ($arguments.Append -and $arguments.Overwrite) {

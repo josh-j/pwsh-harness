@@ -43,6 +43,10 @@ function ConvertFrom-PackToolArguments {
             if ($value.ValueKind -ne $rule.Kind) {
                 throw 'Tool argument has the wrong type.'
             }
+            if ($rule.Kind -ceq 'Array') {
+                $arguments[$field.Name] = ConvertFrom-PackEditHunks $value
+                continue
+            }
             $decoded = $value.ValueKind -eq 'String' ? $value.GetString() : 0
             if ($value.ValueKind -eq 'Number' -and (-not $value.TryGetInt32([ref]$decoded) -or $decoded -lt $rule.Min -or $decoded -gt $rule.Max)) {
                 throw 'Invalid tool line bound.'
@@ -51,6 +55,16 @@ function ConvertFrom-PackToolArguments {
                 throw 'Invalid tool string or SHA-256.'
             }
             $arguments[$field.Name] = $decoded
+        }
+        if ($Name -ceq 'edit') {
+            if ($arguments.ContainsKey('hunks')) {
+                if (@($arguments.Keys | Where-Object { $_ -in @('before', 'after', 'start_line', 'end_line', 'allow_multiple') }).Count) {
+                    throw 'Use hunks or a single edit, not both.'
+                }
+            }
+            elseif (-not $arguments.ContainsKey('before') -or -not $arguments.ContainsKey('after')) {
+                throw 'Missing required edit text.'
+            }
         }
         foreach ($required in $schema.Keys) {
             if (-not $arguments.ContainsKey($required)) {
@@ -200,7 +214,32 @@ function New-PackToolFileChange {
         throw 'Tool target hash is stale or create-only target already exists.'
     }
     $text = $Tool.Spec.Edit ? '' : $arguments.text
-    if ($Tool.Spec.Edit) {
+    $ranges = [Collections.Generic.List[object]]::new()
+    if ($Tool.Spec.Edit -and $arguments.ContainsKey('hunks')) {
+        $starts = @(0) + @([regex]::Matches($file.Text, '\r\n|\n|\r') | ForEach-Object { $_.Index + $_.Length })
+        $builder = [Text.StringBuilder]::new()
+        $cursor = 0; $previous = 0; $lineDelta = 0
+        foreach ($hunk in $arguments.hunks) {
+            if ($hunk.start_line -le $previous -or $hunk.end_line -lt $hunk.start_line -or $hunk.end_line -gt $starts.Count) {
+                throw 'Edit hunks require ordered nonoverlapping original-file line ranges.'
+            }
+            $start = $starts[$hunk.start_line - 1]
+            $end = $hunk.end_line -lt $starts.Count ? $starts[$hunk.end_line] : $file.Text.Length
+            $region = $file.Text.Substring($start, $end - $start)
+            $match = $region.IndexOf($hunk.before, [StringComparison]::Ordinal)
+            if ($match -lt 0 -or $region.IndexOf($hunk.before, $match + 1, [StringComparison]::Ordinal) -ge 0) {
+                throw 'Each edit hunk must match exactly once in its original-file line range.'
+            }
+            $offset = $start + $match
+            $null = $builder.Append($file.Text, $cursor, $offset - $cursor).Append($hunk.after)
+            $line = $hunk.start_line + [regex]::Matches($region.Substring(0, $match), '\r\n|\n|\r').Count + $lineDelta
+            $ranges.Add(@{ start_line = $line; end_line = $line + [regex]::Matches($hunk.after, '\r\n|\n|\r').Count })
+            $lineDelta += [regex]::Matches($hunk.after, '\r\n|\n|\r').Count - [regex]::Matches($hunk.before, '\r\n|\n|\r').Count
+            $cursor = $offset + $hunk.before.Length; $previous = $hunk.end_line
+        }
+        $text = $builder.Append($file.Text, $cursor, $file.Text.Length - $cursor).ToString()
+    }
+    elseif ($Tool.Spec.Edit) {
         $starts = @(0) + @([regex]::Matches($file.Text, '\r\n|\n|\r') | ForEach-Object { $_.Index + $_.Length })
         if ($arguments.start_line -gt $starts.Count -or $arguments.end_line -lt $arguments.start_line) {
             throw 'Edit line anchors are outside the file or reversed.'
@@ -236,6 +275,18 @@ function New-PackToolFileChange {
     $Tool.Data = @{ before_sha256 = $file.Hash; after_sha256 = $Tool.Files[0].FinalHash; bytes_written = $final.Length }
     if ($Tool.Context.PSObject.Properties['PresentedCall']) {
         $Tool.Data.diff = Format-PackPresentedDiff $file.Text $text
+    }
+    elseif ($arguments.ContainsKey('hunks')) {
+        $Tool.Data.changed_ranges = $ranges.ToArray()
+        $lines = @($text -split '\r\n|\n|\r')
+        $hunks = @(foreach ($range in $ranges) {
+                "@@ $($range.start_line)-$($range.end_line) @@"
+                for ($i = [Math]::Max(1, $range.start_line - 3); $i -le [Math]::Min($lines.Count, $range.end_line + 3); $i++) {
+                    "${i}: $($lines[$i - 1])"
+                }
+            }) -join "`n"
+        $excerpt = Get-PackToolExcerpt $hunks ([Math]::Min(8192, $Tool.State.Config.'Agent.MaxReadBytes'))
+        $Tool.Data.hunk = $excerpt.Text; $Tool.Data.truncated = $excerpt.Truncated
     }
     elseif ($Tool.Spec.Edit) {
         $line = @($file.Text.Substring(0, $offset) -split '\r\n|\n|\r').Count
@@ -343,7 +394,11 @@ function Invoke-PackToolCall {
         }
         $tool.Observations = $observed.Hashes
     }
-    foreach ($value in $Call.Arguments.Values) {
+    $values = @($Call.Arguments.Values)
+    if ($Call.Arguments.ContainsKey('hunks')) {
+        $values += @($Call.Arguments.hunks | ForEach-Object { $_.Values })
+    }
+    foreach ($value in $values) {
         if ($value -is [string] -and $value -cne $script:Harness.OperationControl.ProtectText($state, $value, $false, $true)) {
             throw 'Tool source or path contains a known credential; operation refused.'
         }
@@ -501,12 +556,15 @@ $lineRule = @{ Kind = 'Number'; Min = 1; Max = [int]::MaxValue }
 $script:PackTools = @{
     read  = @{ Description = "Read UTF-8 text with numbered lines and whole-file sha256; remove the N: prefix before editing.`nDefault 800 lines, bounded by Agent.MaxReadBytes. Read small files whole. Truncation names the next start_line; skill:<name> loads listed guidance."; Schema = @{ path = (@{} + $pathRule); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'First line, inclusive; defaults to 1.' }); line_count = @{ Kind = 'Number'; Min = 1; Max = 2000; Default = 800; Description = 'Requested line count, 1-2000; defaults to 800.' } }; Prepare = ${function:Read-PackToolData}; Role = 'tool-read' }
     write = @{ Description = "Create a UTF-8 file with a null hash, or replace an entire existing file with its matching hash. Parents must exist.`nPrefer edit for partial changes. Returns hashes, bytes and available diagnostics."; Schema = @{ path = $pathRule; text = $string; expected_sha256 = (@{} + $hash + @{ Nullable = $true; Description = 'Existing file hash, or null for create-only. Required for write.' }) }; Prepare = ${function:New-PackToolFileChange}; Execute = ${function:Invoke-PackToolFileChange}; Role = 'tool-result' }
-    edit  = @{ Description = "Replace exactly one ordinal before match; preserve whitespace. Read first. Include surrounding text when matches repeat.`nOmitted expected_sha256 uses this run's observed file hash; changed or unread files fail. Wait for each result before another change to the same file. Returns hunk, hash and diagnostics."; Schema = @{ path = $pathRule; before = @{ Kind = 'String'; Min = 1; Description = 'Exact nonempty source text, unique within the optional line anchors.' }; after = $string; expected_sha256 = (@{} + $hash + @{ Optional = $true; Description = 'Optional after read in this run; explicit null is invalid. Stale files fail.' }); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'Optional inclusive first line of the matching region.' }); end_line = (@{} + $lineRule + @{ Default = [int]::MaxValue; Description = 'Optional inclusive last line of the matching region.' }) }; Prepare = ${function:New-PackToolFileChange}; Execute = ${function:Invoke-PackToolFileChange}; Edit = $true; Role = 'tool-result' }
+    edit  = @{ Description = "Edit one file with one ordinal before match (optionally anchored), or 1-64 ordered nonoverlapping original-line hunks; each target must match once. One atomic change. Read first.`nOmitted expected_sha256 uses this run's observed hash; changed or unread files fail. Wait for each result before changing this file again. Returns hunks, hash and diagnostics."; Schema = @{ path = $pathRule; before = @{ Kind = 'String'; Min = 1; Description = 'Exact nonempty source text, unique within the optional line anchors.' }; after = $string; expected_sha256 = (@{} + $hash + @{ Optional = $true; Description = 'Optional after read in this run; explicit null is invalid. Stale files fail.' }); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'Optional inclusive first line of the matching region.' }); end_line = (@{} + $lineRule + @{ Default = [int]::MaxValue; Description = 'Optional inclusive last line of the matching region.' }) }; Prepare = ${function:New-PackToolFileChange}; Execute = ${function:Invoke-PackToolFileChange}; Edit = $true; Role = 'tool-result' }
     pwsh  = @{ Description = "Run PowerShell in the context directory to search, build, test and inspect files. Unhandled cmdlet errors stop execution; handle expected failures explicitly. Check exit codes and stderr.`nRecursive search: Get-ChildItem -Recurse -File -Filter *.ps1 | Select-String -Pattern ...; ** is not recursive. Large output retains the head and tail; narrow commands to focus it."; Schema = @{ command = @{ Kind = 'String'; Min = 1; Max = 65536; Nonblank = $true; Description = 'Exact PowerShell source. Prefer bounded text output and focused checks.' } }; Prepare = ${function:New-PackToolCommand}; Execute = ${function:Invoke-PackToolProcess}; Role = 'tool-result' }
 }
 $script:PackTools.search = @{ Description = 'Search permitted workspace files. Exact/regex or ranked mode must be explicitly enabled by the user.'; Schema = @{ query = @{ Kind = 'String'; Min = 1; Max = 4096; Nonblank = $true }; scope = @{ Kind = 'String'; Min = 1; Max = 4096; Default = '.' }; mode = @{ Kind = 'String'; Pattern = '\A(exact|ranked)\z'; Default = 'exact' }; regex = @{ Kind = 'Boolean'; Default = $false }; ignore_case = @{ Kind = 'Boolean'; Default = $false }; includes = @{ Kind = 'String'; Max = 1024; Default = '*' }; per_line = @{ Kind = 'Boolean'; Default = $true } }; Role = 'tool-read' }
 $script:PackTools.read.Schema.content_offset = @{ Kind = 'Number'; Min = 0; Max = 1048576; Default = 0; Description = 'Optional UTF-8 byte offset for a truncated view.' }
 $script:PackTools.edit.Schema.allow_multiple = @{ Kind = 'Boolean'; Default = $false; Description = 'Replace all exact matches within the line anchors.' }
+$script:PackTools.edit.Schema.before.Optional = $true
+$script:PackTools.edit.Schema.after.Optional = $true
+$script:PackTools.edit.Schema.hunks = @{ Kind = 'Array'; Optional = $true; Description = '1-64 ordered nonoverlapping original-file line ranges. Supply instead of single-edit fields.' }
 $script:PackTools.read.Schema.path.Description = 'Context-relative literal file, or skill:<name> from the available skills list.'
 function Register-PackAgentRuntime {
     $schemas = foreach ($name in @('read', 'write', 'edit', 'pwsh', 'search')) {
@@ -516,8 +574,16 @@ function Register-PackAgentRuntime {
         [Array]::Sort($fields, [StringComparer]::Ordinal)
         foreach ($field in $fields) {
             $rule = $script:PackTools[$name].Schema[$field]
-            $type = $rule.Kind -ceq 'String' ? 'string' : ($rule.Kind -ceq 'Boolean' ? 'boolean' : 'integer')
+            $type = $rule.Kind -ceq 'String' ? 'string' : ($rule.Kind -ceq 'Boolean' ? 'boolean' : ($rule.Kind -ceq 'Array' ? 'array' : 'integer'))
             $properties[$field] = @{ type = ($rule.Nullable ? @($type, 'null') : $type); description = $rule.Description }
+            if ($rule.Kind -ceq 'Array') {
+                $properties[$field].minItems = 1; $properties[$field].maxItems = 64
+                $properties[$field].items = @{ type = 'object'; additionalProperties = $false; required = @('start_line', 'end_line', 'before', 'after'); properties = @{
+                        start_line = @{ type = 'integer'; minimum = 1 }; end_line = @{ type = 'integer'; minimum = 1 }
+                        before = @{ type = 'string'; minLength = 1 }; after = @{ type = 'string' }
+                    }
+                }
+            }
             if ($rule.Pattern) {
                 $properties[$field].pattern = $rule.Pattern.Replace('\A', '^').Replace('\z', '$')
             }
