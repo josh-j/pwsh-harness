@@ -125,7 +125,7 @@ function Get-HarnessRenderModel {
             }
             $blocks = @()
             if ($record.Role -eq 'assistant' -and -not $State.SessionView.Busy -and $result -and
-                (($result -is [Collections.IDictionary] -and $result.ContainsKey('Text')) -or $result.PSObject.Properties['Text']) -and $record.Text -ceq $result.Text) {
+                (Test-HarnessRecordProperty $result 'Text') -and $record.Text -ceq $result.Text) {
                 $blocks = @($result.CodeBlocks)
             }
             $blocksText = Get-HarnessRenderBlocksKey $blocks
@@ -254,7 +254,7 @@ function Get-HarnessRenderModel {
             }
             if ($State.Panels.ShowDiff) {
                 $all.Add((New-HarnessFrameRow '--- FixDiff ---' -Color Yellow))
-                $diff = if (($result -is [Collections.IDictionary] -and $result.ContainsKey('FixDiff')) -or $result.PSObject.Properties['FixDiff']) {
+                $diff = if (Test-HarnessRecordProperty $result 'FixDiff') {
                     $result.FixDiff
                 }
                 else {

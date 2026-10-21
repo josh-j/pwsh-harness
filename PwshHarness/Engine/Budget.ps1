@@ -96,13 +96,14 @@ function Get-EngineAgentFindings {
     foreach ($result in $Message.NativeBatch.Results) {
         $call = $Message.NativeBatch.Calls | Where-Object Id -CEQ $result.CallId
         $data = $result.Data
-        $receipt = "$($result.Tool) $($result.Status): $($call.Arguments['path'])"
+        $receipt = "$($result.CallId) $($result.Tool) $($result.Status): $($call.Arguments['path'])"
         if ($data -is [Collections.IDictionary]) {
             $receipt += " sha256=$($data['sha256'])$($data['after_sha256']) exit=$($data['ExitCode'])"
         }
         if ($result.Error) {
             $receipt += " error=$($result.Error.message)"
         }
+        $receipt = $receipt -replace '[\r\n]+', ' '
         $receipt.Substring(0, [Math]::Min(300, $receipt.Length))
     }
 }
@@ -144,8 +145,8 @@ function Limit-EngineRequest {
     $groups += @('context')
     $removed = 0; $stubbed = 0
     $checkpoint = $null
-    $findings = @($messages | Where-Object { $_.PSObject.Properties['BudgetGroup'] -and $_.BudgetGroup -ceq 'agent-summary' } | ForEach-Object Content)
     $priorSummary = @($messages | Where-Object { $_.PSObject.Properties['BudgetGroup'] -and $_.BudgetGroup -ceq 'agent-summary' })
+    $findings = @($priorSummary | ForEach-Object { $_.Content -match '(?s)\nFindings:\n(.*)\nActive context:' ? ($Matches[1] -split '\r?\n') : $_.Content } | Where-Object { $_ })
     foreach ($group in $groups) {
         if ((& $count) -le $budget) {
             break

@@ -132,18 +132,7 @@ function New-HarnessViewState {
 function Update-HarnessSessionView {
     param($View, [string]$EventName, $Payload)
     $session = $View.SessionView
-    $hasSessionId = if ($Payload -is [Collections.IDictionary]) {
-        if ($Payload.PSObject.Methods['ContainsKey']) {
-            $Payload.ContainsKey('SessionId')
-        }
-        else {
-            $Payload.Contains('SessionId')
-        }
-    }
-    else {
-        $null -ne $Payload -and $null -ne $Payload.PSObject.Properties['SessionId']
-    }
-    if ($hasSessionId -and -not [string]::Equals($Payload.SessionId, $session.SessionId, [StringComparison]::Ordinal)) {
+    if ((Test-HarnessRecordProperty $Payload 'SessionId') -and -not [string]::Equals($Payload.SessionId, $session.SessionId, [StringComparison]::Ordinal)) {
         return
     }
     switch ($EventName) {

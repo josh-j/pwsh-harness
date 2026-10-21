@@ -405,12 +405,14 @@ function Invoke-EngineAgentContinuation {
                 Update-EngineAgentTasks $Store $loop Wait
                 if ($loop.TaskNotices.Count) {
                     $turn.Exchange.Add((New-EngineAgentAssistantMessage $turn.Response))
+                    $turn.RequestKind = 'Agent'
                     continue
                 }
                 if ($loop.Settings.'Agent.Headless' -and [string]::IsNullOrWhiteSpace($turn.Response.Text) -and -not $loop.KeepGoing) {
                     $loop.KeepGoing = $true
                     $turn.Exchange.Add((New-EngineAgentAssistantMessage $turn.Response))
                     $turn.Exchange.Add((New-HarnessMessage user 'You did not call any tools. You should continue calling tools until you have completed your task. If the task is complete, provide the final answer. Remember that the user cannot answer any questions.'))
+                    $turn.RequestKind = 'Agent'
                     continue
                 }
                 return Complete-EngineAgentRun $Store $loop Complete

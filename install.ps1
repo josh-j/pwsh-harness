@@ -109,7 +109,7 @@ try {
         Copy-Item -LiteralPath $entry.FullName -Destination $temporary -Recurse -Force
     }
     if ($checkout) {
-        foreach ($name in @('extensions', 'profiles', 'prompts', 'bench', 'docs')) {
+        foreach ($name in @('extensions', 'profiles', 'prompts', 'skills', 'bench', 'docs')) {
             $resource = Join-Path $PSScriptRoot $name
             if (Test-Path -LiteralPath $resource) {
                 Copy-Item -LiteralPath $resource -Destination (Join-Path $temporary $name) -Recurse -Force

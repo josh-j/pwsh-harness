@@ -69,10 +69,10 @@ function Set-HarnessViewSnapshot {
         $View.SessionView.LastResult = $Snapshot.LastResult
         if ($Snapshot.LastResult) {
             $View.SessionView.Diagnostics = @($Snapshot.LastResult.Diagnostics)
-            if ($Snapshot.LastResult.ContainsKey('OperationReview')) {
+            if (Test-HarnessRecordProperty $Snapshot.LastResult 'OperationReview') {
                 $View.SessionView.Records.Add([pscustomobject]@{ Role = 'operation'; Text = $Snapshot.LastResult.OperationReview })
             }
-            if ($Snapshot.LastResult.ContainsKey('Operation')) {
+            if (Test-HarnessRecordProperty $Snapshot.LastResult 'Operation') {
                 $View.SessionView.Operation = $Snapshot.LastResult.Operation
             }
         }

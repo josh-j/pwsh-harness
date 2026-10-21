@@ -34,7 +34,7 @@ function New-HarnessHighlightContext {
     foreach ($entry in $Registrations) {
         $scripts[$entry.Name] = $entry.Script
     }
-    @{ Scripts = $scripts; Faults = @{}; Revision = (@($Registrations | ForEach-Object { $_.Revision }) -join ',') }
+    @{ Scripts = $scripts; Compiled = @{}; Faults = @{}; Revision = (@($Registrations | ForEach-Object { $_.Revision }) -join ',') }
 }
 function Get-HarnessHighlightedLine {
     param([string]$Text, [string]$Language, $Highlighters)
