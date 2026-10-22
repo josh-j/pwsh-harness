@@ -365,7 +365,8 @@ function Update-RetrievalIndex {
             continue
         }
         $present[$file.Path] = $true
-        if ($index.Files.ContainsKey($file.Path) -and $index.Files[$file.Path].Revision -eq $file.Revision -and
+        $revision = $file.Revision + '|chunks:2'
+        if ($index.Files.ContainsKey($file.Path) -and $index.Files[$file.Path].Revision -eq $revision -and
             ($MetadataOnly -or ($index.Files[$file.Path].Frequencies -is [array] -and $index.Files[$file.Path].Frequencies.Count -eq $index.Files[$file.Path].Chunks.Count))) {
             $phases.ReusedFiles++; continue
         }
@@ -419,7 +420,7 @@ function Update-RetrievalIndex {
         $phases.TokenizeMilliseconds += $phase.Elapsed.TotalMilliseconds
         $phases.ProcessedFiles++
         $index.Search = $null
-        $index.Files[$file.Path] = @{ Revision = $file.Revision; Chunks = $valid.ToArray(); Frequencies = $frequencies.ToArray() }
+        $index.Files[$file.Path] = @{ Revision = $revision; Chunks = $valid.ToArray(); Frequencies = $frequencies.ToArray() }
         $index.Dirty = $true
         if ($Request.PSObject.Properties['Pump'] -and $Request.Pump) {
             $null = & $Request.Pump

@@ -40,10 +40,10 @@ function Set-RetrievalOrientation {
         }
         $functions = @($paths | ForEach-Object {
                 if ($index.Files.ContainsKey($_)) {
-                    $index.Files[$_].Chunks | Where-Object Kind -EQ Function | Sort-Object StartLine
+                    $index.Files[$_].Chunks | Where-Object { $_.Kind -eq 'Function' -or ($_.Kind -eq 'Symbol' -and $_.StartLine -eq $_.Fields.DeclarationLine) } | Sort-Object StartLine
                 }
             })
-        $body = [Text.StringBuilder]::new($tree.ToString() + "PowerShell function index (name -> path:line):`n")
+        $body = [Text.StringBuilder]::new($tree.ToString() + "Symbol index (name -> path:line):`n")
         # Rotate through top-level areas so a large fixture directory cannot consume the index.
         $groups = @($functions | Sort-Object @{ Expression = { ($_.Path -split '/').Count } }, StartLine, Path | Group-Object -CaseSensitive { ($_.Path -split '/')[0] })
         $selected = 0; $full = $false
@@ -64,7 +64,7 @@ function Set-RetrievalOrientation {
                 break
             }
         }
-        $null = $body.Append("Indexed functions shown: $selected/$($functions.Count). Other files/functions may be omitted; use tools for details.`n")
+        $null = $body.Append("Indexed symbols shown: $selected/$($functions.Count). Other files/symbols may be omitted; use tools for details.`n")
         # Match the host's character/4 estimate, leaving room for the framing below.
         $tokens = [int][Math]::Ceiling(($body.Length + 160) / 4.0)
         $Request.State.Context.Orientation = "<workspace_orientation estimated_tokens=`"$tokens`">`n$body</workspace_orientation>"

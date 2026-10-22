@@ -51,4 +51,7 @@
         }, 500)
     $Harness.Chunkers.Add('*', ${function:Split-RetrievalText})
     $Harness.Chunkers.Add('.md', ${function:Split-RetrievalMarkdown})
+    foreach ($suffix in $script:RetrievalSymbolPatterns.Keys) {
+        $Harness.Chunkers.Add($suffix, ${function:Split-RetrievalSymbols})
+    }
 }

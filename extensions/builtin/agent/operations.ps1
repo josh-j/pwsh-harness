@@ -22,7 +22,7 @@ function Format-PackOperation {
     foreach ($file in $Operation.Files) {
         $parts.Add($file.Path)
         $old = $file.Exists ? [Text.Encoding]::UTF8.GetString($file.Before) : ''
-        $parts.Add("--- current`n+++ proposed`n" + (@($old -split '\r?\n' | ForEach-Object { '- ' + $_ }) -join "`n") + "`n" + (@($file.Content -split '\r?\n' | ForEach-Object { '+ ' + $_ }) -join "`n"))
+        $parts.Add("--- current`n+++ proposed`n" + (Format-PackPresentedDiff $old $file.Content))
     }
     if ($Operation.Kind -eq 'Run' -or $Operation.RunAfter) {
         if ($Operation.RunPath) {

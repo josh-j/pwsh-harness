@@ -105,7 +105,7 @@ function Invoke-SelfExtend {
         throw 'Usage: /extend --edit name change'
     }
     $reference = $script:Authoring.GetApiReference($script:Harness)
-    $registry = $script:Harness.GetRegistry() | ConvertTo-Json -Depth 10
+    $registry = $script:Harness.GetRegistry() | ConvertTo-Json -Depth 10 -Compress
     $samples = @(@('pester-generator', 'strict-mode') | ForEach-Object {
             $directory = Join-Path $PSScriptRoot "references/$_"
             if ((Test-Path -LiteralPath (Join-Path $directory 'extension.psd1')) -and (Test-Path -LiteralPath (Join-Path $directory 'entry.ps1'))) {
