@@ -26,12 +26,15 @@ try {
         $registrations[$entry.Category] += $entry.Name
     }
     $tests = Join-Path $StageDirectory 'extension.Tests.ps1'
-    $pester = Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge 5 } | Sort-Object Version -Descending | Select-Object -First 1
-    $preferred = Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -eq 5 } | Sort-Object Version -Descending | Select-Object -First 1
-    if ($preferred) {
-        $pester = $preferred
+    $pester = $null
+    if (Test-Path -LiteralPath $tests) {
+        $available = @(Get-Module -ListAvailable Pester | Where-Object { $_.Version.Major -ge 5 } | Sort-Object Version -Descending)
+        $pester = $available | Where-Object { $_.Version.Major -eq 5 } | Select-Object -First 1
+        if (-not $pester) {
+            $pester = $available | Select-Object -First 1
+        }
     }
-    if ((Test-Path -LiteralPath $tests) -and $pester) {
+    if ($pester) {
         Import-Module $pester.Path
         $configuration = New-PesterConfiguration
         $configuration.Run.Path = $tests; $configuration.Run.PassThru = $true

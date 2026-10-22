@@ -106,8 +106,12 @@ function New-HarnessStyledRow {
 
 function Get-HarnessMarkdownLineRows {
     param([AllowEmptyString()][string]$Text, [int]$Width, [string]$Prefix, [string]$Color,
-        [bool]$Code, [string]$Language, [bool]$Literal, [hashtable]$LineCache, [hashtable]$NextLineCache, $Highlighters)
+        [bool]$Code, [string]$Language, [bool]$Literal, [hashtable]$LineCache, [hashtable]$NextLineCache, $Highlighters, [object[]]$Segments = $null)
     $key = "$Width|$Prefix|$Color|$Code|$Language|$Literal|$Text"
+    if ($null -ne $Segments) {
+        # Exact styles matter even when two highlighters return the same plain text.
+        $key = "$Width|$Prefix|$Literal|$Color|$($Text.Length):$Text|" + (ConvertTo-Json -InputObject $Segments -Depth 3 -Compress)
+    }
     $rows = if ($LineCache -and $LineCache.ContainsKey($key)) {
         $LineCache[$key]
     }
@@ -121,7 +125,10 @@ function Get-HarnessMarkdownLineRows {
                 })
         }
         else {
-            $segments = if ($Code) {
+            $segments = if ($null -ne $Segments) {
+                $Segments
+            }
+            elseif ($Code) {
                 @(Get-HarnessHighlightedLine $Text $Language $Highlighters)
             }
             else {
@@ -267,14 +274,12 @@ function Get-HarnessMarkdownRows {
             $textLine = $line.Rule ? $line.Text.Substring(0, [Math]::Min(24, $Width)) : $line.Text
             Get-HarnessMarkdownLineRows $textLine $Width $line.Prefix $line.Color $line.Code $line.Language $line.Literal $LineCache $NextLineCache $Highlighters
         }
-        elseif ($line.Literal) {
-            foreach ($part in @(Split-HarnessDisplayLine $line.Text $Width)) {
-                New-HarnessFrameRow $part -Color $line.Color
-            }
-        }
         else {
-            $segments = $line.Rule ? @([pscustomobject]@{ Text = $line.Text.Substring(0, [Math]::Min(24, $Width)); Color = $line.Color }) : $line.Segments
-            Split-HarnessStyledRows $segments $Width $line.Prefix
+            $textLine = $line.Rule ? $line.Text.Substring(0, [Math]::Min(24, $Width)) : $line.Text
+            $segments = $line.Rule ? @([pscustomobject]@{ Text = $textLine; Color = $line.Color }) : $line.Segments
+            # Share wraps within this render only; never mutate a published frame/cache.
+            $wrapped = ($Highlighters -and $Highlighters.ContainsKey('Wrapped')) ? $Highlighters.Wrapped : $null
+            Get-HarnessMarkdownLineRows $textLine $Width $line.Prefix $line.Color $line.Code $line.Language $line.Literal $wrapped $wrapped $Highlighters $segments
         }
     }
 }

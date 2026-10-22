@@ -45,9 +45,10 @@ function Get-HarnessRenderModel {
     <# .SYNOPSIS
     Render a ViewModel and size into a pure frame of styled segment rows.
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseLiteralInitializerForHashtable', '', Justification = 'Styled row cache keys require ordinal case-sensitive equality.')]
     [CmdletBinding()]
     param([Parameter(Mandatory)]$State, [int]$Width = 80, [int]$Height = 24, [switch]$PrepareLayout)
-    $highlighters = @{ Scripts = $State.Highlighters.Scripts; Compiled = @{}; Faults = @{} + $State.Highlighters.Faults }
+    $highlighters = @{ Scripts = $State.Highlighters.Scripts; Compiled = @{}; Faults = @{} + $State.Highlighters.Faults; Wrapped = [hashtable]::new([StringComparer]::Ordinal) }
     # Copy the bounded logical-line cache: workers and earlier frames stay immutable.
     $logicalCache = @{ Entries = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal); Chars = 0; Segments = 0 }
     if ((Test-HarnessRenderHighlighters $State.RenderCache $State) -and (Test-HarnessRecordProperty $State.RenderCache 'HighlightLines')) {
