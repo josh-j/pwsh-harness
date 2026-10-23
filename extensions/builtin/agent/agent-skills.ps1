@@ -82,7 +82,7 @@ function Format-PackSkillPrompt {
     [Array]::Sort($names, [StringComparer]::Ordinal)
     @(
         '<skills>'
-        $Presented ? 'You can use specialized skills to help you with complex tasks. If a skill seems relevant, you MUST read its SKILL.md with view_file using the exact path below before proceeding. Host safety and explicit user instructions take precedence.' : 'If a skill matches the task, you MUST read it with read path skill:<name> before proceeding. Host safety and explicit user instructions take precedence.'
+        $Presented ? 'Skills hold specialized guidance. When the task depends on what a skill describes, read its SKILL.md with view_file using the exact path below before proceeding; small, well-specified changes rarely need one. Host safety and explicit user instructions take precedence.' : 'When the task depends on what a skill describes, read it with read path skill:<name> before proceeding; small, well-specified changes rarely need one. Host safety and explicit user instructions take precedence.'
         'Discovery is limited to 32 skills, 128 folders per root and 32 KiB per file.'
         foreach ($name in $names) {
             $Presented ? "- $name ($(Join-Path $Catalog.Skills[$name].Root $Catalog.Skills[$name].Relative)): $($Catalog.Skills[$name].Description)" : "- ${name}: $($Catalog.Skills[$name].Description)"

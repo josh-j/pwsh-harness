@@ -112,8 +112,12 @@ function Invoke-HarnessHttpProvider {
                                 $errorBody.error
                             }
                             $upstream = $null
+                            $details = [ordered]@{}
                             if ($errorBody.error -is [Collections.IDictionary] -and $errorBody.error.metadata -is [Collections.IDictionary]) {
                                 $upstream = $errorBody.error.metadata.raw
+                                if ($errorBody.error.metadata.provider_name -is [string]) {
+                                    $details.provider = $errorBody.error.metadata.provider_name
+                                }
                             }
                             if ($upstream -is [string] -and $upstream.Length -le 65536) {
                                 try {
@@ -125,16 +129,15 @@ function Invoke-HarnessHttpProvider {
                             }
                             if ($upstream -is [Collections.IDictionary]) {
                                 $upstream = $upstream.error -is [Collections.IDictionary] ? $upstream.error : $upstream
-                                $details = [ordered]@{}
                                 foreach ($name in @('code', 'status', 'message')) {
                                     if ($upstream[$name] -is [string] -or $upstream[$name] -is [ValueType]) {
                                         $details[$name] = $upstream[$name]
                                     }
                                 }
-                                if ($details.Count) {
-                                    $detail = Protect-HarnessText ($details | ConvertTo-Json -Depth 3 -Compress) $redact
-                                    $upstreamDetail = ' | Upstream: ' + $detail.Substring(0, [Math]::Min(1024, $detail.Length))
-                                }
+                            }
+                            if ($details.Count) {
+                                $detail = Protect-HarnessText ($details | ConvertTo-Json -Depth 3 -Compress) $redact
+                                $upstreamDetail = ' | Upstream: ' + $detail.Substring(0, [Math]::Min(1024, $detail.Length))
                             }
                         }
                     }
