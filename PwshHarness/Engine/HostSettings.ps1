@@ -110,6 +110,7 @@ function New-EngineHostStore {
         'Agent.CodeSearchHybrid'       =$false
         'Agent.SearchEmbeddingMaxCost' =0.0
         'Agent.InputTokenBudget'       =65536
+        'Agent.CompactTokens'          =0
         Autonomy                       ='Approve'
         'Agent.MaxFileBytes'           =1048576
         'Agent.MaxReadBytes'           =16384
@@ -147,6 +148,7 @@ function New-EngineHostStore {
     }
     $store.Points.Settings.InputTokenBudget.Validator = { param($v) $v -gt 0 }
     $store.Points.Settings['Agent.InputTokenBudget'].Validator = { param($v) $v -ge 1 -and $v -le 10000000 }
+    $store.Points.Settings['Agent.CompactTokens'].Validator = { param($v) $v -ge 0 -and $v -le 10000000 }
     $store.Points.Settings.InputTokenReservePercent.Validator = { param($v) $v -ge 0 -and $v -le 90 -and -not [double]::IsNaN($v) }
     $store.Points.Settings['Session.MaxAuditBytes'].Validator = { param($v) $v -ge 1024 -and $v -le 268435456 }
     $store.Points.Settings['Session.MaxAuditRecords'].Validator = { param($v) $v -ge 16 -and $v -le 65536 }

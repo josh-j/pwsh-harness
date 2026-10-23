@@ -103,6 +103,45 @@ function Format-PackToolReview {
     $notice = $tool.Run -and $tool.Run.Mode -ceq 'Auto' ? 'AUTO: executing under the captured run authority; risks are non-blocking notices.' : 'Use /approve to consume this exact operation, or /cancel.'
     ($parts + @($candidate.Risks) + $notice) -join "`n"
 }
+function Get-PackDirectoryRules {
+    # A nested AGENTS.md governs its directory: deliver it once per run with the first file read or changed
+    # beneath it. Rules at or above the workspace root arrive with the run's instructions instead.
+    param($Context, $Call)
+    $observed = $null
+    $relative = [string]$Call.Arguments.path
+    if (-not $relative -or $relative.StartsWith('skill:', [StringComparison]::Ordinal) -or -not $Context.PSObject.Properties['AgentLease'] -or -not $Context.AgentLease -or
+        -not $script:PackToolObservations.TryGetValue($Context.AgentLease, [ref]$observed)) {
+        return ''
+    }
+    if (-not $observed.ContainsKey('Rules')) {
+        $observed.Rules = [Collections.Generic.HashSet[string]]::new($IsWindows ? [StringComparer]::OrdinalIgnoreCase : [StringComparer]::Ordinal)
+    }
+    $root = [IO.Path]::GetFullPath($observed.Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $sections = [Collections.Generic.List[string]]::new()
+    $directory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($relative, $root))
+    while ($directory -and $directory.StartsWith($root + [IO.Path]::DirectorySeparatorChar, (Get-HarnessPathComparison))) {
+        $rule = Join-Path $directory 'AGENTS.md'
+        if ($observed.Rules.Add($directory) -and [IO.File]::Exists($rule)) {
+            $name = ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($root, $rule))
+            try {
+                # The tool path policy keeps ignored, excluded and protected files out, as for any read.
+                $file = Read-HarnessTextFile (Resolve-PackToolPath $Context.State $root $name $Context) 65536 -NoHardLinks
+                $text = $file.Text.Length -gt 16000 ? $file.Text.Substring(0, 15970) + "`n[rules truncated]" : $file.Text
+                if ($text.Trim()) {
+                    $sections.Insert(0, "--- $name ---`n$text")
+                }
+            }
+            catch {
+                $Context.CancellationToken.ThrowIfCancellationRequested()
+            }
+        }
+        $directory = [IO.Path]::GetDirectoryName($directory)
+    }
+    if (-not $sections.Count) {
+        return ''
+    }
+    $script:Harness.OperationControl.ProtectText($Context.State, ("<directory_rules>`nThese AGENTS.md files apply to files under their directory. A deeper file takes precedence over a shallower one; host safety and explicit user instructions take precedence over both.`n" + ($sections -join "`n") + "`n</directory_rules>"))
+}
 function Complete-PackToolCall {
     param($Context, $Call, $Data, [Exception]$Failure = $null)
     $id = [guid]::NewGuid().ToString('N')
@@ -147,12 +186,33 @@ function Complete-PackToolCall {
             $model.continuation += '; last line is partial; if it exceeds Agent.MaxReadBytes, use pwsh to select a smaller portion.'
         }
     }
+    $directoryRules = $status -ceq 'ok' -and $Call.Name -cin @('read', 'edit', 'write') -and $Call.Arguments -is [Collections.IDictionary] ? (Get-PackDirectoryRules $Context $Call) : ''
+    $contextKey = ''
+    if ($status -cne 'cancelled' -and $Call.Name -cin @('read', 'search', 'pwsh') -and $Call.Arguments -is [Collections.IDictionary]) {
+        # An identical later read, search or command supersedes this result when the engine compacts the run.
+        $arguments = [ordered]@{}
+        foreach ($entry in @($Call.Arguments.GetEnumerator() | Sort-Object Key)) {
+            $arguments[$entry.Key] = $entry.Value
+        }
+        $contextKey = $Call.Name + ':' + (Get-HarnessSha256 ([Text.Encoding]::UTF8.GetBytes(($arguments | ConvertTo-Json -Depth 20 -Compress)))).Substring(0, 16)
+    }
     if ($presented) {
         if (-not $Context.PSObject.Properties['PresentedCall']) {
             $Context | Add-Member NoteProperty PresentedCall $Call
         }
         $model.ModelContent = Format-PackPresentedResult $Context $Context.PresentedCall $model $errorData
         $Call = $Context.PresentedCall
+    }
+    if ($directoryRules) {
+        if ($model.Contains('ModelContent')) {
+            $model.ModelContent += "`n`n" + $directoryRules
+        }
+        else {
+            $model.directory_rules = $directoryRules
+        }
+    }
+    if ($contextKey) {
+        $model.context_key = $contextKey
     }
     if ($Context.PSObject.Properties['RegisteredToolName']) {
         $Call = New-HarnessToolCall -Id $Call.Id -Name $Context.RegisteredToolName

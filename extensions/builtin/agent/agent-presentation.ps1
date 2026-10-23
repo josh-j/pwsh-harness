@@ -98,6 +98,37 @@ function ConvertFrom-PackPresentedArguments {
         $document.Dispose()
     }
 }
+$script:PackRunScratch = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+function New-PackRunScratch {
+    # A private per-run directory outside the workspace for throwaway probes, data and notes.
+    param([string]$SessionId, [string]$RunId)
+    if ($RunId -cnotmatch '^[0-9a-f]{32}$') {
+        return
+    }
+    $path = Join-Path ([IO.Path]::GetTempPath()) "pwsh-harness-run-$RunId"
+    if ([IO.Directory]::Exists($path) -or [IO.File]::Exists($path)) {
+        return
+    }
+    $null = $IsWindows ? [IO.Directory]::CreateDirectory($path) : [IO.Directory]::CreateDirectory($path, [IO.UnixFileMode]'UserRead, UserWrite, UserExecute')
+    $script:PackRunScratch[$SessionId] = @{ RunId = $RunId; Path = $path }
+}
+function Remove-PackRunScratch {
+    param([string]$SessionId, [string]$RunId)
+    $scratch = $null
+    if ($script:PackRunScratch.TryGetValue($SessionId, [ref]$scratch) -and $scratch.RunId -ceq $RunId) {
+        $null = $script:PackRunScratch.Remove($SessionId)
+        $item = [IO.DirectoryInfo]::new($scratch.Path)
+        if ($item.Exists -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            # Directory.Delete removes links inside the tree without following them.
+            [IO.Directory]::Delete($scratch.Path, $true)
+        }
+    }
+}
+function Get-PackRunScratch {
+    param($State)
+    $scratch = $null
+    $State -and $script:PackRunScratch.TryGetValue([string]$State.SessionId, [ref]$scratch) ? $scratch.Path : ''
+}
 function Resolve-PackPresentedPath {
     param($Context, [string]$Path)
     if (-not $Path -or $Path.Length -gt 4096) {
@@ -114,6 +145,10 @@ function Resolve-PackPresentedPath {
     }
     if (-not [IO.Path]::IsPathRooted($Path)) {
         throw 'An absolute workspace path is required.'
+    }
+    $scratch = Get-PackRunScratch $Context.State
+    if ($scratch -and ([IO.Path]::GetFullPath($Path) + [IO.Path]::DirectorySeparatorChar).StartsWith($scratch + [IO.Path]::DirectorySeparatorChar, (Get-HarnessPathComparison))) {
+        throw 'The scratch directory is outside the workspace; create, read and run scratch files with run_command.'
     }
     $root = Get-PackOperationDirectory $Context.State
     $relative = [IO.Path]::GetRelativePath($root, $Path)
@@ -273,6 +308,8 @@ function Add-PackAgentPrompt {
     $Request.AgentTools = @($Request.AgentTools) + @(Get-PackSearchSchemas $Request.Config -Presented:(Test-PackAgyPresentation $Request.Model))
     $skills = $Request.Config.UseToolsApi ? (Format-PackSkillPrompt (Get-PackSkillCatalog $Request.State $Request.Pump) -Presented:(Test-PackAgyPresentation $Request.Model)) : ''
     $root = Get-PackOperationDirectory $Request.State
-    $information = "<user_information>`nThe USER's OS is $($IsWindows ? 'Windows' : ($IsLinux ? 'linux' : 'macOS')).`nThe active workspace and current working directory are: $root`n</user_information>"
+    $scratch = Get-PackRunScratch $Request.State
+    $scratchNote = $scratch ? "`nScratch directory for this run: $scratch. Keep throwaway probe scripts, sample data and notes there instead of the workspace; it is deleted when the run ends. File tools change workspace files only, so create and run scratch files with run_command." : ''
+    $information = "<user_information>`nThe USER's OS is $($IsWindows ? 'Windows' : ($IsLinux ? 'linux' : 'macOS')).`nThe active workspace and current working directory are: $root$scratchNote`n</user_information>"
     $Request.Messages[0].Content = $Request.Messages[0].Content.Replace('{{SKILLS}}', $skills).Replace('{{USER_INFORMATION}}', $information)
 }

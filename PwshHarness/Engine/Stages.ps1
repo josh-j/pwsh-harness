@@ -54,7 +54,7 @@ function Build-EngineRequestStage {
             }
             if ($_.PSObject.Properties['NativeBatch']) {
                 $copy | Add-Member NoteProperty NativeBatch $_.NativeBatch
-                $copy.Content = $_.NativeBatch | ConvertTo-Json -Depth 30 -Compress
+                $copy.Content = Get-EngineNativeBatchText $_.NativeBatch
             }
             $copy
         }) -Model $Turn.Config.Model -Config (Copy-EngineConfigValue $Turn.Config) -State $Turn.Session -Prompt $Turn.Prompt

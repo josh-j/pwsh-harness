@@ -4,6 +4,7 @@
   "Agent.CodeSearchRanked": false,
   "Agent.CommandShell": "PowerShell",
   "Agent.CommandTimeoutSeconds": 300,
+  "Agent.CompactTokens": 0,
   "Agent.CompletionReview": true,
   "Agent.Enabled": true,
   "Agent.Headless": false,

@@ -63,6 +63,15 @@ function Get-EngineContext {
     $project = $State.Context.Project
     $truncated = $project -and [bool]$project.DiscoveryTruncated
     $budget = $State.Config.ContextTokenBudget * 4
+    $used = 0
+    # Agent rules have their own bound so a full AGENTS.md is never squeezed out by volatile context.
+    # Rules at or above the workspace arrive now; nested ones are listed and delivered with the first file they govern.
+    $nested = [Collections.Generic.List[string]]::new()
+    $workspace = $request.Agent ? [IO.Path]::GetFullPath(($State.Config.ContextPath ? $State.Config.ContextPath : $request.Path)) : ''
+    if ($workspace -and [IO.File]::Exists($workspace)) {
+        $workspace = [IO.Path]::GetDirectoryName($workspace)
+    }
+    $comparison = Get-HarnessPathComparison
     foreach ($item in @($items | Sort-Object @{ Expression = { if ($_.Stability -eq 'Stable') {
                         0
                     }
@@ -70,18 +79,36 @@ function Get-EngineContext {
                         1
                     } }
             }, @{ Expression = { $_.Score }; Descending = $true }, Priority, Title)) {
-        $destination = if ($request.Agent -and $item.Kind -eq 'File' -and [IO.Path]::GetFileName($item.Title) -ieq 'AGENTS.md') {
-            $rules
-        }
-        elseif ($item.Stability -eq 'Stable') {
-            $stable
-        }
-        else {
-            $volatile
-        }
         $section = "`n--- $($item.Kind): $($item.Title) ---`n$($item.Text)`n"
-        $remaining = $budget - $builder.Length
+        if ($request.Agent -and $item.Kind -eq 'File' -and [IO.Path]::GetFileName($item.Title) -ieq 'AGENTS.md') {
+            $base = $project -and $project.Root ? [string]$project.Root : $workspace
+            $directory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($item.Title, $base)).TrimEnd([IO.Path]::DirectorySeparatorChar)
+            $ancestor = $workspace.Equals($directory, $comparison) -or $workspace.StartsWith($directory + [IO.Path]::DirectorySeparatorChar, $comparison)
+            if (-not $ancestor) {
+                if ($directory.StartsWith($workspace.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar, $comparison)) {
+                    $nested.Add((ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($workspace, (Join-Path $directory 'AGENTS.md')))))
+                }
+                continue
+            }
+            $marker = "`n[TRUNCATED: rules budget]`n"
+            $room = 32768 - $rules.Length
+            if ($section.Length -gt $room) {
+                $truncated = $true
+                if ($room -le $marker.Length) {
+                    continue
+                }
+                $section = $section.Substring(0, $room - $marker.Length) + $marker
+            }
+            $null = $builder.Append($section)
+            $null = $rules.Append($section)
+            $sections.Add("$($item.Kind): $($item.Title)")
+            $files.Add($item.Title)
+            continue
+        }
+        $destination = $item.Stability -eq 'Stable' ? $stable : $volatile
+        $remaining = $budget - $used
         if ($section.Length -le $remaining) {
+            $used += $section.Length
             $null = $builder.Append($section)
             $null = $destination.Append($section)
             $sections.Add("$($item.Kind): $($item.Title)")
@@ -106,6 +133,9 @@ function Get-EngineContext {
             }
             break
         }
+    }
+    if ($nested.Count) {
+        $null = $rules.Append("`n--- Directory rules ---`nThese AGENTS.md files apply to files under their directory; each is shown with the first file you read or change there: $(@($nested | Sort-Object | Select-Object -First 20) -join ', ')$($nested.Count -gt 20 ? ', ...' : '')`n")
     }
     $State.Context.StableText = $stable.ToString()
     $State.Context | Add-Member NoteProperty RulesText $rules.ToString() -Force

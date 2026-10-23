@@ -12,7 +12,7 @@ function Add-EngineAgentBatch {
     $response = $Loop.Turn.Response
     $batch = New-HarnessNativeBatch -Text $response.Text -Calls $Loop.Calls -Results $Loop.Results.ToArray() `
         -ProviderData $response.Metadata.ProviderData -TokenOverhead $response.Metadata.WireTokenOverhead
-    $message = New-HarnessMessage user ($batch | ConvertTo-Json -Depth 30 -Compress)
+    $message = New-HarnessMessage user (Get-EngineNativeBatchText $batch)
     $message | Add-Member NoteProperty NativeBatch $batch
     $message | Add-Member NoteProperty BudgetGroup "history:agent$($Loop.Steps)"
     $Loop.Turn.Exchange.Add($message)

@@ -38,6 +38,13 @@
                 $script:Harness.Events.Notify($notice.SessionId, 'FollowUp')
             }
         })
+    $Harness.Events.Subscribe('AgentRunStarted', 'CreateRunScratch', { param($started) New-PackRunScratch $started.SessionId $started.Run.Id })
+    $Harness.Events.Subscribe('AgentRunStopped', 'RemoveRunScratch', { param($stopped)
+            # A run suspended for approval keeps its lease and resumes later with the same scratch.
+            if ($stopped.Summary.StopReason -cne 'AwaitingApproval') {
+                Remove-PackRunScratch $stopped.SessionId $stopped.RunId
+            }
+        })
     $Harness.RequestMiddleware.Add('AgentPrompt', ${function:Add-PackAgentPrompt}, 50)
     $Harness.Commands.Add('tool', ${function:Invoke-PackToolCommand}, 'Prepare one built-in agent tool: /tool read|write|edit|pwsh {arguments}; mutations require /approve.')
 }

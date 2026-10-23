@@ -91,21 +91,102 @@ function Get-EngineBudgetedHistory {
     }
     @($history.Exchanges | ForEach-Object { $_ })
 }
+function Get-EngineNativeBatchText {
+    # Provider-visible approximation of a native batch: results carrying Data.ModelContent send only that text.
+    param($Batch)
+    $parts = [Collections.Generic.List[string]]::new()
+    $parts.Add([string]$Batch.Text)
+    foreach ($call in $Batch.Calls) {
+        $parts.Add("$($call.Id) $($call.Name) " + ($call.Arguments | ConvertTo-Json -Depth 20 -Compress))
+    }
+    foreach ($result in $Batch.Results) {
+        $parts.Add((Get-EngineResultModelText $result))
+    }
+    $parts -join "`n"
+}
+function Get-EngineResultModelText {
+    param($Result)
+    $data = $Result.Data
+    if ($data -is [Collections.IDictionary] -and $null -ne $data['ModelContent']) {
+        return [string]$data['ModelContent']
+    }
+    [ordered]@{ call_id = $Result.CallId; tool = $Result.Tool; status = $Result.Status; data = $data; error = $Result.Error; truncated = $Result.Truncated } |
+        ConvertTo-Json -Depth 30 -Compress
+}
 function Get-EngineAgentFindings {
+    # One bounded line per step note and per call: what was asked, what came back, and its identity.
     param($Message)
-    foreach ($result in $Message.NativeBatch.Results) {
-        $call = $Message.NativeBatch.Calls | Where-Object Id -CEQ $result.CallId
+    $batch = $Message.NativeBatch
+    $clip = { param([string]$text, [int]$limit)
+        $text = ($text -replace '\s+', ' ').Trim()
+        $text.Length -le $limit ? $text : ($text.Substring(0, $limit / 2) + ' ... ' + $text.Substring($text.Length - $limit / 2))
+    }
+    if ($batch.Text) {
+        'Note: ' + (& $clip $batch.Text 300)
+    }
+    foreach ($result in $batch.Results) {
+        $call = $batch.Calls | Where-Object Id -CEQ $result.CallId | Select-Object -First 1
         $data = $result.Data
-        $receipt = "$($result.CallId) $($result.Tool) $($result.Status): $($call.Arguments['path'])"
+        $receipt = "$($result.CallId) $($result.Tool) $($result.Status):"
+        if ($call) {
+            $receipt += ' ' + (& $clip ($call.Arguments | ConvertTo-Json -Depth 5 -Compress) 200)
+        }
         if ($data -is [Collections.IDictionary]) {
-            $receipt += " sha256=$($data['sha256'])$($data['after_sha256']) exit=$($data['ExitCode'])"
+            foreach ($name in @('sha256', 'after_sha256', 'ExitCode')) {
+                if ($null -ne $data[$name]) {
+                    $receipt += " $($name -ceq 'ExitCode' ? 'exit' : $name)=$($data[$name])"
+                }
+            }
+            $output = @($data['ModelContent'], $data['Output'], $data['text']) | Where-Object { $null -ne $_ } | Select-Object -First 1
+            if ($output) {
+                $receipt += ' => ' + (& $clip ([string]$output) 240)
+            }
         }
         if ($result.Error) {
             $receipt += " error=$($result.Error.message)"
         }
-        $receipt = $receipt -replace '[\r\n]+', ' '
-        $receipt.Substring(0, [Math]::Min(300, $receipt.Length))
+        & $clip $receipt 600
     }
+}
+function Remove-EngineSupersededResults {
+    # An older result is elided when a later result in the run declares the same Data.context_key
+    # (an identical read, search or command). The newest batch stays verbatim; returns the count elided.
+    param([Collections.Generic.List[object]]$Messages)
+    $indices = @(for ($i = 0; $i -lt $Messages.Count; $i++) {
+            if ($Messages[$i].PSObject.Properties['NativeBatch']) {
+                $i
+            }
+        })
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $elided = 0
+    for ($n = $indices.Count - 1; $n -ge 0; $n--) {
+        $message = $Messages[$indices[$n]]
+        $batch = $message.NativeBatch
+        $results = [object[]]@($batch.Results)
+        $changed = $false
+        for ($j = $results.Count - 1; $j -ge 0; $j--) {
+            $data = $results[$j].Data
+            $key = $data -is [Collections.IDictionary] ? [string]$data['context_key'] : ''
+            if (-not $key) {
+                continue
+            }
+            if (-not $seen.Add($key) -and $n -lt $indices.Count - 1 -and -not $data['elided']) {
+                $old = $results[$j]
+                $results[$j] = New-HarnessToolResult -CallId $old.CallId -Tool $old.Tool -Status $old.Status -Error $old.Error -TranscriptRecordId $old.TranscriptRecordId -Data ([ordered]@{
+                        ModelContent = "[Superseded: a later identical $($old.Tool) call in this run returned newer output.]"; context_key = $key; elided = $true
+                    })
+                $changed = $true; $elided++
+            }
+        }
+        if ($changed) {
+            $replacement = New-HarnessNativeBatch -Text $batch.Text -Calls $batch.Calls -Results $results -ProviderData $batch.ProviderData -TokenOverhead $batch.TokenOverhead
+            $copy = New-HarnessMessage $message.Role (Get-EngineNativeBatchText $replacement)
+            $copy | Add-Member NoteProperty NativeBatch $replacement
+            $copy | Add-Member NoteProperty BudgetGroup $message.BudgetGroup
+            $Messages[$indices[$n]] = $copy
+        }
+    }
+    $elided
 }
 function Limit-EngineRequest {
     # Apply the total input bound after all middleware, including repair and continuation requests.
@@ -136,6 +217,14 @@ function Limit-EngineRequest {
         $tokens
     }.GetNewClosure()
     $before = & $count
+    # Agent runs compact at Agent.CompactTokens down to half of it, so the rewritten prefix
+    # stays byte-stable (and provider-cacheable) for many steps instead of churning every request.
+    $goal = $budget
+    $compactAt = $request.PSObject.Properties['AgentTools'] -and $request.Config.ContainsKey('Agent.CompactTokens') ? [int]$request.Config.'Agent.CompactTokens' : 0
+    if ($compactAt -gt 0 -and $before -gt [Math]::Min($budget, $compactAt)) {
+        $goal = [Math]::Min($budget, [int]($compactAt / 2))
+    }
+    $elided = $before -gt $goal ? (Remove-EngineSupersededResults $messages) : 0
     $groups = @($messages | Where-Object { $_.PSObject.Properties['BudgetGroup'] -and $_.BudgetGroup.StartsWith('history:') } |
             Select-Object -ExpandProperty BudgetGroup -Unique)
     # Preserve the most recent exchange: a follow-up such as "fix it" still needs its source.
@@ -148,7 +237,8 @@ function Limit-EngineRequest {
     $priorSummary = @($messages | Where-Object { $_.PSObject.Properties['BudgetGroup'] -and $_.BudgetGroup -ceq 'agent-summary' })
     $findings = @($priorSummary | ForEach-Object { $_.Content -match '(?s)\nFindings:\n(.*)\nActive context:' ? ($Matches[1] -split '\r?\n') : $_.Content } | Where-Object { $_ })
     foreach ($group in $groups) {
-        if ((& $count) -le $budget) {
+        # Project context is dropped only to meet the hard budget, never for the compaction goal.
+        if ((& $count) -le ($group -ceq 'context' ? $budget : $goal)) {
             break
         }
         foreach ($message in @($messages | Where-Object { $_.PSObject.Properties['BudgetGroup'] -and $_.BudgetGroup -ceq $group })) {
@@ -163,10 +253,14 @@ function Limit-EngineRequest {
                 }
                 $task = $Turn.Prompt.Substring(0, [Math]::Min(512, $Turn.Prompt.Length))
                 $notes = ($findings -join "`n")
-                if ($notes.Length -gt 4096) {
-                    $notes = $notes.Substring($notes.Length - 4096)
+                if ($notes.Length -gt 8192) {
+                    $notes = $notes.Substring($notes.Length - 8192)
                 }
-                $checkpoint = New-HarnessMessage user "Continuation summary (untrusted prior evidence):`nTask: $task`nProgress: older tool batches completed.`nFindings:`n$notes`nActive context: latest calls and results follow verbatim.`nNext steps: continue the task and verify the result."
+                $text = "Continuation summary (untrusted prior evidence):`nTask: $task`nProgress: older tool batches completed; their calls and output excerpts follow.`nFindings:`n$notes`nActive context: latest calls and results follow verbatim.`nNext steps: continue the task; re-read a file or rerun a command when an excerpt is not enough, then verify the result."
+                if ($request.PSObject.Properties['AgentTools']) {
+                    $text = $Turn.Store.Host.OperationControl.ProtectText($Turn.Session, $text)
+                }
+                $checkpoint = New-HarnessMessage user $text
                 $checkpoint | Add-Member NoteProperty BudgetGroup 'agent-summary'
                 $index = $messages.IndexOf($message)
                 $messages.RemoveAt($index)
@@ -186,7 +280,7 @@ function Limit-EngineRequest {
         throw $failure
     }
     $request.Messages = $messages.ToArray()
-    if ($stubbed) {
+    if ($stubbed -or $elided) {
         $instructions = $Turn.BaseMessages[0]
         $Turn.BaseMessages = $request.Messages.Clone()
         $Turn.BaseMessages[0] = $instructions
@@ -195,9 +289,9 @@ function Limit-EngineRequest {
     $request | Add-Member NoteProperty InputBudget ([pscustomobject]@{
             EstimatedTokens = $tokens; Limit = $limit; ReservedTokens = $limit - $budget; RemovedMessages = $removed
         }) -Force
-    if ($removed -or $stubbed) {
+    if ($removed -or $stubbed -or $elided) {
         Publish-EngineEvent $Turn.Store HistoryCompacted @{
-            SessionId = $Turn.Session.SessionId; Counts = @{ RequestBudget = $removed; CompactedBatches = $stubbed }
+            SessionId = $Turn.Session.SessionId; Counts = @{ RequestBudget = $removed; CompactedBatches = $stubbed; SupersededResults = $elided }
             OriginalTokens = $before; RemainingTokens = $tokens; Budget = $budget
         }
     }
