@@ -7,7 +7,13 @@ function Get-PackSearchSchemas {
     }
     elseif ($Config.'Agent.CodeSearchExact' -or $Config.'Agent.CodeSearchRanked' -or $Config.'Agent.CodeSearchHybrid') {
         # The canonical schema is installed once; the dispatcher checks the enabled mode.
-        @{ Name = 'search'; Description = $script:PackTools.search.Description; Parameters = @{ type = 'object'; additionalProperties = $false; required = @('query'); properties = @{ query = @{ type = 'string' }; scope = @{ type = 'string' }; mode = @{ type = 'string'; enum = @('exact', 'ranked') }; regex = @{ type = 'boolean' }; ignore_case = @{ type = 'boolean' }; includes = @{ type = 'string' }; per_line = @{ type = 'boolean' } } } }
+        @{ Name = 'search'; Description = $script:PackTools.search.Description; Parameters = @{ type = 'object'; additionalProperties = $false; required = @('query'); properties = @{
+                    query = @{ type = 'string'; description = 'Literal text; a .NET regular expression when regex is true; keywords in ranked mode.' }; scope = @{ type = 'string'; description = 'Context-relative file or directory; defaults to the whole context.' }
+                    mode = @{ type = 'string'; enum = @('exact', 'ranked'); description = 'exact (default) or ranked.' }; regex = @{ type = 'boolean'; description = 'Treat query as a regular expression.' }; ignore_case = @{ type = 'boolean'; description = 'Match case-insensitively.' }
+                    includes = @{ type = 'string'; description = 'Semicolon-separated path wildcards such as *.ps1;*.psm1; defaults to *.' }; per_line = @{ type = 'boolean'; description = 'Return every matching line (default) or only the first match per file.' }
+                }
+            }
+        }
     }
 }
 function Invoke-PackCodeSearch {

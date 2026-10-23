@@ -4,6 +4,16 @@ $script:PackPresentedSchemas = Get-Content -LiteralPath (Join-Path $script:PackP
 $script:PackSearchSchemas = Get-Content -LiteralPath (Join-Path $script:PackPromptRoot 'agent-search-tools.json') -Raw | ConvertFrom-Json -AsHashtable
 $script:PackPresentedSchemas = @($script:PackPresentedSchemas) + @($script:PackSearchSchemas)
 $script:PackAgentPrompt = Get-Content -LiteralPath (Join-Path $script:PackPromptRoot 'agent.md') -Raw
+# Retired agy fields that the model may still send: accepted and ignored, never advertised.
+$script:PackRetiredArguments = @{ run_command = @('BypassSandbox'); replace_file_content = @('TargetLintErrorIds'); write_to_file = @('ArtifactMetadata') }
+$script:PackShellNotes = @{
+    bash       = 'For multiline PowerShell from bash, write a .ps1 file with a quoted here-doc and run `pwsh -NoLogo -NoProfile -File <script>`. Do not use `-Command -`: an unterminated stdin block can exit 0 without executing. '
+    PowerShell = 'CommandLine is PowerShell source and may span several lines; call native tools directly and check $LASTEXITCODE. Unhandled cmdlet errors stop the command. A RunPersistent terminal keeps loaded modules, so import edited modules with -Force. '
+}
+function Get-PackAgentShell {
+    param($Config)
+    ($IsWindows -or $Config.'Agent.CommandShell' -cne 'Bash') ? 'PowerShell' : 'bash'
+}
 function Test-PackAgyPresentation {
     param([string]$Model)
     $Model -match '(^|/)gemini-3\.8-flash(?:$|-)'
@@ -15,6 +25,7 @@ function ConvertFrom-PackPresentedArguments {
         throw 'Unknown built-in agent tool.'
     }
     $schema = $spec[0].Parameters
+    $retired = $script:PackRetiredArguments.ContainsKey($Name) ? $script:PackRetiredArguments[$Name] : @()
     $document = [Text.Json.JsonDocument]::Parse($Json)
     try {
         if ($document.RootElement.ValueKind -ne 'Object') {
@@ -22,8 +33,11 @@ function ConvertFrom-PackPresentedArguments {
         }
         $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($field in $document.RootElement.EnumerateObject()) {
-            if (-not $seen.Add($field.Name) -or $field.Name -cnotin @($schema.properties.Keys)) {
+            if (-not $seen.Add($field.Name) -or ($field.Name -cnotin @($schema.properties.Keys) -and $field.Name -cnotin $retired)) {
                 throw 'Unknown or duplicate tool argument.'
+            }
+            if ($field.Name -cin $retired) {
+                continue
             }
             $rule = $schema.properties[$field.Name]
             $kind = [string]$field.Value.ValueKind
@@ -72,6 +86,9 @@ function ConvertFrom-PackPresentedArguments {
             }
         }
         $arguments = $Json | ConvertFrom-Json -AsHashtable
+        foreach ($field in $retired) {
+            $arguments.Remove($field)
+        }
         if ($Json.Contains('\u0000') -or @($arguments.Values | Where-Object { $_ -is [string] -and $_.Contains([char]0) }).Count) {
             throw 'Invalid tool string.'
         }
@@ -247,8 +264,9 @@ function Add-PackAgentPrompt {
     if (Test-PackAgyPresentation $Request.Model) {
         $Request.Config.InputTokenReservePercent = 0
         $schemas = @($script:PackPresentedSchemas | Where-Object { $_.Name -cnotin @('grep_search', 'codebase_search') } | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable)
+        $shell = Get-PackAgentShell $Request.Config
         foreach ($schema in $schemas) {
-            $schema.Description = $schema.Description.Replace('{{OS}}', ($IsWindows ? 'Windows' : ($IsLinux ? 'linux' : 'macOS'))).Replace('{{SHELL}}', ($IsWindows ? 'PowerShell' : 'bash')).Replace('{{COMMAND_TIMEOUT}}', [string]$Request.Config.'Agent.CommandTimeoutSeconds')
+            $schema.Description = $schema.Description.Replace('{{OS}}', ($IsWindows ? 'Windows' : ($IsLinux ? 'linux' : 'macOS'))).Replace('{{SHELL}}', $shell).Replace('{{SHELL_NOTE}}', $script:PackShellNotes[$shell]).Replace('{{COMMAND_TIMEOUT}}', [string]$Request.Config.'Agent.CommandTimeoutSeconds')
         }
         $Request.AgentTools = @($schemas) + $registered
     }

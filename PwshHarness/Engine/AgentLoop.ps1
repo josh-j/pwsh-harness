@@ -38,7 +38,7 @@ function New-EngineAgentRuntime {
     $newTool = ${function:New-EngineAgentToolEntry}
     $api = [pscustomobject]@{}
     $api | Add-Member ScriptMethod Install {
-        param($Schemas, [scriptblock]$Decode, [scriptblock]$Invoke, [scriptblock]$Fallback, [string]$Instructions, [scriptblock]$Tasks = $null, [object[]]$PresentedSchemas = @(), [string[]]$ReadOnlyNames = @())
+        param($Schemas, [scriptblock]$Decode, [scriptblock]$Invoke, [scriptblock]$Fallback, [string]$Instructions, [scriptblock]$Tasks = $null, [object[]]$PresentedSchemas = @(), [string[]]$ReadOnlyNames = @(), [scriptblock]$Review = $null)
         if ($Stage.ContainsKey('LiveStore') -or $Stage.ContainsKey('AgentTools')) {
             throw 'Agent tools may be installed only in the built-in load transaction.'
         }
@@ -50,7 +50,7 @@ function New-EngineAgentRuntime {
             $entry.Runtime = $true
             $Stage.Points.AgentTools[$entry.Name] = $entry
         }
-        $Stage.AgentTools = @{ Extension = $Extension; Schemas = (New-HarnessFrozen $Schemas); Decode = $Decode; Invoke = $Invoke; Fallback = $Fallback; Instructions = $Instructions; Tasks = $Tasks }
+        $Stage.AgentTools = @{ Extension = $Extension; Schemas = (New-HarnessFrozen $Schemas); Decode = $Decode; Invoke = $Invoke; Fallback = $Fallback; Instructions = $Instructions; Tasks = $Tasks; Review = $Review }
     }.GetNewClosure()
     $api | Add-Member ScriptMethod Assert {
         param($Session, $Lease)
@@ -426,6 +426,19 @@ function Invoke-EngineAgentContinuation {
                     $turn.RequestKind = 'Agent'
                     continue
                 }
+                # One completion review per run, only while another step fits: it must never turn Complete into a limit stop.
+                if ($Store.AgentTools.Review -and -not $loop.Reviewed -and $loop.Steps -lt $loop.Settings.'Agent.MaxSteps' -and $Store.Clock.Now() -lt $loop.Run.DeadlineUtc) {
+                    $loop.Reviewed = $true
+                    $context = [pscustomobject]@{ State = $State; AgentLease = $loop.Lease; CancellationToken = $turn.Token; Pump = $turn.OnIdle }
+                    $finding = [string](& $Store.AgentTools.Review $context)
+                    if ($finding) {
+                        $turn.Exchange.Add((New-EngineAgentAssistantMessage $turn.Response))
+                        $turn.Exchange.Add((New-HarnessMessage user $finding))
+                        Publish-EngineEvent $Store AgentCompletionReviewed @{ SessionId = $State.SessionId; RunId = $loop.Run.Id; Step = $loop.Steps }
+                        $turn.RequestKind = 'Agent'
+                        continue
+                    }
+                }
                 return Complete-EngineAgentRun $Store $loop Complete
             }
             if ($loop.ToolCalls + $calls.Count -gt $loop.Settings.'Agent.MaxToolCalls') {
@@ -504,7 +517,7 @@ function Send-EngineAgent {
             Lease = $ticket.Lease; Run = $ticket.Run; Turn = $turn; Settings = $record.Lease.Settings
             Config = ($State.Config | ConvertTo-Json -Depth 30 -Compress); Steps = 0; ToolCalls = 0
             ChargedTokens = 0L; Reservation = 0L; StopReason = ''; Calls = @(); Index = 0; Advancing = $true
-            FailureDetail = ''; StreamRetries = 0; ToolRepairs = 0; CallErrors = @{}; KeepGoing = $false
+            FailureDetail = ''; StreamRetries = 0; ToolRepairs = 0; CallErrors = @{}; KeepGoing = $false; Reviewed = $false
             Idle = $OnIdle; TaskNotices = [Collections.Generic.List[object]]::new()
             Results = [Collections.Generic.List[object]]::new(); Ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         }

@@ -38,14 +38,10 @@
   },
   {
     "Name": "run_command",
-    "Description": "PROPOSE a command to run on behalf of the user. Operating System: {{OS}}. Shell: {{SHELL}}.\n**NEVER PROPOSE A cd COMMAND**.\nIf you have this tool, note that you DO have the ability to run commands directly on the USER's system.\nMake sure to specify CommandLine exactly as it should be run in the shell.\nFor multiline PowerShell from bash, write a .ps1 file with a quoted here-doc and run `pwsh -NoLogo -NoProfile -File <script>`. Do not use `-Command -`: an unterminated stdin block can exit 0 without executing. Check the requested output files and verification results before claiming success.\nIf the step doesn't return the command output, it means that the command was sent to the background as a task. You will receive messages with the command's output as it runs. To interact with a running command, use the manage_task tool. Use `send_input` to send stdin, `kill` to terminate the command, and `status` to check current status. Avoid repeated immediate status polls. If current output is needed, use one blocking status call with WaitMs and the last Cursor. The system will automatically notify you with a message when the command finishes. Simply proceed with other work or stop calling tools after launching a command.\nCommands will be run with PAGER=cat. You may want to limit the length of output for commands that usually rely on paging and may contain very long output (e.g. git log, use git log -n <N>).\nIMPORTANT: The Cwd (working directory) MUST be within the user's workspace. Do NOT use /tmp, /home, or any path outside the workspace. If you need a temporary directory, use the scratch/ directory in your artifact directory.\nEvery command has a hard {{COMMAND_TIMEOUT}}-second execution deadline (the run deadline may be shorter). Background execution preserves that deadline. Prefer the workspace's focused checks; a full release gate can exceed this command bound.",
+    "Description": "PROPOSE a command to run on behalf of the user. Operating System: {{OS}}. Shell: {{SHELL}}.\n**NEVER PROPOSE A cd COMMAND**.\nIf you have this tool, note that you DO have the ability to run commands directly on the USER's system.\nMake sure to specify CommandLine exactly as it should be run in the shell.\n{{SHELL_NOTE}}Check the requested output files and verification results before claiming success.\nIf the step doesn't return the command output, it means that the command was sent to the background as a task. You will receive messages with the command's output as it runs. To interact with a running command, use the manage_task tool. Use `send_input` to send stdin, `kill` to terminate the command, and `status` to check current status. Avoid repeated immediate status polls. If current output is needed, use one blocking status call with WaitMs and the last Cursor. The system will automatically notify you with a message when the command finishes. Simply proceed with other work or stop calling tools after launching a command.\nCommands will be run with PAGER=cat. You may want to limit the length of output for commands that usually rely on paging and may contain very long output (e.g. git log, use git log -n <N>).\nIMPORTANT: The Cwd (working directory) MUST be within the user's workspace. Do NOT use /tmp, /home, or any path outside the workspace. If you need a temporary directory, create one inside the workspace.\nEvery command has a hard {{COMMAND_TIMEOUT}}-second execution deadline (the run deadline may be shorter). Background execution preserves that deadline. Prefer the workspace's focused checks; a full release gate can exceed this command bound.",
     "Parameters": {
       "additionalProperties": false,
       "properties": {
-        "BypassSandbox": {
-          "description": "Set to true to run the command outside of the sandbox environment. This host has no OS sandbox; this flag does not change permissions or approval.",
-          "type": "boolean"
-        },
         "CommandLine": {
           "description": "The exact command line string to execute.",
           "type": "string"
@@ -172,13 +168,6 @@
           "description": "The target file to modify. Must be an absolute path. Always specify the target file as the very first argument.",
           "type": "string"
         },
-        "TargetLintErrorIds": {
-          "description": "If applicable, IDs of lint errors this edit aims to fix (they'll have been given in recent IDE feedback). If you believe the edit could fix lints, do specify lint IDs; if the edit is wholly unrelated, do not. A rule of thumb is, if your edit was influenced by lint feedback, include lint IDs. Exercise honest judgement here.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
         "toolAction": {
           "description": "Brief 2-5 word phrase in -ing form describing the specific action. Capitalize like a sentence. Some examples: 'Analyzing directory', 'Searching the web', 'Checking git status', 'Running tests', 'Searching code'.",
           "type": "string"
@@ -236,37 +225,13 @@
   },
   {
     "Name": "write_to_file",
-    "Description": "Use this tool to create new files. The file will be created if it does not already exist. Parent directories must exist. Existing-file changes require a prior view_file in this run; the host binds the observed file hash.\n\t\tFollow these instructions:\n\t\t1. By default this tool will error if TargetFile already exists. To overwrite an existing file, set Overwrite to true. To append to an existing file (or create it if it does not exist), set Append to true.\n\t\t2. When creating an artifact, always provide ArtifactMetadata. When creating non-artifact files, do not provide it.",
+    "Description": "Use this tool to create new files. The file will be created if it does not already exist. Parent directories must exist. Existing-file changes require a prior view_file in this run; the host binds the observed file hash.\n\t\tFollow these instructions:\n\t\t1. By default this tool will error if TargetFile already exists. To overwrite an existing file, set Overwrite to true. To append to an existing file (or create it if it does not exist), set Append to true.",
     "Parameters": {
       "additionalProperties": false,
       "properties": {
         "Append": {
           "description": "Set this to true to append CodeContent to the end of TargetFile (creating the file if it does not exist). Cannot be combined with Overwrite=true.",
           "type": "boolean"
-        },
-        "ArtifactMetadata": {
-          "additionalProperties": false,
-          "description": "Metadata that defines artifact properties. ONLY provide when creating an artifact file in the artifact directory. Omit this field when creating non-artifact files.",
-          "properties": {
-            "RequestFeedback": {
-              "description": "Set to true if you'd like to request user feedback on this artifact and if the contents of this artifact are executable (e.g., a plan). The user will be provided with a 'Proceed' button to execute it.",
-              "type": "boolean"
-            },
-            "Summary": {
-              "description": "Detailed multi-line summary of the artifact file, after edits have been made. Summary does not need to mention the artifact name and should focus on the contents and purpose of the artifact.",
-              "type": "string"
-            },
-            "UserFacing": {
-              "description": "Set to true if this artifact should be presented to the user. Set to false for scratch scripts, temporary data files, or files that the user does not need to see",
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "Summary",
-            "UserFacing",
-            "RequestFeedback"
-          ],
-          "type": "object"
         },
         "CodeContent": {
           "description": "The code contents to write to the file.",

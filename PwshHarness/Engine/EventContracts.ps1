@@ -141,6 +141,7 @@ function Initialize-EngineEventSchemas {
         OperationPrepared      =@{ SessionId = [string]; Text = [string]; Operation = $nullableObject }
         OperationCompleted     =@{ SessionId = [string]; Id = [string]; Kind = [string]; Status = [string]; Source = [string]; Files = [Collections.IEnumerable]; Prompt = [string]; Authorization = $optionalObject }
     }
+    $schemas.AgentCompletionReviewed = @{ SessionId = [string]; RunId = [string]; Step = [int] }
     $schemas.AgentRequestRetryScheduled = @{ SessionId = [string]; RunId = [string]; Step = [int]; Reason = [string]; Attempt = @{ Type = [int]; Required = $false }; DelaySeconds = @{ Type = [double]; Required = $false } }
     foreach ($name in $schemas.Keys) {
         $Store.Points.EventSchemas[$name] = New-EngineEventSchema $name 1 $schemas[$name] '<engine>'

@@ -101,6 +101,21 @@ function Get-PackToolAnalyzerDiagnostics {
         New-HarnessDiagnostic -Source Analyzer -Category Analyzer -Severity Info -Code AnalyzerSkipped -Message ('Changed-source analysis unavailable: ' + $_.Exception.Message)
     }
 }
+function Get-PackSourceReview {
+    param($Context, [string]$Path, $Original, [string]$Text)
+    if ([IO.Path]::GetExtension($Path) -notin @('.ps1', '.psm1', '.psd1')) {
+        return
+    }
+    $tokens = $null; $errors = $null
+    $null = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    foreach ($parseError in $errors) {
+        New-HarnessDiagnostic -Source Parser -Severity Error -Code $parseError.ErrorId -Message $parseError.Message -Line $parseError.Extent.StartLineNumber -Column $parseError.Extent.StartColumnNumber
+    }
+    if (-not $errors) {
+        $tool = @{ File = @{ Exists = $null -ne $Original; Text = [string]$Original }; State = $Context.State; Context = $Context }
+        @(Get-PackToolAnalyzerDiagnostics $tool $Text) | Where-Object { [string]$_.Severity -in @('Error', 'Warning') }
+    }
+}
 function Add-PackToolDiagnostics {
     param($Tool, [string]$text, [string]$formatNote)
     if ([IO.Path]::GetExtension($Tool.Path) -in @('.ps1', '.psm1', '.psd1')) {

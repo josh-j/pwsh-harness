@@ -75,7 +75,7 @@ function Invoke-PackAgentCommand {
         }
     }
     $copy = New-PackPresentedContext $Context $Call
-    $copy | Add-Member NoteProperty AgentCommand @{ Cwd = $cwd; Parents = (Get-HarnessPathSnapshot $cwd -NoHardLinks).Parents; Shell = ($IsWindows ? 'PowerShell' : 'bash'); WaitSeconds = [Math]::Clamp([int]$arguments.WaitMsBeforeAsync, 0, 10000) / 1000.0; Terminal = $terminal; Store = $store; TaskId = ([guid]::NewGuid().ToString('N')); IsDaemon = [bool]$arguments.IsDaemon }
+    $copy | Add-Member NoteProperty AgentCommand @{ Cwd = $cwd; Parents = (Get-HarnessPathSnapshot $cwd -NoHardLinks).Parents; Shell = (Get-PackAgentShell $Context.State.Config); WaitSeconds = [Math]::Clamp([int]$arguments.WaitMsBeforeAsync, 0, 10000) / 1000.0; Terminal = $terminal; Store = $store; TaskId = ([guid]::NewGuid().ToString('N')); IsDaemon = [bool]$arguments.IsDaemon }
     $legacy = ConvertFrom-PackToolArguments pwsh (@{ command = $arguments.CommandLine } | ConvertTo-Json -Compress) $Call.Id
     Invoke-PackToolCall $copy $legacy
 }

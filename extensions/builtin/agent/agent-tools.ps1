@@ -386,13 +386,14 @@ function Invoke-PackToolCall {
     if ($lease) {
         $observed = $null
         if (-not $script:PackToolObservations.TryGetValue($lease, [ref]$observed)) {
-            $observed = @{ Root = $tool.Root; SessionId = $tool.SessionId; Hashes = [Collections.Generic.Dictionary[string, object]]::new(($IsWindows ? [StringComparer]::OrdinalIgnoreCase : [StringComparer]::Ordinal)) }
+            $comparer = $IsWindows ? [StringComparer]::OrdinalIgnoreCase : [StringComparer]::Ordinal
+            $observed = @{ Root = $tool.Root; SessionId = $tool.SessionId; Hashes = [Collections.Generic.Dictionary[string, object]]::new($comparer); Changed = [Collections.Generic.Dictionary[string, object]]::new($comparer) }
             $script:PackToolObservations.Add($lease, $observed)
         }
         if ($observed.Root -cne $tool.Root -or $observed.SessionId -cne $tool.SessionId) {
             throw 'Observed file scope changed during the run.'
         }
-        $tool.Observations = $observed.Hashes
+        $tool.Observations = $observed.Hashes; $tool.Changed = $observed.Changed
     }
     $values = @($Call.Arguments.Values)
     if ($Call.Arguments.ContainsKey('hunks')) {
@@ -518,6 +519,10 @@ function Invoke-PackToolApproval {
         if ($result.Status -ceq 'ok' -and $null -ne $tool.Observations -and $tool.Observations.ContainsKey($tool.Path) -and $tool.Files.Count) {
             $tool.Observations[$tool.Path] = @{ Hash = $tool.Files[0].FinalHash; Step = $tool.Context.AgentStep }
         }
+        if ($result.Status -ceq 'ok' -and $null -ne $tool.Changed -and $tool.Files.Count -and -not $tool.Changed.ContainsKey($tool.Path)) {
+            # The completion review compares against the text before this run's first change.
+            $tool.Changed[$tool.Path] = @{ Relative = $tool.Call.Arguments.path; Text = ($tool.File.Exists ? $tool.File.Text : $null) }
+        }
         if ($result.Data.PSObject.Properties['TaskState'] -and $result.Data.TaskState -ceq 'running') {
             $control.DetachRunning($Context.State, $tool.Flow)
         }
@@ -559,13 +564,38 @@ $script:PackTools = @{
     edit  = @{ Description = "Edit one file with one ordinal before match (optionally anchored), or 1-64 ordered nonoverlapping original-line hunks; each target must match once. One atomic change. Read first.`nOmitted expected_sha256 uses this run's observed hash; changed or unread files fail. Wait for each result before changing this file again. Returns hunks, hash and diagnostics."; Schema = @{ path = $pathRule; before = @{ Kind = 'String'; Min = 1; Description = 'Exact nonempty source text, unique within the optional line anchors.' }; after = $string; expected_sha256 = (@{} + $hash + @{ Optional = $true; Description = 'Optional after read in this run; explicit null is invalid. Stale files fail.' }); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'Optional inclusive first line of the matching region.' }); end_line = (@{} + $lineRule + @{ Default = [int]::MaxValue; Description = 'Optional inclusive last line of the matching region.' }) }; Prepare = ${function:New-PackToolFileChange}; Execute = ${function:Invoke-PackToolFileChange}; Edit = $true; Role = 'tool-result' }
     pwsh  = @{ Description = "Run PowerShell in the context directory to search, build, test and inspect files. Unhandled cmdlet errors stop execution; handle expected failures explicitly. Check exit codes and stderr.`nRecursive search: Get-ChildItem -Recurse -File -Filter *.ps1 | Select-String -Pattern ...; ** is not recursive. Large output retains the head and tail; narrow commands to focus it."; Schema = @{ command = @{ Kind = 'String'; Min = 1; Max = 65536; Nonblank = $true; Description = 'Exact PowerShell source. Prefer bounded text output and focused checks.' } }; Prepare = ${function:New-PackToolCommand}; Execute = ${function:Invoke-PackToolProcess}; Role = 'tool-result' }
 }
-$script:PackTools.search = @{ Description = 'Search permitted workspace files. Exact/regex or ranked mode must be explicitly enabled by the user.'; Schema = @{ query = @{ Kind = 'String'; Min = 1; Max = 4096; Nonblank = $true }; scope = @{ Kind = 'String'; Min = 1; Max = 4096; Default = '.' }; mode = @{ Kind = 'String'; Pattern = '\A(exact|ranked)\z'; Default = 'exact' }; regex = @{ Kind = 'Boolean'; Default = $false }; ignore_case = @{ Kind = 'Boolean'; Default = $false }; includes = @{ Kind = 'String'; Max = 1024; Default = '*' }; per_line = @{ Kind = 'Boolean'; Default = $true } }; Role = 'tool-read' }
+$script:PackTools.search = @{ Description = "Search permitted workspace files with bounded numbered matches; prefer it to shell searches.`nExact/regex mode is on unless the user disables it; ranked mode must be enabled by the user."; Schema = @{ query = @{ Kind = 'String'; Min = 1; Max = 4096; Nonblank = $true }; scope = @{ Kind = 'String'; Min = 1; Max = 4096; Default = '.' }; mode = @{ Kind = 'String'; Pattern = '\A(exact|ranked)\z'; Default = 'exact' }; regex = @{ Kind = 'Boolean'; Default = $false }; ignore_case = @{ Kind = 'Boolean'; Default = $false }; includes = @{ Kind = 'String'; Max = 1024; Default = '*' }; per_line = @{ Kind = 'Boolean'; Default = $true } }; Role = 'tool-read' }
 $script:PackTools.read.Schema.content_offset = @{ Kind = 'Number'; Min = 0; Max = 1048576; Default = 0; Description = 'Optional UTF-8 byte offset for a truncated view.' }
 $script:PackTools.edit.Schema.allow_multiple = @{ Kind = 'Boolean'; Default = $false; Description = 'Replace all exact matches within the line anchors.' }
 $script:PackTools.edit.Schema.before.Optional = $true
 $script:PackTools.edit.Schema.after.Optional = $true
 $script:PackTools.edit.Schema.hunks = @{ Kind = 'Array'; Optional = $true; Description = '1-64 ordered nonoverlapping original-file line ranges. Supply instead of single-edit fields.' }
 $script:PackTools.read.Schema.path.Description = 'Context-relative literal file, or skill:<name> from the available skills list.'
+function Get-PackCompletionReview {
+    param($Context)
+    $observed = $null
+    if (-not $Context.State.Config.'Agent.CompletionReview' -or -not $script:PackToolObservations.TryGetValue($Context.AgentLease, [ref]$observed)) {
+        return
+    }
+    $findings = foreach ($entry in @($observed.Changed.GetEnumerator())) {
+        try {
+            $null = Resolve-PackToolPath $Context.State $observed.Root $entry.Value.Relative $Context
+            $file = Read-HarnessTextFile $entry.Key $Context.State.Config.'Agent.MaxFileBytes' -AllowMissing -NoHardLinks
+            if ($file.Exists) {
+                foreach ($diagnostic in @(Invoke-PackService 'source.review' @($Context, $entry.Key, $entry.Value.Text, $file.Text)) | Select-Object -First 12) {
+                    "$($entry.Value.Relative): $($diagnostic.Severity) $($diagnostic.Code) line $($diagnostic.Line): $($diagnostic.Message)"
+                }
+            }
+        }
+        catch {
+            $Context.CancellationToken.ThrowIfCancellationRequested()
+        }
+    }
+    if ($findings) {
+        $excerpt = Get-PackToolExcerpt ($script:Harness.OperationControl.ProtectText($Context.State, (@($findings) -join "`n"))) 4096
+        "<EPHEMERAL_MESSAGE>`nBefore finishing: checks of the files you changed in this run report problems your changes introduced.`n$($excerpt.Text)`nFix them with focused edits and rerun the relevant check, or state why each should remain. Then give your final answer.`n</EPHEMERAL_MESSAGE>"
+    }
+}
 function Register-PackAgentRuntime {
     $schemas = foreach ($name in @('read', 'write', 'edit', 'pwsh', 'search')) {
         $properties = @{}
@@ -633,5 +663,5 @@ function Register-PackAgentRuntime {
             if ($Parsed.CodeBlocks.Count -eq 1) {
                 New-HarnessToolCall -Id ([guid]::NewGuid().ToString('N')) -Name pwsh -Arguments @{ command = $Parsed.CodeBlocks[0].Code }
             }
-        }, $script:PackAgentPrompt, { param($Context, $Mode) Update-PackAgentTasks $Context $Mode }, @($script:PackPresentedSchemas), @('read', 'search', 'view_file', 'grep_search', 'codebase_search'))
+        }, $script:PackAgentPrompt, { param($Context, $Mode) Update-PackAgentTasks $Context $Mode }, @($script:PackPresentedSchemas), @('read', 'search', 'view_file', 'grep_search', 'codebase_search'), { param($Context) Get-PackCompletionReview $Context })
 }

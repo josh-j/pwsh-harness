@@ -103,7 +103,9 @@ function New-EngineHostStore {
         ContextIncludeDiff             =$false
         'Agent.Enabled'                =$true
         'Agent.Headless'               =$false
-        'Agent.CodeSearchExact'        =$false
+        'Agent.CodeSearchExact'        =$true
+        'Agent.CompletionReview'       =$true
+        'Agent.CommandShell'           ='PowerShell'
         'Agent.CodeSearchRanked'       =$false
         'Agent.CodeSearchHybrid'       =$false
         'Agent.SearchEmbeddingMaxCost' =0.0
@@ -154,6 +156,7 @@ function New-EngineHostStore {
         $store.Points.Settings[$name].Validator = { param($v) $v -ge 1 -and $v -le 16777216 }
     }
     $store.Points.Settings['Agent.SearchEmbeddingMaxCost'].Validator = { param($v) $v -ge 0 -and $v -le 5 -and -not [double]::IsNaN($v) }
+    $store.Points.Settings['Agent.CommandShell'].Validator = { param($v) $v -cin @('PowerShell', 'Bash') }
     $store.Points.Settings['Agent.MaxReadBytes'].Validator = { param($v) $v -ge 1 -and $v -le 1048576 }
     $store.Points.Settings['Agent.StreamIdleSeconds'].Validator = { param($v) $v -ge 1 -and $v -le 86400 }
     $store.Points.Settings['Agent.RequestTimeoutSeconds'].Validator = { param($v) $v -ge 1 -and $v -le 86400 }

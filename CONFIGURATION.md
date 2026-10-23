@@ -38,9 +38,9 @@ the current conversation to run the host-approved tools without individual
 execution confirmations. Auto is never enabled by this example or a saved session.
 Extension installation and loading still require source-bound approval.
 
-Exact workspace search is local, read-only and bounded. Enable it with
-`/config set Agent.CodeSearchExact true` to avoid shell search proposals and their
-execution reviews. Ranked and hybrid search remain separately enabled; hybrid
+Exact workspace search is local, read-only and bounded, and is on by default so
+the agent avoids shell search proposals and their execution reviews. Disable it
+with `/config set Agent.CodeSearchExact false`. Ranked and hybrid search remain separately enabled; hybrid
 requires explicit embedding model/pricing and a spending bound. Batch independent
 searches and reads to reduce model round trips.
 
