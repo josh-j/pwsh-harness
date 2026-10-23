@@ -199,11 +199,17 @@ function Limit-EngineRequest {
     elseif ($request.Profile) {
         $limit = [Math]::Min($limit, $request.Profile.ContextWindowTokens - $request.Config.MaxTokens)
     }
-    # Leave room for wire framing and the provider's proposal schema; estimates are approximate.
-    $budget = [Math]::Max(0, [int][Math]::Floor($limit * (1 - $request.Config.InputTokenReservePercent / 100.0)))
+    $estimate = ${function:Get-EngineTokenEstimate}
+    # Native tool schemas accompany every agent request and admission counts them, so pack messages
+    # into the space they leave. The reserve covers wire framing; estimates are approximate.
+    $schemas = 0
+    if ($request.PSObject.Properties['AgentTools']) {
+        $json = ConvertTo-Json -InputObject @($request.AgentTools) -Depth 40 -Compress
+        $schemas = [Math]::Max((& $estimate $Turn.Store $json $request.Config -Uncalibrated), (& $estimate $Turn.Store $json $request.Config))
+    }
+    $budget = [Math]::Max(0, [int][Math]::Floor($limit * (1 - $request.Config.InputTokenReservePercent / 100.0)) - $schemas)
     $messages = [Collections.Generic.List[object]]::new()
     $messages.AddRange([object[]]$request.Messages)
-    $estimate = ${function:Get-EngineTokenEstimate}
     $wireRatio = [Math]::Max(1, (Get-EngineCalibration $Turn.Store $request.Config).Ratio)
     $count = {
         $tokens = 0
@@ -275,7 +281,7 @@ function Limit-EngineRequest {
     $tokens = & $count
     if ($tokens -gt $budget) {
         $setting = $request.PSObject.Properties['AgentTools'] ? 'Agent.InputTokenBudget' : 'InputTokenBudget'
-        $failure = [InvalidOperationException]::new("The current request needs about $tokens input tokens; the input budget allows $budget. Shorten the prompt or explicitly raise $setting for your gateway. No request was sent.")
+        $failure = [InvalidOperationException]::new("The current request needs about $($tokens + $schemas) input tokens; the input budget allows $($budget + $schemas). Shorten the prompt or explicitly raise $setting for your gateway. No request was sent.")
         $failure.Data['AgentStopReason'] = 'InputTooLarge'
         throw $failure
     }

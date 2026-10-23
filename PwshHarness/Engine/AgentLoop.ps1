@@ -197,6 +197,11 @@ function Complete-EngineAgentRun {
         $result | Add-Member NoteProperty FailureDetail $Loop.FailureDetail
         $result | Add-Member NoteProperty AgentSummary (New-HarnessFrozen $summary)
         $holdLease = $Reason -ceq 'AwaitingApproval'
+        if (-not $holdLease -and $Loop.Steering.Count) {
+            # Notes the model never saw go back to the frontend instead of being lost.
+            $result | Add-Member NoteProperty UndeliveredSteering @($Loop.Steering.ToArray())
+            $Loop.Steering.Clear()
+        }
     }
     catch {
         $completionFailure = $_
@@ -288,6 +293,9 @@ function Invoke-EngineAgentContinuation {
                 $turn.Exchange.Add((New-HarnessMessage user $notice.Data.SystemMessage))
             }
             $loop.TaskNotices.Clear()
+            while ($loop.Steering.Count) {
+                $turn.Exchange.Add((New-HarnessMessage user "<USER_STEERING>`n$($loop.Steering.Dequeue())`n</USER_STEERING>"))
+            }
             Build-EngineRequestStage $turn
             $turn.Request | Add-Member NoteProperty AgentTools (@($Store.AgentTools.Schemas) + @($loop.Tools.Values | Where-Object { -not $_.Runtime } | Sort-Object Name | ForEach-Object { $_.Schema }))
             Invoke-EngineMiddlewareStage $turn
@@ -414,7 +422,8 @@ function Invoke-EngineAgentContinuation {
             }
             if (-not $calls.Count) {
                 Update-EngineAgentTasks $Store $loop Wait
-                if ($loop.TaskNotices.Count) {
+                # A pending steering note keeps the run going so the model sees it before finishing.
+                if ($loop.TaskNotices.Count -or $loop.Steering.Count) {
                     $turn.Exchange.Add((New-EngineAgentAssistantMessage $turn.Response))
                     $turn.RequestKind = 'Agent'
                     continue
@@ -518,7 +527,7 @@ function Send-EngineAgent {
             Config = ($State.Config | ConvertTo-Json -Depth 30 -Compress); Steps = 0; ToolCalls = 0
             ChargedTokens = 0L; Reservation = 0L; StopReason = ''; Calls = @(); Index = 0; Advancing = $true
             FailureDetail = ''; StreamRetries = 0; ToolRepairs = 0; CallErrors = @{}; KeepGoing = $false; Reviewed = $false
-            Idle = $OnIdle; TaskNotices = [Collections.Generic.List[object]]::new()
+            Idle = $OnIdle; TaskNotices = [Collections.Generic.List[object]]::new(); Steering = [Collections.Generic.Queue[string]]::new()
             Results = [Collections.Generic.List[object]]::new(); Ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         }
         $turn | Add-Member NoteProperty FinalizeRequest {

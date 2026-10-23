@@ -43,8 +43,10 @@
             # A run suspended for approval keeps its lease and resumes later with the same scratch.
             if ($stopped.Summary.StopReason -cne 'AwaitingApproval') {
                 Remove-PackRunScratch $stopped.SessionId $stopped.RunId
+                Stop-PackRewind $stopped.SessionId $stopped.RunId
             }
         })
     $Harness.RequestMiddleware.Add('AgentPrompt', ${function:Add-PackAgentPrompt}, 50)
     $Harness.Commands.Add('tool', ${function:Invoke-PackToolCommand}, 'Prepare one built-in agent tool: /tool read|write|edit|pwsh {arguments}; mutations require /approve.')
+    $Harness.Commands.Add('undo', ${function:Invoke-PackUndoCommand}, 'Prepare reversing the latest changing agent run''s file changes, including command changes, except files changed since; /approve applies it.')
 }

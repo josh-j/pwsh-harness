@@ -18,6 +18,7 @@
   "Agent.MaxTotalTokens": 1000000,
   "Agent.RequestTimeoutSeconds": 600,
   "Agent.RetryCount": 2,
+  "Agent.RewindMaxBytes": 67108864,
   "Agent.SearchEmbeddingMaxCost": 0.0,
   "Agent.StreamIdleSeconds": 60,
   "Analyzer": true,

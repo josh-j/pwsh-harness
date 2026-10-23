@@ -161,7 +161,8 @@ function Assert-HarnessPreparedOperation {
     $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($file in $Value.Files) {
         $fields = @('Path', 'BeforeExists', 'BeforeBytes', 'BeforeHash', 'FinalBytes', 'FinalHash')
-        if ($file -isnot [Collections.IDictionary] -or @($file.Keys | Where-Object { $_ -cnotin $fields }).Count -or
+        # Optional FinalExists = $false deletes an existing file; its final bytes are empty.
+        if ($file -isnot [Collections.IDictionary] -or @($file.Keys | Where-Object { $_ -cnotin $fields -and $_ -cne 'FinalExists' }).Count -or
             @($fields | Where-Object { -not $file.ContainsKey($_) }).Count -or
             $file.Path -isnot [string] -or -not $file.Path -or $file.Path.Contains([char]0) -or
             $file.BeforeExists -isnot [bool] -or -not $paths.Add($file.Path)) {
@@ -179,6 +180,9 @@ function Assert-HarnessPreparedOperation {
         }
         if (-not $file.BeforeExists -and $file.BeforeBytes.Count) {
             throw 'Absent file preconditions cannot contain prior bytes.'
+        }
+        if ($file.ContainsKey('FinalExists') -and ($file.FinalExists -isnot [bool] -or (-not $file.FinalExists -and (-not $file.BeforeExists -or $file.FinalBytes.Count)))) {
+            throw 'A deletion requires an existing file and empty final bytes.'
         }
     }
     if ($Value.Command) {

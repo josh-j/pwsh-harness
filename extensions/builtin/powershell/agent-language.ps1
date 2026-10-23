@@ -116,6 +116,45 @@ function Get-PackSourceReview {
         @(Get-PackToolAnalyzerDiagnostics $tool $Text) | Where-Object { [string]$_.Severity -in @('Error', 'Warning') }
     }
 }
+function Get-PackSourceOutline {
+    # Functions, classes, enums and members with dotted names (Outer.Inner, Class.Method) and line ranges;
+    # nothing for files that are not PowerShell scripts or modules.
+    param([string]$Path, [string]$Text)
+    if ([IO.Path]::GetExtension($Path) -notin @('.ps1', '.psm1')) {
+        return
+    }
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    $nodes = $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -or $node -is [Management.Automation.Language.TypeDefinitionAst] -or $node -is [Management.Automation.Language.MemberAst] }, $true)
+    $items = foreach ($node in $nodes) {
+        if ($node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Parent -is [Management.Automation.Language.FunctionMemberAst]) {
+            continue
+        }
+        $names = [Collections.Generic.List[string]]::new()
+        for ($parent = $node; $parent; $parent = $parent.Parent) {
+            if ($parent -is [Management.Automation.Language.FunctionDefinitionAst] -or $parent -is [Management.Automation.Language.TypeDefinitionAst] -or $parent -is [Management.Automation.Language.MemberAst]) {
+                $names.Insert(0, $parent.Name)
+            }
+        }
+        $kind = switch ($node) {
+            { $_ -is [Management.Automation.Language.FunctionDefinitionAst] } {
+                $_.IsFilter ? 'filter' : 'function'
+            }
+            { $_ -is [Management.Automation.Language.TypeDefinitionAst] } {
+                $_.IsEnum ? 'enum' : ($_.IsInterface ? 'interface' : 'class')
+            }
+            { $_ -is [Management.Automation.Language.FunctionMemberAst] } {
+                $_.IsConstructor ? 'constructor' : 'method'
+            }
+            default {
+                $_.Parent.IsEnum ? 'value' : 'property'
+            }
+        }
+        $parameters = $node -is [Management.Automation.Language.FunctionDefinitionAst] ? @($node.Body.ParamBlock.Parameters + $node.Parameters | Where-Object { $_ }) : ($node -is [Management.Automation.Language.FunctionMemberAst] ? @($node.Parameters) : @())
+        [pscustomobject]@{ Name = $names -join '.'; Kind = $kind; StartLine = $node.Extent.StartLineNumber; EndLine = $node.Extent.EndLineNumber; Parameters = @($parameters | ForEach-Object { '$' + $_.Name.VariablePath.UserPath }) }
+    }
+    [pscustomobject]@{ Items = @($items); ParseErrors = @($errors).Count }
+}
 function Add-PackToolDiagnostics {
     param($Tool, [string]$text, [string]$formatNote)
     if ([IO.Path]::GetExtension($Tool.Path) -in @('.ps1', '.psm1', '.psd1')) {

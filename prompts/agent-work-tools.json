@@ -1,0 +1,54 @@
+[
+  {
+    "Name": "update_plan",
+    "Description": "Keep a short checklist plan for a multi-step task; skip it for simple tasks.\nEach call replaces the plan. Keep at most one step in_progress, mark steps completed when done, and finish or drop every step before answering.",
+    "Parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "explanation": { "type": "string", "description": "Optional reason the plan changed." },
+        "plan": {
+          "type": "array",
+          "description": "1-20 ordered steps.",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["step", "status"],
+            "properties": {
+              "step": { "type": "string" },
+              "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] }
+            }
+          }
+        }
+      },
+      "required": ["plan"]
+    }
+  },
+  {
+    "Name": "view_file_outline",
+    "Description": "List a PowerShell file's functions, classes, enums and members with dotted names (Outer.Inner, Class.Method), parameters and line ranges.\nDoes not count as viewing the file for edits.",
+    "Parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "AbsolutePath": { "type": "string", "description": "Absolute or workspace-relative .ps1 or .psm1 path." }
+      },
+      "required": ["AbsolutePath"]
+    }
+  },
+  {
+    "Name": "view_code_item",
+    "Description": "Show up to 5 named items of a PowerShell file with line numbers.\nUse names as view_file_outline lists them (case-insensitive). Counts as viewing the file for edits.",
+    "Parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "File": { "type": "string", "description": "Absolute or workspace-relative .ps1 or .psm1 path." },
+        "NodePaths": { "type": "array", "description": "1-5 item names.", "minItems": 1, "maxItems": 5, "items": { "type": "string" } }
+      },
+      "required": ["File", "NodePaths"]
+    }
+  }
+]

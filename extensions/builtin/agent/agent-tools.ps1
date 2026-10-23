@@ -4,6 +4,8 @@
 . (Join-Path $PSScriptRoot 'agent-presentation.ps1')
 . (Join-Path $PSScriptRoot 'agent-tasks.ps1')
 . (Join-Path $PSScriptRoot 'agent-search.ps1')
+. (Join-Path $PSScriptRoot 'agent-work.ps1')
+. (Join-Path $PSScriptRoot 'agent-rewind.ps1')
 $script:PackToolOperations = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
 $script:PackToolObservations = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
 function ConvertFrom-PackToolArguments {
@@ -92,7 +94,7 @@ function Format-PackToolReview {
     $candidate = $tool.Candidate
     $parts = @("Tool: $($tool.Context.PSObject.Properties['PresentedCall'] ? $tool.Context.PresentedCall.Name : $tool.Call.Name); call: $($tool.Call.Id)", "Root: $($candidate.ContextRoot)", "Source SHA-256: $($candidate.SourceHash)")
     foreach ($file in $candidate.Files) {
-        $parts += "$($file.Path)`nBefore: $($file.BeforeHash); exists: $($file.BeforeExists)`nAfter: $($file.FinalHash)`n--- current`n$([Text.Encoding]::UTF8.GetString([byte[]]$file.BeforeBytes))`n+++ proposed`n$([Text.Encoding]::UTF8.GetString([byte[]]$file.FinalBytes))"
+        $parts += "$($file.Path)`nBefore: $($file.BeforeHash); exists: $($file.BeforeExists)`nAfter: $($false -eq $file['FinalExists'] ? 'deleted' : $file.FinalHash)`n--- current`n$([Text.Encoding]::UTF8.GetString([byte[]]$file.BeforeBytes))`n+++ proposed`n$([Text.Encoding]::UTF8.GetString([byte[]]$file.FinalBytes))"
     }
     if ($candidate.Command) {
         if ($tool.CommandCwd) {
@@ -188,7 +190,7 @@ function Complete-PackToolCall {
     }
     $directoryRules = $status -ceq 'ok' -and $Call.Name -cin @('read', 'edit', 'write') -and $Call.Arguments -is [Collections.IDictionary] ? (Get-PackDirectoryRules $Context $Call) : ''
     $contextKey = ''
-    if ($status -cne 'cancelled' -and $Call.Name -cin @('read', 'search', 'pwsh') -and $Call.Arguments -is [Collections.IDictionary]) {
+    if ($status -cne 'cancelled' -and $Call.Name -cin @('read', 'search', 'pwsh', 'view_file_outline', 'view_code_item') -and $Call.Arguments -is [Collections.IDictionary]) {
         # An identical later read, search or command supersedes this result when the engine compacts the run.
         $arguments = [ordered]@{}
         foreach ($entry in @($Call.Arguments.GetEnumerator() | Sort-Object Key)) {
@@ -444,15 +446,7 @@ function Invoke-PackToolCall {
     }
     $tool.Observations = $null
     if ($lease) {
-        $observed = $null
-        if (-not $script:PackToolObservations.TryGetValue($lease, [ref]$observed)) {
-            $comparer = $IsWindows ? [StringComparer]::OrdinalIgnoreCase : [StringComparer]::Ordinal
-            $observed = @{ Root = $tool.Root; SessionId = $tool.SessionId; Hashes = [Collections.Generic.Dictionary[string, object]]::new($comparer); Changed = [Collections.Generic.Dictionary[string, object]]::new($comparer) }
-            $script:PackToolObservations.Add($lease, $observed)
-        }
-        if ($observed.Root -cne $tool.Root -or $observed.SessionId -cne $tool.SessionId) {
-            throw 'Observed file scope changed during the run.'
-        }
+        $observed = Get-PackRunObservations $Context $tool.Root
         $tool.Observations = $observed.Hashes; $tool.Changed = $observed.Changed
     }
     $values = @($Call.Arguments.Values)
@@ -469,6 +463,9 @@ function Invoke-PackToolCall {
     if ($tool.Spec.Schema.ContainsKey('path')) {
         $limit = $Call.Arguments.path.StartsWith('skill:', [StringComparison]::Ordinal) ? [Math]::Min(32768, $state.Config.'Agent.MaxFileBytes') : $state.Config.'Agent.MaxFileBytes'
         $tool.File = Read-HarnessTextFile $tool.Path $limit -AllowMissing -NoHardLinks
+    }
+    if ($run -and $tool.Spec.Execute) {
+        Start-PackRewind $Context $run $tool.Root
     }
     & $tool.Spec.Prepare $tool
     Assert-PackToolContext $tool
@@ -583,6 +580,9 @@ function Invoke-PackToolApproval {
             # The completion review compares against the text before this run's first change.
             $tool.Changed[$tool.Path] = @{ Relative = $tool.Call.Arguments.path; Text = ($tool.File.Exists ? $tool.File.Text : $null) }
         }
+        if ($result.Status -ceq 'ok' -and $tool.Run -and $tool.Files.Count) {
+            Add-PackRewindEntry $tool
+        }
         if ($result.Data.PSObject.Properties['TaskState'] -and $result.Data.TaskState -ceq 'running') {
             $control.DetachRunning($Context.State, $tool.Flow)
         }
@@ -625,6 +625,8 @@ $script:PackTools = @{
     pwsh  = @{ Description = "Run PowerShell in the context directory to search, build, test and inspect files. Unhandled cmdlet errors stop execution; handle expected failures explicitly. Check exit codes and stderr.`nRecursive search: Get-ChildItem -Recurse -File -Filter *.ps1 | Select-String -Pattern ...; ** is not recursive. Large output retains the head and tail; narrow commands to focus it."; Schema = @{ command = @{ Kind = 'String'; Min = 1; Max = 65536; Nonblank = $true; Description = 'Exact PowerShell source. Prefer bounded text output and focused checks.' } }; Prepare = ${function:New-PackToolCommand}; Execute = ${function:Invoke-PackToolProcess}; Role = 'tool-result' }
 }
 $script:PackTools.search = @{ Description = "Search permitted workspace files with bounded numbered matches; prefer it to shell searches.`nExact/regex mode is on unless the user disables it; ranked mode must be enabled by the user."; Schema = @{ query = @{ Kind = 'String'; Min = 1; Max = 4096; Nonblank = $true }; scope = @{ Kind = 'String'; Min = 1; Max = 4096; Default = '.' }; mode = @{ Kind = 'String'; Pattern = '\A(exact|ranked)\z'; Default = 'exact' }; regex = @{ Kind = 'Boolean'; Default = $false }; ignore_case = @{ Kind = 'Boolean'; Default = $false }; includes = @{ Kind = 'String'; Max = 1024; Default = '*' }; per_line = @{ Kind = 'Boolean'; Default = $true } }; Role = 'tool-read' }
+# /undo reuses the reviewed file-change flow; it is never advertised to models.
+$script:PackTools.undo = @{ Description = 'Restore files changed by the latest agent run.'; Schema = @{}; Prepare = ${function:New-PackUndoChange}; Execute = ${function:Invoke-PackUndoChange}; Role = 'tool-result' }
 $script:PackTools.read.Schema.content_offset = @{ Kind = 'Number'; Min = 0; Max = 1048576; Default = 0; Description = 'Optional UTF-8 byte offset for a truncated view.' }
 $script:PackTools.edit.Schema.allow_multiple = @{ Kind = 'Boolean'; Default = $false; Description = 'Replace all exact matches within the line anchors.' }
 $script:PackTools.edit.Schema.before.Optional = $true
@@ -634,10 +636,11 @@ $script:PackTools.read.Schema.path.Description = 'Context-relative literal file,
 function Get-PackCompletionReview {
     param($Context)
     $observed = $null
-    if (-not $Context.State.Config.'Agent.CompletionReview' -or -not $script:PackToolObservations.TryGetValue($Context.AgentLease, [ref]$observed)) {
+    if (-not $Context.State.Config.'Agent.CompletionReview') {
         return
     }
-    $findings = foreach ($entry in @($observed.Changed.GetEnumerator())) {
+    $changed = $script:PackToolObservations.TryGetValue($Context.AgentLease, [ref]$observed) ? @($observed.Changed.GetEnumerator()) : @()
+    $findings = foreach ($entry in $changed) {
         try {
             $null = Resolve-PackToolPath $Context.State $observed.Root $entry.Value.Relative $Context
             $file = Read-HarnessTextFile $entry.Key $Context.State.Config.'Agent.MaxFileBytes' -AllowMissing -NoHardLinks
@@ -651,9 +654,17 @@ function Get-PackCompletionReview {
             $Context.CancellationToken.ThrowIfCancellationRequested()
         }
     }
+    $parts = @()
     if ($findings) {
         $excerpt = Get-PackToolExcerpt ($script:Harness.OperationControl.ProtectText($Context.State, (@($findings) -join "`n"))) 4096
-        "<EPHEMERAL_MESSAGE>`nBefore finishing: checks of the files you changed in this run report problems your changes introduced.`n$($excerpt.Text)`nFix them with focused edits and rerun the relevant check, or state why each should remain. Then give your final answer.`n</EPHEMERAL_MESSAGE>"
+        $parts += "checks of the files you changed in this run report problems your changes introduced.`n$($excerpt.Text)`nFix them with focused edits and rerun the relevant check, or state why each should remain."
+    }
+    $open = @(Get-PackOpenPlanSteps $Context)
+    if ($open.Count) {
+        $parts += "your plan still has unfinished steps.`n$($open -join "`n")`nFinish them, or call update_plan to mark what is done and say in your answer what remains."
+    }
+    if ($parts) {
+        "<EPHEMERAL_MESSAGE>`nBefore finishing: $($parts -join "`nAlso, ") Then give your final answer.`n</EPHEMERAL_MESSAGE>"
     }
 }
 function Register-PackAgentRuntime {
@@ -723,5 +734,5 @@ function Register-PackAgentRuntime {
             if ($Parsed.CodeBlocks.Count -eq 1) {
                 New-HarnessToolCall -Id ([guid]::NewGuid().ToString('N')) -Name pwsh -Arguments @{ command = $Parsed.CodeBlocks[0].Code }
             }
-        }, $script:PackAgentPrompt, { param($Context, $Mode) Update-PackAgentTasks $Context $Mode }, @($script:PackPresentedSchemas), @('read', 'search', 'view_file', 'grep_search', 'codebase_search'), { param($Context) Get-PackCompletionReview $Context })
+        }, $script:PackAgentPrompt, { param($Context, $Mode) Update-PackAgentTasks $Context $Mode }, @($script:PackPresentedSchemas), @('read', 'search', 'view_file', 'grep_search', 'codebase_search', 'update_plan', 'view_file_outline', 'view_code_item'), { param($Context) Get-PackCompletionReview $Context })
 }

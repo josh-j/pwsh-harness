@@ -2,10 +2,14 @@
 $script:PackPromptRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../prompts'))
 $script:PackPresentedSchemas = Get-Content -LiteralPath (Join-Path $script:PackPromptRoot 'agent-tools.json') -Raw | ConvertFrom-Json -AsHashtable
 $script:PackSearchSchemas = Get-Content -LiteralPath (Join-Path $script:PackPromptRoot 'agent-search-tools.json') -Raw | ConvertFrom-Json -AsHashtable
-$script:PackPresentedSchemas = @($script:PackPresentedSchemas) + @($script:PackSearchSchemas)
+$script:PackWorkSchemas = Get-Content -LiteralPath (Join-Path $script:PackPromptRoot 'agent-work-tools.json') -Raw | ConvertFrom-Json -AsHashtable
+$script:PackPresentedSchemas = @($script:PackPresentedSchemas) + @($script:PackSearchSchemas) + @($script:PackWorkSchemas)
 $script:PackAgentPrompt = Get-Content -LiteralPath (Join-Path $script:PackPromptRoot 'agent.md') -Raw
 # Retired agy fields that the model may still send: accepted and ignored, never advertised.
 $script:PackRetiredArguments = @{ run_command = @('BypassSandbox'); replace_file_content = @('TargetLintErrorIds'); write_to_file = @('ArtifactMetadata') }
+foreach ($name in $script:PackWorkSchemas.Name) {
+    $script:PackRetiredArguments[$name] = @('toolAction', 'toolSummary')
+}
 $script:PackShellNotes = @{
     bash       = 'For multiline PowerShell from bash, write a .ps1 file with a quoted here-doc and run `pwsh -NoLogo -NoProfile -File <script>`. Do not use `-Command -`: an unterminated stdin block can exit 0 without executing. '
     PowerShell = 'CommandLine is PowerShell source and may span several lines; call native tools directly and check $LASTEXITCODE. Unhandled cmdlet errors stop the command. A RunPersistent terminal keeps loaded modules, so import edited modules with -Force. '
@@ -222,6 +226,12 @@ function Invoke-PackPresentedTool {
         manage_task {
             return Invoke-PackAgentTask $Context $Call
         }
+        update_plan {
+            return Update-PackRunPlan $Context $Call
+        }
+        { $_ -cin @('view_file_outline', 'view_code_item') } {
+            return Invoke-PackCodeNavigation $Context $Call
+        }
     }
     $copy = New-PackPresentedContext $Context $Call
     $legacy = ConvertFrom-PackToolArguments $mapped.Name ($mapped.Arguments | ConvertTo-Json -Depth 10 -Compress) $Call.Id
@@ -283,7 +293,7 @@ function Format-PackPresentedResult {
         { $_ -cin @('grep_search', 'codebase_search') } {
             $Data | ConvertTo-Json -Depth 10 -Compress
         }
-        manage_task {
+        { $_ -cin @('manage_task', 'update_plan', 'view_file_outline', 'view_code_item') } {
             $Data.Output
         }
     }
@@ -298,14 +308,14 @@ function Add-PackAgentPrompt {
     $Request.AgentTools = @($Request.AgentTools | Where-Object { $_.Name -cne 'search' })
     if (Test-PackAgyPresentation $Request.Model) {
         $Request.Config.InputTokenReservePercent = 0
-        $schemas = @($script:PackPresentedSchemas | Where-Object { $_.Name -cnotin @('grep_search', 'codebase_search') } | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable)
+        $schemas = @($script:PackPresentedSchemas | Where-Object { $_.Name -cnotin (@($script:PackSearchSchemas.Name) + @($script:PackWorkSchemas.Name)) } | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable)
         $shell = Get-PackAgentShell $Request.Config
         foreach ($schema in $schemas) {
             $schema.Description = $schema.Description.Replace('{{OS}}', ($IsWindows ? 'Windows' : ($IsLinux ? 'linux' : 'macOS'))).Replace('{{SHELL}}', $shell).Replace('{{SHELL_NOTE}}', $script:PackShellNotes[$shell]).Replace('{{COMMAND_TIMEOUT}}', [string]$Request.Config.'Agent.CommandTimeoutSeconds')
         }
         $Request.AgentTools = @($schemas) + $registered
     }
-    $Request.AgentTools = @($Request.AgentTools) + @(Get-PackSearchSchemas $Request.Config -Presented:(Test-PackAgyPresentation $Request.Model))
+    $Request.AgentTools = @($Request.AgentTools) + @(Get-PackSearchSchemas $Request.Config -Presented:(Test-PackAgyPresentation $Request.Model)) + @(Get-PackWorkSchemas)
     $skills = $Request.Config.UseToolsApi ? (Format-PackSkillPrompt (Get-PackSkillCatalog $Request.State $Request.Pump) -Presented:(Test-PackAgyPresentation $Request.Model)) : ''
     $root = Get-PackOperationDirectory $Request.State
     $scratch = Get-PackRunScratch $Request.State

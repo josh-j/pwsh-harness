@@ -61,7 +61,12 @@ function Invoke-EngineOperationFiles {
                 $null = [IO.Directory]::CreateDirectory($parent)
             }
             $check = ${function:Invoke-EngineOperationTransition}
-            Write-HarnessAtomicFile $file.Path $file.FinalBytes { & $check $Store $Handle Check $Token $file }.GetNewClosure()
+            if ($false -eq $file['FinalExists']) {
+                [IO.File]::Delete($file.Path)
+            }
+            else {
+                Write-HarnessAtomicFile $file.Path $file.FinalBytes { & $check $Store $Handle Check $Token $file }.GetNewClosure()
+            }
             $written.Add($file)
         }
         if ($Complete) {
@@ -75,7 +80,7 @@ function Invoke-EngineOperationFiles {
             try {
                 $path = Resolve-EngineOperationPath $record.Candidate.ContextRoot $file.Path
                 $assert = ${function:Assert-EngineOperationTarget}
-                $expected = @{ Path = $path; BeforeExists = $true; BeforeBytes = $file.FinalBytes; BeforeHash = $file.FinalHash }
+                $expected = @{ Path = $path; BeforeExists = $false -ne $file['FinalExists']; BeforeBytes = $file.FinalBytes; BeforeHash = $file.FinalHash }
                 $validate = { & $assert $record.Candidate $expected }.GetNewClosure()
                 $null = & $validate
                 if ($file.BeforeExists) {

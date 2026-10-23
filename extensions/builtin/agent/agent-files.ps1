@@ -43,7 +43,9 @@ function ConvertFrom-PackEditHunks {
     , $hunks.ToArray()
 }
 function Resolve-PackToolPath {
-    param($State, [string]$Root, [string]$Path, $Context)
+    # -Inventory skips the per-path Git checks for a path taken from a Git listing that excluded ignored files,
+    # or from a walk of a root that a full check already found outside any repository.
+    param($State, [string]$Root, [string]$Path, $Context, [switch]$Inventory)
     if ($Path -match '[\p{Cc}\p{Cf}:]|^[\\/]|(^|[\\/])\.\.([\\/]|$)') {
         throw 'Tool path must be a bounded relative literal path without traversal, drives, providers or streams.'
     }
@@ -63,7 +65,7 @@ function Resolve-PackToolPath {
     if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($full))) {
         throw 'Tool file parents must already exist.'
     }
-    foreach ($protected in @($script:Harness.ConfigService.GetPath(), $State.Config.ConfigPath, $State.Config.SessionDirectory)) {
+    foreach ($protected in @($script:Harness.ConfigService.GetPath(), $State.Config.ConfigPath, $State.Config.SessionDirectory, (Get-PackRewindDirectory $State -Root))) {
         if ($protected -and ($full.Equals([IO.Path]::GetFullPath($protected), (Get-HarnessPathComparison)) -or
                 $full.StartsWith([IO.Path]::GetFullPath($protected).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar, (Get-HarnessPathComparison)))) {
             throw 'Protected configuration or session-store path.'
@@ -74,7 +76,7 @@ function Resolve-PackToolPath {
             [IO.Path]::GetFullPath($_, $Root).Equals($full, (Get-HarnessPathComparison))
         }).Count -gt 0
     $query = [pscustomobject]@{ Pump = $Context.Pump; CancellationToken = $Context.CancellationToken }
-    $repository = Invoke-PackService 'workspace.git' @($Root, @('rev-parse', '--is-bare-repository'), $query) -Required
+    $repository = $Inventory ? $null : (Invoke-PackService 'workspace.git' @($Root, @('rev-parse', '--is-bare-repository'), $query) -Required)
     if (($repository -and $repository.ExitCode -eq 0 -and $repository.Text.Trim() -ceq 'true') -or
         ([IO.File]::Exists((Join-Path $Root 'HEAD')) -and [IO.Directory]::Exists((Join-Path $Root 'objects')))) {
         throw 'Protected bare Git repository.'
@@ -100,7 +102,7 @@ function Resolve-PackToolPath {
                 throw 'Git ignored tool path requires explicit user inclusion.'
             }
         }
-        else {
+        elseif (-not $Inventory) {
             for ($p = $Root; $p; $p = [IO.Path]::GetDirectoryName($p)) {
                 $marker = Join-Path $p '.git'
                 if ([IO.File]::Exists($marker) -or [IO.File]::Exists((Join-Path $marker 'HEAD')) -or

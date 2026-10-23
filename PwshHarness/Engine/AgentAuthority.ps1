@@ -134,6 +134,7 @@ function New-EngineAgentControl {
     $root = ${function:Resolve-EngineAgentRoot}
     $snapshot = ${function:Get-EngineAgentSnapshot}
     $stopSuspended = ${function:Stop-EngineSuspendedAgent}
+    $transcript = ${function:Add-EngineTranscript}
     $control = [pscustomobject]@{}
     $control | Add-Member ScriptMethod GetState {
         param($Session)
@@ -271,6 +272,22 @@ function New-EngineAgentControl {
             throw 'Explicit Auto authority is required.'
         }
         $current.Run
+    }.GetNewClosure()
+    $control | Add-Member ScriptMethod Steer {
+        # Queue a user note for the active or approval-suspended run; it reaches the model before its next request.
+        param($Session, [string]$Text)
+        & $assertOwner $Store $Session
+        $record = & $getRecord $Store $Session
+        if (-not $record.Loop -or [string]::IsNullOrWhiteSpace($Text)) {
+            return $false
+        }
+        if ($Text.Length -gt 16384) {
+            throw 'A steering note is limited to 16384 characters.'
+        }
+        $note = $Store.Host.OperationControl.ProtectText($Session, $Text)
+        & $transcript $Session 'user' $note @{ Steering = $true; RunId = $record.Loop.Run.Id }
+        $record.Loop.Steering.Enqueue($note)
+        $true
     }.GetNewClosure()
     $control | Add-Member ScriptMethod EndRun {
         param($Session, $Lease)

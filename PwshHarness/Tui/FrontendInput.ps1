@@ -246,6 +246,7 @@ function Invoke-HarnessFrontendInput {
     if ($Text.Trim().StartsWith('/')) {
         $Text = $Text.Trim()
     }
+    $command = $Text.StartsWith('/')
     if ($Session.Busy -and $Text.StartsWith('/') -and $Text -notmatch '^/(approve|cancel|mode|agent|help|quit|exit)(?:\s|$)|^/config\s+set\s+Autonomy\s') {
         $HarnessHost.AddTranscript($Session, 'notice', 'Wait for the run to finish or press Esc.', $null)
         Set-HarnessViewSnapshot $View ($HarnessHost.GetConversationSnapshot($Session)) -Conversation
@@ -363,6 +364,12 @@ function Invoke-HarnessFrontendInput {
             return
         }
     }
+    if (-not $command -and $UserInitiated -and $HarnessHost.AgentControl.GetState($Session).HasRun -and $HarnessHost.AgentControl.Steer($Session, $Text)) {
+        # A run suspended for review takes the text as a steering note when it resumes.
+        $View.StatusBar.Text = 'Note queued for the agent run'
+        Set-HarnessViewSnapshot $View ($HarnessHost.GetConversationSnapshot($Session)) -Conversation
+        return
+    }
     $cancellation = [Threading.CancellationTokenSource]::new()
     $View.SessionView.Busy = $true
     $View.StatusBar.Text = 'Preparing request'
@@ -463,6 +470,13 @@ function Invoke-HarnessSafeFrontendInput {
     finally {
         $HarnessHost.Events.Unsubscribe('Notice', $noticeName)
     }
+    if ((Test-HarnessRecordProperty $Session.LastResult 'UndeliveredSteering') -and @($Session.LastResult.UndeliveredSteering).Count) {
+        $notes = @($Session.LastResult.UndeliveredSteering) + @($View.Editor.Text | Where-Object { $_ })
+        $Session.LastResult.UndeliveredSteering = @()
+        $View.Editor.Text = $notes -join "`n"; $View.Editor.Cursor = $View.Editor.Text.Length
+        $HarnessHost.AddTranscript($Session, 'notice', 'The run ended before the model saw your steering note; it is back in the input.', $null)
+        Set-HarnessViewSnapshot $View ($HarnessHost.GetConversationSnapshot($Session)) -Conversation
+    }
     $View.Commands = @($HarnessHost.Commands.List())
     if ($completed -and $pending.Ready -and $HarnessHost.Commands.Contains('continue') -and $UserInitiated -and $Text.Trim().StartsWith('/') -and
         -not $HarnessHost.AgentControl.GetState($Session).HasRun -and
@@ -517,6 +531,11 @@ function Read-HarnessFrontendBatch {
         $View.InputRevision++
         if ($action -and $action.Action -in @('Cancel', 'Quit') -and $Cancellation) {
             $Cancellation.Cancel()
+        }
+        elseif ($action -and $action.Action -ceq 'Send' -and $HarnessHost -and $View.SessionView.Busy -and -not $action.Prompt.TrimStart().StartsWith('/') -and
+            $HarnessHost.AgentControl.GetState($Session).HasRun -and $HarnessHost.AgentControl.Steer($Session, $action.Prompt)) {
+            # Text sent while a run works steers it instead of waiting for a new run.
+            $View.StatusBar.Text = 'Note queued for the agent run'; $View.Dirty = $true
         }
         elseif ($action -and $action.Action -in @('Send', 'Review', 'Shortcut')) {
             if ($action.Action -ceq 'Send' -and $action.Prompt.Trim() -match '^/(mode|agent)\s+\S|^/config\s+set\s+Autonomy\s') {
