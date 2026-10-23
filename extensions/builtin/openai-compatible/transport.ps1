@@ -177,6 +177,7 @@ function Invoke-HarnessHttpProvider {
                     $httpFailure.Data['FailureOrigin'] = 'ProviderResponse'
                     $delayAttempt = $managedRetry -and $Context.PSObject.Properties['AgentRetryAttempt'] ? $Context.AgentRetryAttempt : $attempt
                     $httpFailure.Data['RetryDelaySeconds'] = Get-HarnessRetryDelay $response $delayAttempt $config
+                    $httpFailure.Data['RetryAfterProvided'] = $null -ne $response.Headers.RetryAfter
                     if ($agent -and (Test-HarnessTransientFailure $httpFailure)) {
                         $httpFailure.Data['AgentStopReason'] = 'ProviderStall'
                     }
@@ -470,8 +471,10 @@ function Invoke-HarnessHttpProvider {
             if ($_.Exception.GetBaseException().Data.Contains('ProviderStatusCode')) {
                 $errorCause.Data['ProviderStatusCode'] = $_.Exception.GetBaseException().Data['ProviderStatusCode']
             }
-            if ($cause.Data.Contains('RetryDelaySeconds')) {
-                $errorCause.Data['RetryDelaySeconds'] = $cause.Data['RetryDelaySeconds']
+            foreach ($key in @('RetryDelaySeconds', 'RetryAfterProvided')) {
+                if ($cause.Data.Contains($key)) {
+                    $errorCause.Data[$key] = $cause.Data[$key]
+                }
             }
             $errorCause
         }

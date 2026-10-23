@@ -333,7 +333,13 @@ function Invoke-EngineAgentContinuation {
                     if ($loop.StopReason -or $cause.Data['AgentStopReason'] -ceq 'CostLimit') {
                         throw
                     }
-                    $retry = -not $cause.Data['OutputCallbackFailure'] -and $cause.Data['FailureOrigin'] -cne 'ClientCallback' -and ($cause.Data['AgentStopReason'] -in @('StreamStalled', 'ProviderStall') -or $cause.Data['ProviderStatusCode'] -in @(408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529)) -and $loop.StreamRetries -lt ($turn.Config.ContainsKey('Agent.RetryCount') ? $turn.Config.'Agent.RetryCount' : 2)
+                    # Rate limits outlast ordinary transient failures: two more retries on a fivefold schedule (retries off stays off).
+                    $rateLimited = $cause.Data['ProviderStatusCode'] -eq 429
+                    $retryLimit = $turn.Config.ContainsKey('Agent.RetryCount') ? $turn.Config.'Agent.RetryCount' : 2
+                    if ($rateLimited -and $retryLimit) {
+                        $retryLimit += 2
+                    }
+                    $retry = -not $cause.Data['OutputCallbackFailure'] -and $cause.Data['FailureOrigin'] -cne 'ClientCallback' -and ($cause.Data['AgentStopReason'] -in @('StreamStalled', 'ProviderStall') -or $cause.Data['ProviderStatusCode'] -in @(408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529)) -and $loop.StreamRetries -lt $retryLimit
                     $provider = $Store.Points.Providers[$turn.Config.Provider]
                     if ($provider -and $cause.Data['FailureOrigin'] -cne 'ClientCallback') {
                         Write-EngineFault $Store $provider.Extension $provider.Name $_ -Terminating:(-not $retry)
@@ -346,7 +352,12 @@ function Invoke-EngineAgentContinuation {
                     $turn.StitchedText = $retryPrefix; $State.StreamingText = $retryPrefix
                     $retryBase = $turn.Config.ContainsKey('RetryBaseSeconds') ? $turn.Config.RetryBaseSeconds : 1.0
                     $retryMax = $turn.Config.ContainsKey('RetryMaxSeconds') ? $turn.Config.RetryMaxSeconds : 30.0
-                    $seconds = $cause.Data.Contains('RetryDelaySeconds') ? [double]$cause.Data['RetryDelaySeconds'] : [Math]::Min($retryMax, $retryBase * [Math]::Pow(2, $loop.StreamRetries - 1))
+                    $providerDelay = $cause.Data.Contains('RetryDelaySeconds')
+                    if ($rateLimited -and -not $cause.Data['RetryAfterProvided']) {
+                        # Without Retry-After a rate limit needs longer than the ordinary transient schedule.
+                        $retryBase *= 5; $retryMax *= 2; $providerDelay = $false
+                    }
+                    $seconds = $providerDelay ? [double]$cause.Data['RetryDelaySeconds'] : [Math]::Min($retryMax, $retryBase * [Math]::Pow(2, $loop.StreamRetries - 1))
                     $rateSeconds = 0.0
                     if ($cause.Data['ProviderStatusCode'] -eq 429 -and $turn.Config.'RateLimit.TokensPerMinute' -gt 0) {
                         $rateSeconds = Get-EngineRateDelay $Store.RateWindow $turn.RateLimitTokens $turn.Config.'RateLimit.TokensPerMinute'

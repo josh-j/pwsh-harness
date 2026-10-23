@@ -77,6 +77,30 @@ function Format-PackToolSource {
     }
     @{ Text = $text; Note = $formatNote }
 }
+function Get-PackToolAnalyzerDiagnostics {
+    param($Tool, [string]$text)
+    try {
+        $before = @{}
+        if ($Tool.File.Exists) {
+            foreach ($d in @(Invoke-PackAnalyzer $Tool.File.Text $Tool.State.Config -Context $Tool.Context)) {
+                $key = "$($d.Severity)|$($d.RuleName)|$($d.Message)"; $before[$key] = [int]$before[$key] + 1
+            }
+        }
+        foreach ($d in @(Invoke-PackAnalyzer $text $Tool.State.Config -Context $Tool.Context)) {
+            $key = "$($d.Severity)|$($d.RuleName)|$($d.Message)"
+            if ($before[$key] -gt 0) {
+                $before[$key]--
+            }
+            elseif ([string]$d.Severity -in @('Error', 'Warning')) {
+                New-HarnessDiagnostic -Source Analyzer -Category Analyzer -Severity ([string]$d.Severity) -Code $d.RuleName -Message $d.Message -Line $d.Line -Column $d.Column
+            }
+        }
+    }
+    catch {
+        $Tool.Context.CancellationToken.ThrowIfCancellationRequested()
+        New-HarnessDiagnostic -Source Analyzer -Category Analyzer -Severity Info -Code AnalyzerSkipped -Message ('Changed-source analysis unavailable: ' + $_.Exception.Message)
+    }
+}
 function Add-PackToolDiagnostics {
     param($Tool, [string]$text, [string]$formatNote)
     if ([IO.Path]::GetExtension($Tool.Path) -in @('.ps1', '.psm1', '.psd1')) {
@@ -94,6 +118,10 @@ function Add-PackToolDiagnostics {
             }
         )
         $Tool.Risks = @($diagnostics.Message)
+        if (-not $check.ParseErrors.Count) {
+            # Lint feedback is not a risk: report only what this change introduced, under the workspace analyzer policy.
+            $diagnostics = @(Get-PackToolAnalyzerDiagnostics $Tool $text) + $diagnostics
+        }
         $feedback = (@($formatNote | Where-Object { $_ }) + @($diagnostics | Select-Object -First 12 | ForEach-Object { "$($_.Severity) $($_.Code) line $($_.Line): $($_.Message)" })) -join "`n"
         $excerpt = Get-PackToolExcerpt ($script:Harness.OperationControl.ProtectText($Tool.State, $feedback)) 2048
         $Tool.Data.diagnostics = $excerpt.Text
