@@ -1,9 +1,9 @@
 #Requires -Version 7.6
 # Run rewind: snapshot the workspace's permitted files at an agent run's first change and again when it stops,
-# so /undo can reverse the latest changing run's file and command changes. Content is stored by SHA-256 in
-# private session data (in memory for sessions that are not persisted); only the latest changing run is kept.
+# so /undo can reverse the latest changing runs' file and command changes. Content is stored by SHA-256 in
+# private session data (in memory for sessions that are not persisted); the latest changing runs are kept as checkpoints.
 $script:PackRewind = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
-$script:PackRewindMaxFiles = 20000
+$script:PackRewindCheckpoints = 5
 function Get-PackRewindDirectory {
     param($State, [switch]$Root)
     if (-not $State.Config.DataDirectory) {
@@ -17,12 +17,14 @@ function Get-PackRewindRecord {
     $record = $null
     if (-not $script:PackRewind.TryGetValue([string]$State.SessionId, [ref]$record)) {
         $comparer = $IsWindows ? [StringComparer]::OrdinalIgnoreCase : [StringComparer]::Ordinal
-        $record = @{ Active = $null; Kept = $null; Cache = [Collections.Generic.Dictionary[string, object]]::new($comparer); Blobs = [Collections.Generic.Dictionary[string, byte[]]]::new([StringComparer]::Ordinal) }
+        $record = @{ Active = $null; Checkpoints = [Collections.Generic.List[object]]::new(); Cache = [Collections.Generic.Dictionary[string, object]]::new($comparer); Blobs = [Collections.Generic.Dictionary[string, byte[]]]::new([StringComparer]::Ordinal) }
         $directory = Get-PackRewindDirectory $State
         $journal = $directory ? (Join-Path $directory 'journal.json') : ''
         if ($journal -and [IO.File]::Exists($journal)) {
-            # A resumed session keeps its latest changing run.
-            $record.Kept = Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
+            # A resumed session keeps its checkpoints; a single-run journal is one checkpoint.
+            foreach ($checkpoint in @(Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json)) {
+                $record.Checkpoints.Add($checkpoint)
+            }
         }
         $script:PackRewind[[string]$State.SessionId] = $record
     }
@@ -78,24 +80,6 @@ function Read-PackRewindBlob {
         , [byte[]]$bytes
     }
 }
-function Get-PackRewindListing {
-    param($State, [string]$Root, $Context)
-    # One full policy check of the root (bare repositories, unverifiable Git markers) covers the -Inventory checks below.
-    $null = Resolve-PackToolPath $State $Root '.pwsh-harness-rewind-probe' $Context
-    $query = [pscustomobject]@{ Pump = $Context.Pump; CancellationToken = $Context.CancellationToken }
-    $repository = Invoke-PackService 'workspace.git' @($Root, @('rev-parse', '--is-bare-repository'), $query) -Required
-    if ($repository -and $repository.ExitCode -eq 0) {
-        $listed = Invoke-PackService 'workspace.git' @($Root, @('ls-files', '-z', '--cached', '--others', '--exclude-standard'), $query) -Required
-        $ignored = Invoke-PackService 'workspace.git' @($Root, @('ls-files', '-z', '--cached', '--ignored', '--exclude-standard'), $query) -Required
-        if (-not $listed -or $listed.ExitCode -ne 0 -or -not $ignored -or $ignored.ExitCode -ne 0) {
-            throw 'Cannot list the workspace for the rewind snapshot.'
-        }
-        $skip = [Collections.Generic.HashSet[string]]::new([string[]]@($ignored.Text -split "`0"), [StringComparer]::Ordinal)
-        return @($listed.Text -split "`0" | Where-Object { $_ -and -not $skip.Contains($_) })
-    }
-    $options = [IO.EnumerationOptions]@{ RecurseSubdirectories = $true; AttributesToSkip = [IO.FileAttributes]::ReparsePoint; IgnoreInaccessible = $true }
-    @([IO.Directory]::EnumerateFiles($Root, '*', $options) | Select-Object -First ($script:PackRewindMaxFiles + 1) | ForEach-Object { ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Root, $_)) })
-}
 function Get-PackRewindScan {
     # Hash the required paths and, unless -RequiredOnly, the permitted workspace files within the bounds,
     # reusing the hash of a file whose size and write time are unchanged and not racily recent.
@@ -105,7 +89,7 @@ function Get-PackRewindScan {
     $files = [ordered]@{}
     $needed = [Collections.Generic.HashSet[string]]::new([string[]]$Required, $Record.Cache.Comparer)
     $partial = $limit -le 0 -or $RequiredOnly
-    $names = @($Required) + @($partial ? @() : (Get-PackRewindListing $State $Root $Context))
+    $names = @($Required) + @($partial ? @() : (Get-PackWorkspaceListing $State $Root $Context))
     $total = 0L; $count = 0
     $now = [datetime]::UtcNow
     foreach ($name in $names) {
@@ -123,7 +107,7 @@ function Get-PackRewindScan {
                 }
                 continue
             }
-            if (-not $isRequired -and ($count -ge $script:PackRewindMaxFiles -or $info.Length -gt $maxFile -or $total + $info.Length -gt $limit)) {
+            if (-not $isRequired -and ($count -ge $script:PackWorkspaceMaxFiles -or $info.Length -gt $maxFile -or $total + $info.Length -gt $limit)) {
                 $partial = $true
                 continue
             }
@@ -157,7 +141,9 @@ function Start-PackRewind {
     if ($record.Active -and $record.Active.RunId -ceq $Run.Id) {
         return
     }
-    $record.Active = @{ RunId = $Run.Id; Root = $Root; State = [WeakReference]::new($Context.State); Start = [ordered]@{}; Partial = $true; Error = '' }
+    $record.Active = @{ RunId = $Run.Id; Root = $Root; State = [WeakReference]::new($Context.State); Start = [ordered]@{}; Partial = $true; Error = ''
+        Prompt = [string]$Context.State.LastPrompt; Time = [datetime]::UtcNow.ToString('o')
+    }
     try {
         $scan = Get-PackRewindScan $Context.State $record $Root $Context -Copy
         $record.Active.Start = $scan.Files; $record.Active.Partial = $scan.Partial
@@ -171,10 +157,11 @@ function Add-PackRewindEntry {
     # A write or edit always records its prior content, even when the start snapshot is partial or disabled.
     param($Tool)
     $record = Get-PackRewindRecord $Tool.State
-    $name = ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Tool.Root, $Tool.Path))
-    if ($record.Active -and $record.Active.RunId -ceq $Tool.Run.Id -and -not $record.Active.Start.Contains($name)) {
-        $file = $Tool.Files[0]
-        $record.Active.Start[$name] = $file.BeforeExists ? (Save-PackRewindBlob $Tool.State $record ([byte[]]$file.BeforeBytes)) : $null
+    foreach ($file in $Tool.Files) {
+        $name = ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Tool.Root, $file.Path))
+        if ($record.Active -and $record.Active.RunId -ceq $Tool.Run.Id -and -not $record.Active.Start.Contains($name)) {
+            $record.Active.Start[$name] = $file.BeforeExists ? (Save-PackRewindBlob $Tool.State $record ([byte[]]$file.BeforeBytes)) : $null
+        }
     }
 }
 function Stop-PackRewind {
@@ -205,20 +192,31 @@ function Stop-PackRewind {
                 [pscustomobject]@{ Path = $name; Start = $before; End = $after }
             }
         })
-    $directory = Get-PackRewindDirectory $state
     if ($changes.Count) {
-        $record.Kept = [pscustomobject]@{ RunId = $active.RunId; Root = $active.Root; Partial = $active.Partial; Error = $active.Error; Changes = $changes }
-        if ($directory) {
-            Write-PackRewindFile (Join-Path $directory 'journal.json') ([Text.Encoding]::UTF8.GetBytes(($record.Kept | ConvertTo-Json -Depth 5 -Compress)))
+        $record.Checkpoints.Add([pscustomobject]@{ RunId = $active.RunId; Root = $active.Root; Partial = $active.Partial; Error = $active.Error; Prompt = $active.Prompt; Time = $active.Time; Changes = $changes })
+        if ($record.Checkpoints.Count -gt $script:PackRewindCheckpoints) {
+            $record.Checkpoints.RemoveRange(0, $record.Checkpoints.Count - $script:PackRewindCheckpoints)
         }
+        Save-PackRewindJournal $state $record
     }
     Remove-PackRewindBlobs $state $record
 }
+function Save-PackRewindJournal {
+    param($State, $Record)
+    $directory = Get-PackRewindDirectory $State
+    $journal = $directory ? (Join-Path $directory 'journal.json') : ''
+    if ($journal -and $Record.Checkpoints.Count) {
+        Write-PackRewindFile $journal ([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Record.Checkpoints.ToArray() -Depth 5 -Compress)))
+    }
+    elseif ($journal -and [IO.File]::Exists($journal)) {
+        [IO.File]::Delete($journal)
+    }
+}
 function Remove-PackRewindBlobs {
-    # Keep the kept run's prior content and the latest scanned content, so the next snapshot copies only changes.
+    # Keep the checkpoints' prior content and the latest scanned content, so the next snapshot copies only changes.
     param($State, $Record)
     $keep = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach ($hash in @($Record.Kept ? @($Record.Kept.Changes.Start) : @()) + @($Record.Cache.Values.Hash)) {
+    foreach ($hash in @($Record.Checkpoints.Changes.Start) + @($Record.Cache.Values.Hash)) {
         if ($hash) {
             $null = $keep.Add($hash)
         }
@@ -243,18 +241,31 @@ function Remove-PackRewindBlobs {
     }
 }
 function New-PackUndoChange {
+    # Restore the files the latest Arguments.runs checkpoints changed to their content before the oldest of them.
     param($Tool)
     $record = Get-PackRewindRecord $Tool.State
-    $kept = $record.Kept
-    if (-not $kept -or -not @($kept.Changes).Count) {
+    $runs = [int]$Tool.Call.Arguments.runs
+    if (-not $record.Checkpoints.Count) {
         throw 'No agent run in this session has file changes to undo.'
     }
-    if (-not [string]::Equals($kept.Root, $Tool.Root, (Get-HarnessPathComparison))) {
-        throw 'The context directory changed since that agent run.'
+    if ($runs -gt $record.Checkpoints.Count) {
+        throw "Only $($record.Checkpoints.Count) agent runs in this session have file changes to undo; see /undo list."
     }
-    $Tool.Kept = $kept
-    $Tool.Data = @{ restored = @(); deleted = @(); skipped = @() }
-    $Tool.Files = @(foreach ($change in $kept.Changes) {
+    $Tool.Checkpoints = $record.Checkpoints.GetRange($record.Checkpoints.Count - $runs, $runs).ToArray()
+    $changes = [ordered]@{}
+    foreach ($checkpoint in $Tool.Checkpoints) {
+        if (-not [string]::Equals($checkpoint.Root, $Tool.Root, (Get-HarnessPathComparison))) {
+            throw 'The context directory changed since that agent run.'
+        }
+        foreach ($change in $checkpoint.Changes) {
+            if (-not $changes.Contains($change.Path)) {
+                $changes[$change.Path] = [pscustomobject]@{ Path = $change.Path; Start = $change.Start; End = $null }
+            }
+            $changes[$change.Path].End = $change.End
+        }
+    }
+    $Tool.Data = @{ runs = $runs; restored = @(); deleted = @(); skipped = @() }
+    $Tool.Files = @(foreach ($change in @($changes.Values).Where({ $_.Start -cne $_.End })) {
             try {
                 $path = Resolve-PackToolPath $Tool.State $Tool.Root $change.Path $Tool.Context
                 $current = Read-HarnessFileBytes $path $Tool.State.Config.'Agent.MaxFileBytes' -AllowMissing -NoHardLinks
@@ -280,32 +291,50 @@ function New-PackUndoChange {
             }
         })
     if (-not $Tool.Files.Count) {
-        throw "Nothing from the last agent run can be undone. $($Tool.Data.skipped -join '; ')"
+        throw "Nothing from the selected agent runs can be undone. $($Tool.Data.skipped -join '; ')"
     }
     $Tool.Risks = @($Tool.Data.skipped | ForEach-Object { "Not restored: $_" })
-    if ($kept.Partial) {
-        $Tool.Risks += "The run's snapshot was partial or unavailable$($kept.Error ? " ($($kept.Error))" : ''); files outside it (beyond Agent.RewindMaxBytes or 20000 files) are not restored."
+    foreach ($checkpoint in @($Tool.Checkpoints).Where({ $_.Partial })) {
+        $Tool.Risks += "The run's snapshot was partial or unavailable$($checkpoint.Error ? " ($($checkpoint.Error))" : ''); files outside it (beyond Agent.RewindMaxBytes or 20000 files) are not restored."
     }
 }
 function Invoke-PackUndoChange {
     param($Tool, $Context)
     $data = Invoke-PackToolFileChange $Tool $Context
     $record = Get-PackRewindRecord $Tool.State
-    if ([object]::ReferenceEquals($record.Kept, $Tool.Kept)) {
-        $record.Kept = $null
-        $directory = Get-PackRewindDirectory $Tool.State
-        if ($directory -and [IO.File]::Exists((Join-Path $directory 'journal.json'))) {
-            [IO.File]::Delete((Join-Path $directory 'journal.json'))
+    for ($i = $record.Checkpoints.Count - 1; $i -ge 0; $i--) {
+        if (@($Tool.Checkpoints).Where({ [object]::ReferenceEquals($_, $record.Checkpoints[$i]) }).Count) {
+            $record.Checkpoints.RemoveAt($i)
         }
     }
+    Save-PackRewindJournal $Tool.State $record
     $data
+}
+function Format-PackUndoList {
+    param($State)
+    $checkpoints = (Get-PackRewindRecord $State).Checkpoints
+    if (-not $checkpoints.Count) {
+        return 'No agent run in this session has file changes to undo.'
+    }
+    $lines = for ($i = $checkpoints.Count - 1; $i -ge 0; $i--) {
+        $checkpoint = $checkpoints[$i]
+        $prompt = ((ConvertTo-HarnessSafeText ([string]$checkpoint.Prompt)) -replace '\s+', ' ').Trim()
+        $prompt = $prompt.Length -gt 60 ? $prompt.Substring(0, 59) + '…' : $prompt
+        $time = $checkpoint.Time ? ([datetime]::Parse([string]$checkpoint.Time, [Globalization.CultureInfo]::InvariantCulture, 'RoundtripKind').ToLocalTime().ToString('yyyy-MM-dd HH:mm')) : 'resumed'
+        "$($checkpoints.Count - $i). $time $(@($checkpoint.Changes).Count) file(s): $prompt"
+    }
+    (@('Agent runs with file changes, newest first; /undo N restores files to before run N.') + $lines) -join "`n"
 }
 function Invoke-PackUndoCommand {
     param($Context)
-    if ($Context.Arguments) {
-        throw 'Use /undo without arguments.'
+    if ($Context.Arguments -ceq 'list') {
+        return (Format-PackUndoList $Context.State)
     }
-    $call = New-HarnessFrozen (New-HarnessToolCall -Id ([guid]::NewGuid().ToString('N')) -Name undo -Arguments @{})
+    if ($Context.Arguments -and $Context.Arguments -cnotmatch "\A[1-$script:PackRewindCheckpoints]\z") {
+        throw "Use /undo, /undo N (1-$script:PackRewindCheckpoints) or /undo list."
+    }
+    $runs = $Context.Arguments ? [int]$Context.Arguments : 1
+    $call = New-HarnessFrozen (New-HarnessToolCall -Id ([guid]::NewGuid().ToString('N')) -Name undo -Arguments @{ runs = $runs })
     try {
         Invoke-PackToolCall $Context $call
     }

@@ -10,7 +10,7 @@ function New-HarnessToolViewRecord {
     param($Call, $Result = $null, [string]$Status = 'running', $Preview = $null)
     $arguments = Get-HarnessDisplayValue $Call Arguments
     $argument = ''
-    foreach ($name in @('CommandLine', 'command', 'AbsolutePath', 'TargetFile', 'path', 'query', 'Query', 'task_id')) {
+    foreach ($name in @('CommandLine', 'command', 'AbsolutePath', 'TargetFile', 'File', 'path', 'query', 'Query', 'Name', 'Task', 'task_id')) {
         $argument = Get-HarnessDisplayValue $arguments $name
         if ($argument) {
             break

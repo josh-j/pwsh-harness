@@ -410,7 +410,7 @@ function Get-HarnessRenderModel {
             $bar.LogText -replace '\s*\(F12\)', ''
         }
     )
-    $suffix = (@($bar.Steps; $runState) | Where-Object { $_ }) -join $separator
+    $suffix = (@($bar.Steps; $runState; $bar.Plan) | Where-Object { $_ }) -join $separator
     $prefix = $bar.Mode + $separator
     $available = [math]::Max(0, $Width - (Get-HarnessTextWidth ($prefix + $separator + $suffix)))
     $middle = Get-HarnessSingleLine (($fields | Where-Object { $_ }) -join $separator) $available $bar.Ascii

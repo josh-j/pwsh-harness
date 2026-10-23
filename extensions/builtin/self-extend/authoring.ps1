@@ -85,7 +85,7 @@ function Get-AuthoringPreview {
                 }
                 [pscustomobject]@{ Name = $_; Lines = (Get-AuthoringLines $code).Count }
             })
-        Diagnostics = @($Stage.Diagnostics.ToArray()); Capabilities = @($Stage.Capabilities); Diff = $Stage.Diff
+        Diagnostics = @($Stage.Diagnostics.ToArray()); Capabilities = @($Stage.Capabilities); CapabilityChanges = $Stage['CapabilityChanges']; Diff = $Stage.Diff
     } | ConvertTo-Json -Depth 30 | ConvertFrom-Json
 }
 function New-AuthoringStage {
@@ -165,6 +165,17 @@ function Test-AuthoringStage {
         if ($name -ne 'extension.psd1') {
             $stage.Capabilities += @(Get-AuthoringCapabilities $code $Store.DataDirectory $name)
         }
+    }
+    # An edit is reviewed against the installed source, rescanned rather than trusted from capabilities.json.
+    $stage.CapabilityChanges = $null
+    if ($stage.EditName) {
+        $before = @(foreach ($name in $stage.Before.Keys) {
+                if ($name -ne 'extension.psd1' -and [IO.Path]::GetExtension($name) -in @('.ps1', '.psm1', '.psd1')) {
+                    (Get-AuthoringCapabilities $stage.Before[$name] $Store.DataDirectory $name).Capability
+                }
+            }) | Sort-Object -Unique
+        $after = @($stage.Capabilities.Capability | Sort-Object -Unique)
+        $stage.CapabilityChanges = @{ Added = @($after | Where-Object { $_ -cnotin $before }); Removed = @($before | Where-Object { $_ -cnotin $after }) }
     }
     try {
         if ($contract.Count) {

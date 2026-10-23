@@ -102,19 +102,44 @@ function Get-PackToolAnalyzerDiagnostics {
     }
 }
 function Get-PackSourceReview {
-    param($Context, [string]$Path, $Original, [string]$Text)
+    # Parse errors and analyzer warnings/errors new relative to $Original (all of them when it is $null).
+    # With $Status, also says whether the analyzer ran, so a clean result is not mistaken for a checked one.
+    param($Context, [string]$Path, $Original, [string]$Text, [bool]$Status = $false)
     if ([IO.Path]::GetExtension($Path) -notin @('.ps1', '.psm1', '.psd1')) {
         return
     }
     $tokens = $null; $errors = $null
     $null = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
-    foreach ($parseError in $errors) {
-        New-HarnessDiagnostic -Source Parser -Severity Error -Code $parseError.ErrorId -Message $parseError.Message -Line $parseError.Extent.StartLineNumber -Column $parseError.Extent.StartColumnNumber
+    $diagnostics = @(
+        foreach ($parseError in $errors) {
+            New-HarnessDiagnostic -Source Parser -Severity Error -Code $parseError.ErrorId -Message $parseError.Message -Line $parseError.Extent.StartLineNumber -Column $parseError.Extent.StartColumnNumber
+        }
+        if (-not $errors) {
+            $tool = @{ File = @{ Exists = $null -ne $Original; Text = [string]$Original }; State = $Context.State; Context = $Context }
+            Get-PackToolAnalyzerDiagnostics $tool $Text
+        }
+    )
+    $found = @($diagnostics | Where-Object { [string]$_.Severity -in @('Error', 'Warning') })
+    if (-not $Status) {
+        return $found
     }
-    if (-not $errors) {
-        $tool = @{ File = @{ Exists = $null -ne $Original; Text = [string]$Original }; State = $Context.State; Context = $Context }
-        @(Get-PackToolAnalyzerDiagnostics $tool $Text) | Where-Object { [string]$_.Severity -in @('Error', 'Warning') }
+    $skipped = @($diagnostics | Where-Object { $_.Code -ceq 'AnalyzerSkipped' })
+    $analyzer = if ($errors) {
+        'not run until the parse errors are fixed'
     }
+    elseif ($skipped.Count) {
+        $skipped[0].Message
+    }
+    elseif (-not (Resolve-PackAnalyzerSettings $Context.State.Config).Enabled) {
+        'disabled by configuration'
+    }
+    elseif (-not (Get-PackAnalyzer $Context.State.Config $Context).Module) {
+        'unavailable: PSScriptAnalyzer is not installed'
+    }
+    else {
+        'ran'
+    }
+    [pscustomobject]@{ Diagnostics = $found; Analyzer = $analyzer }
 }
 function Get-PackSourceOutline {
     # Functions, classes, enums and members with dotted names (Outer.Inner, Class.Method) and line ranges;
@@ -125,8 +150,12 @@ function Get-PackSourceOutline {
     }
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
-    $nodes = $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -or $node -is [Management.Automation.Language.TypeDefinitionAst] -or $node -is [Management.Automation.Language.MemberAst] }, $true)
-    $items = foreach ($node in $nodes) {
+    [pscustomobject]@{ Items = @(Get-PackSourceItems $ast); ParseErrors = @($errors).Count }
+}
+function Get-PackSourceItems {
+    param($Ast)
+    $nodes = $Ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -or $node -is [Management.Automation.Language.TypeDefinitionAst] -or $node -is [Management.Automation.Language.MemberAst] }, $true)
+    foreach ($node in $nodes) {
         if ($node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Parent -is [Management.Automation.Language.FunctionMemberAst]) {
             continue
         }
@@ -153,7 +182,119 @@ function Get-PackSourceOutline {
         $parameters = $node -is [Management.Automation.Language.FunctionDefinitionAst] ? @($node.Body.ParamBlock.Parameters + $node.Parameters | Where-Object { $_ }) : ($node -is [Management.Automation.Language.FunctionMemberAst] ? @($node.Parameters) : @())
         [pscustomobject]@{ Name = $names -join '.'; Kind = $kind; StartLine = $node.Extent.StartLineNumber; EndLine = $node.Extent.EndLineNumber; Parameters = @($parameters | ForEach-Object { '$' + $_.Name.VariablePath.UserPath }) }
     }
-    [pscustomobject]@{ Items = @($items); ParseErrors = @($errors).Count }
+}
+function Get-PackSourceSymbols {
+    # The outline items plus each command call, type use and member access with its line, for workspace symbol search.
+    param([string]$Path, [string]$Text)
+    if ([IO.Path]::GetExtension($Path) -notin @('.ps1', '.psm1')) {
+        return
+    }
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    $isReference = {
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -or $node -is [Management.Automation.Language.TypeExpressionAst] -or
+        $node -is [Management.Automation.Language.TypeConstraintAst] -or $node -is [Management.Automation.Language.MemberExpressionAst]
+    }
+    $references = foreach ($node in $ast.FindAll($isReference, $true)) {
+        if ($node -is [Management.Automation.Language.CommandAst]) {
+            $name = $node.GetCommandName(); $kind = 'call'
+        }
+        elseif ($node -is [Management.Automation.Language.MemberExpressionAst]) {
+            $name = $node.Member -is [Management.Automation.Language.StringConstantExpressionAst] ? $node.Member.Value : ''; $kind = 'member'
+        }
+        else {
+            $type = $node.TypeName
+            while ($type -is [Management.Automation.Language.ArrayTypeName]) {
+                $type = $type.ElementType
+            }
+            $name = $type -is [Management.Automation.Language.GenericTypeName] ? $type.TypeName.Name : $type.Name; $kind = 'type'
+        }
+        if ($name) {
+            [pscustomobject]@{ Name = $name; Kind = $kind; Line = $node.Extent.StartLineNumber }
+        }
+    }
+    [pscustomobject]@{ Items = @(Get-PackSourceItems $ast); References = @($references); ParseErrors = @($errors).Count }
+}
+function Get-PackSourceRename {
+    # Rename a function, class or enum in one file: its definitions, command calls, type names, a class's
+    # constructors, Export-ModuleMember names and, in manifests, exported name strings. Edits only exact name spans.
+    param([string]$Path, [string]$Text, [string]$Name, [string]$NewName)
+    $extension = [IO.Path]::GetExtension($Path)
+    if ($extension -notin @('.ps1', '.psm1', '.psd1')) {
+        return
+    }
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    if (@($errors).Count) {
+        return [pscustomobject]@{ Text = $Text; Count = 0; Definitions = 0; Conflicts = 0; ParseErrors = @($errors).Count }
+    }
+    $ignoreCase = [StringComparison]::OrdinalIgnoreCase
+    $spans = [Collections.Generic.Dictionary[int, int]]::new()
+    $add = {
+        param($Extent, [int]$Offset = 0)
+        $start = $Extent.StartOffset + $Offset
+        if ($start + $Name.Length -le $Text.Length -and [string]::Equals($Text.Substring($start, $Name.Length), $Name, $ignoreCase)) {
+            $spans[$start] = $Name.Length
+        }
+    }
+    $addType = {
+        param($TypeName)
+        if ($TypeName -is [Management.Automation.Language.ArrayTypeName]) {
+            & $addType $TypeName.ElementType
+        }
+        elseif ($TypeName -is [Management.Automation.Language.GenericTypeName]) {
+            & $addType $TypeName.TypeName
+            foreach ($argument in $TypeName.GenericArguments) {
+                & $addType $argument
+            }
+        }
+        elseif ([string]::Equals($TypeName.Name, $Name, $ignoreCase)) {
+            & $add $TypeName.Extent
+        }
+    }
+    $definitions = 0; $conflicts = 0
+    foreach ($node in $ast.FindAll({ $true }, $true)) {
+        if ($node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Parent -isnot [Management.Automation.Language.FunctionMemberAst]) {
+            $conflicts += [string]::Equals($node.Name, $NewName, $ignoreCase)
+            if ([string]::Equals($node.Name, $Name, $ignoreCase) -and $node.Extent.Text -match '^(?i:function|filter|workflow)\s+') {
+                $definitions++; & $add $node.Extent $Matches[0].Length
+            }
+        }
+        elseif ($node -is [Management.Automation.Language.TypeDefinitionAst]) {
+            $conflicts += [string]::Equals($node.Name, $NewName, $ignoreCase)
+            if ([string]::Equals($node.Name, $Name, $ignoreCase) -and $node.Extent.Text -match '^(?i:class|enum|interface)\s+') {
+                $definitions++; & $add $node.Extent $Matches[0].Length
+                foreach ($member in @($node.Members | Where-Object { $_ -is [Management.Automation.Language.FunctionMemberAst] -and $_.IsConstructor })) {
+                    if ($member.Extent.Text -match "(?i)\b$([regex]::Escape($Name))\s*\(") {
+                        & $add $member.Extent $Matches.Index
+                    }
+                }
+            }
+        }
+        elseif ($node -is [Management.Automation.Language.CommandAst]) {
+            $first = $node.CommandElements[0]
+            if ($first -is [Management.Automation.Language.StringConstantExpressionAst] -and $first.StringConstantType -eq 'BareWord' -and [string]::Equals($first.Value, $Name, $ignoreCase)) {
+                & $add $first.Extent
+            }
+            elseif ($node.GetCommandName() -in @('Export-ModuleMember', 'Microsoft.PowerShell.Core\Export-ModuleMember')) {
+                foreach ($value in $node.FindAll({ param($item) $item -is [Management.Automation.Language.StringConstantExpressionAst] -and [string]::Equals($item.Value, $Name, $ignoreCase) }, $true)) {
+                    & $add $value.Extent ($value.StringConstantType -eq 'BareWord' ? 0 : 1)
+                }
+            }
+        }
+        elseif ($node -is [Management.Automation.Language.TypeExpressionAst] -or $node -is [Management.Automation.Language.TypeConstraintAst]) {
+            & $addType $node.TypeName
+        }
+        elseif ($extension -ceq '.psd1' -and $node -is [Management.Automation.Language.StringConstantExpressionAst] -and [string]::Equals($node.Value, $Name, $ignoreCase)) {
+            & $add $node.Extent ($node.StringConstantType -eq 'BareWord' ? 0 : 1)
+        }
+    }
+    $builder = [Text.StringBuilder]::new($Text)
+    foreach ($start in @($spans.Keys | Sort-Object -Descending)) {
+        $null = $builder.Remove($start, $spans[$start]).Insert($start, $NewName)
+    }
+    [pscustomobject]@{ Text = $builder.ToString(); Count = $spans.Count; Definitions = $definitions; Conflicts = $conflicts; ParseErrors = 0 }
 }
 function Add-PackToolDiagnostics {
     param($Tool, [string]$text, [string]$formatNote)

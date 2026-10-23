@@ -5,6 +5,7 @@ $script:PackSearchSchemas = Get-Content -LiteralPath (Join-Path $script:PackProm
 $script:PackWorkSchemas = Get-Content -LiteralPath (Join-Path $script:PackPromptRoot 'agent-work-tools.json') -Raw | ConvertFrom-Json -AsHashtable
 $script:PackPresentedSchemas = @($script:PackPresentedSchemas) + @($script:PackSearchSchemas) + @($script:PackWorkSchemas)
 $script:PackAgentPrompt = Get-Content -LiteralPath (Join-Path $script:PackPromptRoot 'agent.md') -Raw
+$script:PackExplorePrompt = Get-Content -LiteralPath (Join-Path $script:PackPromptRoot 'agent-explore.md') -Raw
 # Retired agy fields that the model may still send: accepted and ignored, never advertised.
 $script:PackRetiredArguments = @{ run_command = @('BypassSandbox'); replace_file_content = @('TargetLintErrorIds'); write_to_file = @('ArtifactMetadata') }
 foreach ($name in $script:PackWorkSchemas.Name) {
@@ -201,6 +202,9 @@ function Invoke-PackPresentedTool {
             }
             @{ Name = 'edit'; Arguments = $edit }
         }
+        rename_symbol {
+            @{ Name = 'rename'; Arguments = @{ name = $arguments.Name; new_name = $arguments.NewName; scope = ($arguments.Path ? (Resolve-PackWorkPath $Context $arguments.Path) : '.') } }
+        }
         write_to_file {
             if ($arguments.Append -and $arguments.Overwrite) {
                 throw 'Append and Overwrite cannot both be true.'
@@ -231,6 +235,15 @@ function Invoke-PackPresentedTool {
         }
         { $_ -cin @('view_file_outline', 'view_code_item') } {
             return Invoke-PackCodeNavigation $Context $Call
+        }
+        find_symbol {
+            return Find-PackSymbol $Context $Call
+        }
+        explore {
+            return Invoke-PackExplore $Context $Call
+        }
+        check_file {
+            return Invoke-PackFileCheck $Context $Call
         }
     }
     $copy = New-PackPresentedContext $Context $Call
@@ -268,7 +281,7 @@ function Format-PackPresentedDiff {
 function Format-PackPresentedResult {
     param($Context, $Call, $Data, $ErrorData)
     if ($ErrorData -and -not ($Call.Name -ceq 'run_command' -and $null -ne $Data.ExitCode)) {
-        return 'Encountered error in tool execution: ' + $ErrorData.message
+        return 'Encountered error in tool execution: ' + $ErrorData.message + ($ErrorData.next ? "`nNext: $($ErrorData.next)" : '')
     }
     $header = "Created At: $($Context.PresentedStarted)`nCompleted At: $([datetimeoffset]::Now.ToString('o'))"
     switch ($Call.Name) {
@@ -284,6 +297,9 @@ function Format-PackPresentedResult {
         write_to_file {
             "$header`nSuccessfully wrote to $($Call.Arguments.TargetFile).`n$($Data.diagnostics)"
         }
+        rename_symbol {
+            "$header`nRenamed $($Call.Arguments.Name) to $($Call.Arguments.NewName): $($Data.occurrences) occurrences in $(@($Data.renamed).Count) files.`n$(@($Data.renamed) -join "`n")$(@($Data.skipped).Count ? "`nNot renamed (parse errors): $(@($Data.skipped) -join ', ')" : '')`nString-built and dynamic references are not renamed; search for them."
+        }
         run_command {
             if ($Data.TaskState -ceq 'running') {
                 return "Created At: $($Context.PresentedStarted)`nTool is running as a background task with task id: $($Data.TaskId)`nTask logs are available in the session transcript; use manage_task for current output.`nYOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS: A) either proceed to other relevant work (if any) or, B) simply update the user with a short message (that you have launched the command and will wait for it to finish) and end the turn.`n DO NOTHING ELSE.$($Data.TerminalID ? "`nTerminalID: $($Data.TerminalID)" : '')"
@@ -293,7 +309,7 @@ function Format-PackPresentedResult {
         { $_ -cin @('grep_search', 'codebase_search') } {
             $Data | ConvertTo-Json -Depth 10 -Compress
         }
-        { $_ -cin @('manage_task', 'update_plan', 'view_file_outline', 'view_code_item') } {
+        { $_ -cin @('manage_task', 'update_plan', 'view_file_outline', 'view_code_item', 'find_symbol', 'explore', 'check_file') } {
             $Data.Output
         }
     }

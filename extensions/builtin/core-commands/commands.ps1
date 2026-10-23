@@ -45,6 +45,42 @@ function Initialize-PackCommands {
             $c.State.LastResult = $null
             'Conversation cleared (saved session log retained).'
         }, 'Clear current conversation context.')
+    $script:Harness.Commands.Add('rewind', {
+            param($c)
+            if ($c.State.Busy) {
+                throw 'Cannot rewind the conversation while an operation is running. Cancel it and wait for it to finish.'
+            }
+            # Prompts are user records other than steering notes, which belong to their run's exchange.
+            $prompts = @(for ($i = 0; $i -lt $c.State.Transcript.Count; $i++) {
+                    $record = $c.State.Transcript[$i]
+                    $metadata = $record.PSObject.Properties['Metadata'] ? $record.Metadata : $null
+                    if ($record.Role -ceq 'user' -and -not ($metadata -and ($metadata -is [Collections.IDictionary] ? $metadata['Steering'] : ($metadata.PSObject.Properties['Steering'] -and $metadata.Steering)))) {
+                        $i
+                    }
+                })
+            if (-not $c.Arguments) {
+                if (-not $prompts.Count) {
+                    return 'The conversation has no prompts to rewind.'
+                }
+                $lines = for ($n = 1; $n -le [Math]::Min(10, $prompts.Count); $n++) {
+                    $text = ((ConvertTo-HarnessSafeText ([string]$c.State.Transcript[$prompts[$prompts.Count - $n]].Text)) -replace '\s+', ' ').Trim()
+                    "$n. $($text.Length -gt 60 ? $text.Substring(0, 59) + '…' : $text)"
+                }
+                return ((@('Prompts, newest first; /rewind N removes prompt N and everything after it from the conversation.') + $lines) -join "`n")
+            }
+            if ($c.Arguments -cnotmatch '\A[1-9][0-9]{0,3}\z' -or [int]$c.Arguments -gt $prompts.Count) {
+                throw "Use /rewind to list prompts, or /rewind N with N from 1 to $($prompts.Count)."
+            }
+            $index = $prompts[$prompts.Count - [int]$c.Arguments]
+            # As /clear does, discard pending work and agent authority tied to the conversation.
+            $script:Harness.Events.Publish('ext.core-commands.ConversationReset', @{ SessionId = $c.State.SessionId })
+            $removed = $c.State.Transcript.Count - $index
+            $c.State.Transcript.RemoveRange($index, $removed)
+            $previous = @($prompts.Where({ $_ -lt $index }, 'Last'))
+            $c.State.LastPrompt = $previous.Count ? [string]$c.State.Transcript[$previous[0]].Text : ''
+            $c.State.LastResult = $null
+            "Conversation rewound: $removed records removed (saved session log retained). File changes are not reverted; /undo list shows agent runs to undo."
+        }, 'List recent prompts, or remove prompt N and everything after it from the conversation: /rewind [N].')
     $script:Harness.Commands.Add('tokens', {
             param($c)
             $last = if ($c.State.LastResult) {

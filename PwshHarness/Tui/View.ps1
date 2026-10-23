@@ -61,6 +61,7 @@ function New-HarnessViewState {
 
             Mode                  = 'APPROVE'
             Steps                 = ''
+            Plan                  = ''
             Text                  ='Ready'
             ExtensionNotice       = ''
             Profile               =''

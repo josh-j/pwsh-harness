@@ -25,7 +25,10 @@ function Get-EngineBudgetedHistory {
         if ($record.Role -notin @('user', 'assistant')) {
             continue
         }
-        if ($record.Role -eq 'user' -and $current.Count) {
+        # A steering note belongs to the exchange of the run it corrected.
+        $metadata = $record.PSObject.Properties['Metadata'] ? $record.Metadata : $null
+        $steering = $metadata -and ($metadata -is [Collections.IDictionary] ? $metadata['Steering'] : ($metadata.PSObject.Properties['Steering'] -and $metadata.Steering))
+        if ($record.Role -eq 'user' -and $current.Count -and -not $steering) {
             $exchanges.Add($current.ToArray())
             $current.Clear()
         }

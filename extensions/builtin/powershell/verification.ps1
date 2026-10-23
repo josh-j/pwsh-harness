@@ -78,6 +78,7 @@ function Invoke-PackVerificationCore {
             '-CandidatePath', $candidatePath, '-TestsPath', $testsPath, '-Sandbox', $directory)) {
         $start.ArgumentList.Add($arg)
     }
+    Remove-PackChildCredential $start $Context.State.Config
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
     $started = $false; $stdout = $null; $stderr = $null; $failure = $null; $exitCode = $null
     $cleanupErrors = [Collections.Generic.List[string]]::new()

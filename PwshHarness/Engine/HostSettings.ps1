@@ -112,6 +112,7 @@ function New-EngineHostStore {
         'Agent.InputTokenBudget'       =65536
         'Agent.CompactTokens'          =0
         'Agent.RewindMaxBytes'         =67108864
+        'Agent.ExploreModel'           =''
         Autonomy                       ='Approve'
         'Agent.MaxFileBytes'           =1048576
         'Agent.MaxReadBytes'           =16384
@@ -151,6 +152,7 @@ function New-EngineHostStore {
     $store.Points.Settings['Agent.InputTokenBudget'].Validator = { param($v) $v -ge 1 -and $v -le 10000000 }
     $store.Points.Settings['Agent.CompactTokens'].Validator = { param($v) $v -ge 0 -and $v -le 10000000 }
     $store.Points.Settings['Agent.RewindMaxBytes'].Validator = { param($v) $v -ge 0 -and $v -le 1073741824 }
+    $store.Points.Settings['Agent.ExploreModel'].Validator = { param($v) $v -is [string] -and $v.Length -le 256 -and $v -cnotmatch '\s' }
     $store.Points.Settings.InputTokenReservePercent.Validator = { param($v) $v -ge 0 -and $v -le 90 -and -not [double]::IsNaN($v) }
     $store.Points.Settings['Session.MaxAuditBytes'].Validator = { param($v) $v -ge 1024 -and $v -le 268435456 }
     $store.Points.Settings['Session.MaxAuditRecords'].Validator = { param($v) $v -ge 16 -and $v -le 65536 }

@@ -30,7 +30,7 @@
     Register-PackHistoryCompactors
     Register-PackOperations
     $services = @{
-        'source.format' = ${function:Format-PackToolSource}; 'source.diagnostics' = ${function:Add-PackToolDiagnostics}; 'source.review' = ${function:Get-PackSourceReview}; 'source.outline' = ${function:Get-PackSourceOutline}
+        'source.format' = ${function:Format-PackToolSource}; 'source.diagnostics' = ${function:Add-PackToolDiagnostics}; 'source.review' = ${function:Get-PackSourceReview}; 'source.outline' = ${function:Get-PackSourceOutline}; 'source.symbols' = ${function:Get-PackSourceSymbols}; 'source.rename' = ${function:Get-PackSourceRename}
         'command.prepare' = ${function:New-PackToolCommand}; 'operation.approve' = ${function:Invoke-PackApproveCommand}
         'command.run'         = {
             param($Tool, $Context, $check, $settings, $options)

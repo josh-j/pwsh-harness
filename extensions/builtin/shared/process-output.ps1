@@ -349,3 +349,10 @@ function Stop-PackCommandWatchdog {
         $Watchdog.Worker.Dispose()
     }
 }
+function Remove-PackChildCredential {
+    # Children never inherit the model credential; the host resolves it only at request time.
+    param([Diagnostics.ProcessStartInfo]$Start, $Config)
+    if ($Config -and $Config['ApiKeyEnvironment']) {
+        $null = $Start.Environment.Remove($Config['ApiKeyEnvironment'])
+    }
+}

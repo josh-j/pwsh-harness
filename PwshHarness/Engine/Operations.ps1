@@ -22,7 +22,7 @@ function Invoke-EngineOperationTransition {
     Assert-EngineSessionOwner $Store $record.Session
     if ($AutomaticLease) {
         $null = $Store.Host.AgentControl.AssertRun($record.Session, $AutomaticLease, $true)
-        if ($Signal -cne 'Approve' -or -not $record.Candidate -or $record.Candidate.Kind -cnotin @('write', 'edit', 'pwsh')) {
+        if ($Signal -cne 'Approve' -or -not $record.Candidate -or $record.Candidate.Kind -cnotin @('write', 'edit', 'rename', 'pwsh')) {
             throw 'Automatic authorization is limited to prepared built-in agent operations.'
         }
         $record.AutomaticLease = $AutomaticLease

@@ -155,6 +155,9 @@ function Complete-PackToolCall {
     if ($cause -and $cause.Data['AgentNotExecuted']) {
         $errorData.not_executed = $true
     }
+    if ($cause -and $cause.Data['Refusal']) {
+        $errorData.code = $cause.Data['Refusal']; $errorData.next = $cause.Data['Next']
+    }
     $role = $script:PackTools.ContainsKey($Call.Name) ? $script:PackTools[$Call.Name].Role : 'tool-result'
     $script:Harness.AddTranscript($Context.State, $role, '', @{ Id = $id; CallId = $Call.Id; Tool = $Call.Name; Data = (New-HarnessFrozen $Data); Error = $errorData })
     $model = [ordered]@{}
@@ -190,7 +193,7 @@ function Complete-PackToolCall {
     }
     $directoryRules = $status -ceq 'ok' -and $Call.Name -cin @('read', 'edit', 'write') -and $Call.Arguments -is [Collections.IDictionary] ? (Get-PackDirectoryRules $Context $Call) : ''
     $contextKey = ''
-    if ($status -cne 'cancelled' -and $Call.Name -cin @('read', 'search', 'pwsh', 'view_file_outline', 'view_code_item') -and $Call.Arguments -is [Collections.IDictionary]) {
+    if ($status -cne 'cancelled' -and $Call.Name -cin @('read', 'search', 'pwsh', 'view_file_outline', 'view_code_item', 'find_symbol', 'check_file') -and $Call.Arguments -is [Collections.IDictionary]) {
         # An identical later read, search or command supersedes this result when the engine compacts the run.
         $arguments = [ordered]@{}
         foreach ($entry in @($Call.Arguments.GetEnumerator() | Sort-Object Key)) {
@@ -263,7 +266,7 @@ function New-PackToolFileChange {
     $arguments = $Tool.Call.Arguments
     $file = $Tool.File
     if ($file.Text -cne $script:Harness.OperationControl.ProtectText($Tool.State, $file.Text, $false, $true)) {
-        throw 'Tool target contains a known credential; mutation refused.'
+        throw (New-PackRefusal CredentialRefused 'Tool target contains a known credential; mutation refused.' 'Reissue without the credential value; never copy secrets into files or commands.')
     }
     $expected = $arguments.expected_sha256
     if ($Tool.Spec.Edit -and -not $arguments.ContainsKey('expected_sha256')) {
@@ -272,8 +275,11 @@ function New-PackToolFileChange {
         }
         $expected = $Tool.Observations[$Tool.Path].Hash
     }
+    if ($file.Exists -and -not $expected) {
+        throw (New-PackRefusal StaleTarget 'Create-only target already exists.' 'Read the file and pass its sha256 to replace it.')
+    }
     if ($file.Exists -ne [bool]$expected -or ($expected -and $expected -cne $file.Hash)) {
-        throw 'Tool target hash is stale or create-only target already exists.'
+        throw (New-PackRefusal StaleTarget 'Tool target hash is stale.' 'Read the file again and retry with its current sha256.')
     }
     $text = $Tool.Spec.Edit ? '' : $arguments.text
     $ranges = [Collections.Generic.List[object]]::new()
@@ -447,7 +453,8 @@ function Invoke-PackToolCall {
     $tool.Observations = $null
     if ($lease) {
         $observed = Get-PackRunObservations $Context $tool.Root
-        $tool.Observations = $observed.Hashes; $tool.Changed = $observed.Changed
+        # A sub-agent's reads are not this model's views of the files.
+        $tool.Observations = $Context.PSObject.Properties['Delegated'] ? $null : $observed.Hashes; $tool.Changed = $observed.Changed
     }
     $values = @($Call.Arguments.Values)
     if ($Call.Arguments.ContainsKey('hunks')) {
@@ -455,7 +462,7 @@ function Invoke-PackToolCall {
     }
     foreach ($value in $values) {
         if ($value -is [string] -and $value -cne $script:Harness.OperationControl.ProtectText($state, $value, $false, $true)) {
-            throw 'Tool source or path contains a known credential; operation refused.'
+            throw (New-PackRefusal CredentialRefused 'Tool source or path contains a known credential; operation refused.' 'Reissue without the credential value; never copy secrets into files or commands.')
         }
     }
     $tool.Path = $tool.Spec.Schema.ContainsKey('path') ? (Resolve-PackToolCallPath $state $tool.Root $Call $Context) : $tool.Root
@@ -573,12 +580,15 @@ function Invoke-PackToolApproval {
         $executing = $true
         $data = & $tool.Spec.Execute $tool $Context
         $result = $tool.Result ? $tool.Result : (Complete-PackToolCall $tool.Context $tool.Call $data)
-        if ($result.Status -ceq 'ok' -and $null -ne $tool.Observations -and $tool.Observations.ContainsKey($tool.Path) -and $tool.Files.Count) {
-            $tool.Observations[$tool.Path] = @{ Hash = $tool.Files[0].FinalHash; Step = $tool.Context.AgentStep }
-        }
-        if ($result.Status -ceq 'ok' -and $null -ne $tool.Changed -and $tool.Files.Count -and -not $tool.Changed.ContainsKey($tool.Path)) {
-            # The completion review compares against the text before this run's first change.
-            $tool.Changed[$tool.Path] = @{ Relative = $tool.Call.Arguments.path; Text = ($tool.File.Exists ? $tool.File.Text : $null) }
+        foreach ($file in @($result.Status -ceq 'ok' ? $tool.Files : @()).Where({ $_ })) {
+            if ($null -ne $tool.Observations -and $tool.Observations.ContainsKey($file.Path)) {
+                $tool.Observations[$file.Path] = @{ Hash = $file.FinalHash; Step = $tool.Context.AgentStep }
+            }
+            if ($null -ne $tool.Changed -and -not $tool.Changed.ContainsKey($file.Path)) {
+                # The completion review compares against the text before this run's first change.
+                $before = $file.BeforeExists ? [Text.Encoding]::UTF8.GetString([byte[]]$file.BeforeBytes).TrimStart([char]0xFEFF) : $null
+                $tool.Changed[$file.Path] = @{ Relative = (ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($tool.Root, $file.Path))); Text = $before }
+            }
         }
         if ($result.Status -ceq 'ok' -and $tool.Run -and $tool.Files.Count) {
             Add-PackRewindEntry $tool
@@ -626,7 +636,9 @@ $script:PackTools = @{
 }
 $script:PackTools.search = @{ Description = "Search permitted workspace files with bounded numbered matches; prefer it to shell searches.`nExact/regex mode is on unless the user disables it; ranked mode must be enabled by the user."; Schema = @{ query = @{ Kind = 'String'; Min = 1; Max = 4096; Nonblank = $true }; scope = @{ Kind = 'String'; Min = 1; Max = 4096; Default = '.' }; mode = @{ Kind = 'String'; Pattern = '\A(exact|ranked)\z'; Default = 'exact' }; regex = @{ Kind = 'Boolean'; Default = $false }; ignore_case = @{ Kind = 'Boolean'; Default = $false }; includes = @{ Kind = 'String'; Max = 1024; Default = '*' }; per_line = @{ Kind = 'Boolean'; Default = $true } }; Role = 'tool-read' }
 # /undo reuses the reviewed file-change flow; it is never advertised to models.
-$script:PackTools.undo = @{ Description = 'Restore files changed by the latest agent run.'; Schema = @{}; Prepare = ${function:New-PackUndoChange}; Execute = ${function:Invoke-PackUndoChange}; Role = 'tool-result' }
+$script:PackTools.undo = @{ Description = 'Restore files changed by the latest agent runs.'; Schema = @{ runs = @{ Kind = 'Number'; Min = 1; Max = $script:PackRewindCheckpoints; Default = 1 } }; Prepare = ${function:New-PackUndoChange}; Execute = ${function:Invoke-PackUndoChange}; Role = 'tool-result' }
+# rename_symbol reaches this reviewed multi-file change through its presented schema only.
+$script:PackTools.rename = @{ Description = 'Rename a workspace PowerShell function, class or enum.'; Schema = @{ name = @{ Kind = 'String'; Min = 1; Max = 200 }; new_name = @{ Kind = 'String'; Min = 1; Max = 200 }; scope = @{ Kind = 'String'; Min = 1; Max = 4096; Default = '.' } }; Prepare = ${function:New-PackRenameChange}; Execute = ${function:Invoke-PackToolFileChange}; Role = 'tool-result' }
 $script:PackTools.read.Schema.content_offset = @{ Kind = 'Number'; Min = 0; Max = 1048576; Default = 0; Description = 'Optional UTF-8 byte offset for a truncated view.' }
 $script:PackTools.edit.Schema.allow_multiple = @{ Kind = 'Boolean'; Default = $false; Description = 'Replace all exact matches within the line anchors.' }
 $script:PackTools.edit.Schema.before.Optional = $true
@@ -734,5 +746,5 @@ function Register-PackAgentRuntime {
             if ($Parsed.CodeBlocks.Count -eq 1) {
                 New-HarnessToolCall -Id ([guid]::NewGuid().ToString('N')) -Name pwsh -Arguments @{ command = $Parsed.CodeBlocks[0].Code }
             }
-        }, $script:PackAgentPrompt, { param($Context, $Mode) Update-PackAgentTasks $Context $Mode }, @($script:PackPresentedSchemas), @('read', 'search', 'view_file', 'grep_search', 'codebase_search', 'update_plan', 'view_file_outline', 'view_code_item'), { param($Context) Get-PackCompletionReview $Context })
+        }, $script:PackAgentPrompt, { param($Context, $Mode) Update-PackAgentTasks $Context $Mode }, @($script:PackPresentedSchemas), @('read', 'search', 'view_file', 'grep_search', 'codebase_search', 'update_plan', 'view_file_outline', 'view_code_item', 'find_symbol', 'explore', 'check_file'), { param($Context) Get-PackCompletionReview $Context })
 }

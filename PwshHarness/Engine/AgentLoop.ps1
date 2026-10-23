@@ -52,6 +52,11 @@ function New-EngineAgentRuntime {
         }
         $Stage.AgentTools = @{ Extension = $Extension; Schemas = (New-HarnessFrozen $Schemas); Decode = $Decode; Invoke = $Invoke; Fallback = $Fallback; Instructions = $Instructions; Tasks = $Tasks; Review = $Review }
     }.GetNewClosure()
+    $delegate = ${function:Invoke-EngineAgentDelegate}
+    $api | Add-Member ScriptMethod Delegate {
+        param($Context, [string]$Task, [string]$Instructions, [string[]]$ToolNames, [int]$MaxSteps)
+        & $delegate $Store $Context $Task $Instructions $ToolNames $MaxSteps
+    }.GetNewClosure()
     $api | Add-Member ScriptMethod Assert {
         param($Session, $Lease)
         $Store.Host.AgentControl.AssertRun($Session, $Lease)
@@ -296,91 +301,7 @@ function Invoke-EngineAgentContinuation {
             while ($loop.Steering.Count) {
                 $turn.Exchange.Add((New-HarnessMessage user "<USER_STEERING>`n$($loop.Steering.Dequeue())`n</USER_STEERING>"))
             }
-            Build-EngineRequestStage $turn
-            $turn.Request | Add-Member NoteProperty AgentTools (@($Store.AgentTools.Schemas) + @($loop.Tools.Values | Where-Object { -not $_.Runtime } | Sort-Object Name | ForEach-Object { $_.Schema }))
-            Invoke-EngineMiddlewareStage $turn
-            $turn.Request | Add-Member NoteProperty AgentRetryManaged $true
-            $turn.Request | Add-Member NoteProperty AgentRetryAttempt 0
-            $estimate = ${function:Get-EngineTokenEstimate}
-            $turn.Request | Add-Member NoteProperty EstimateWireTokens { param([string]$Text) & $estimate $Store $Text $turn.Config -Uncalibrated }.GetNewClosure()
-            $reserve = ${function:Add-EngineAgentRequestReservation}
-            $assert = ${function:Assert-EngineAgentDispatch}
-            $loop.FirstAttempt = $true
-            $turn.Request | Add-Member NoteProperty BeforeRequest {
-                param([string]$WireBody)
-                if ($loop.FirstAttempt) {
-                    & $assert $Store $loop
-                    $loop.FirstAttempt = $false
-                }
-                else {
-                    & $reserve $Store $loop
-                }
-                if ($WireBody) {
-                    & $reserve $Store $loop $WireBody
-                }
-            }.GetNewClosure()
-            $turn.Request.Config.TimeoutSeconds = [Math]::Max(1, [Math]::Min($turn.Config.TimeoutSeconds, [int][Math]::Ceiling(($loop.Run.DeadlineUtc - $Store.Clock.Now()).TotalSeconds)))
-            if ($turn.RequestKind -cne 'Continue') {
-                $turn.StitchedText = ''
-            }
-            if (-not $turn.Response) {
-                Add-EngineAgentRequestReservation $Store $loop
-            }
-            $retryPrefix = $turn.StitchedText
-            do {
-                $retry = $false
-                $turn.Request.AgentRetryAttempt = $loop.StreamRetries
-                try {
-                    Send-EngineRequestStage $turn -DeferProviderFault
-                }
-                catch {
-                    if (Test-EngineRequestedCancellation $Store $_ $turn.Token) {
-                        throw
-                    }
-                    $cause = $_.Exception.GetBaseException()
-                    if ($loop.StopReason -or $cause.Data['AgentStopReason'] -ceq 'CostLimit') {
-                        throw
-                    }
-                    # Rate limits outlast ordinary transient failures: two more retries on a fivefold schedule (retries off stays off).
-                    $rateLimited = $cause.Data['ProviderStatusCode'] -eq 429
-                    $retryLimit = $turn.Config.ContainsKey('Agent.RetryCount') ? $turn.Config.'Agent.RetryCount' : 2
-                    if ($rateLimited -and $retryLimit) {
-                        $retryLimit += 2
-                    }
-                    $retry = -not $cause.Data['OutputCallbackFailure'] -and $cause.Data['FailureOrigin'] -cne 'ClientCallback' -and ($cause.Data['AgentStopReason'] -in @('StreamStalled', 'ProviderStall') -or $cause.Data['ProviderStatusCode'] -in @(408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529)) -and $loop.StreamRetries -lt $retryLimit
-                    $provider = $Store.Points.Providers[$turn.Config.Provider]
-                    if ($provider -and $cause.Data['FailureOrigin'] -cne 'ClientCallback') {
-                        Write-EngineFault $Store $provider.Extension $provider.Name $_ -Terminating:(-not $retry)
-                    }
-                    if (-not $retry) {
-                        throw
-                    }
-                    Add-EngineAgentFailureUsage $loop $cause
-                    $loop.StreamRetries++
-                    $turn.StitchedText = $retryPrefix; $State.StreamingText = $retryPrefix
-                    $retryBase = $turn.Config.ContainsKey('RetryBaseSeconds') ? $turn.Config.RetryBaseSeconds : 1.0
-                    $retryMax = $turn.Config.ContainsKey('RetryMaxSeconds') ? $turn.Config.RetryMaxSeconds : 30.0
-                    $providerDelay = $cause.Data.Contains('RetryDelaySeconds')
-                    if ($rateLimited -and -not $cause.Data['RetryAfterProvided']) {
-                        # Without Retry-After a rate limit needs longer than the ordinary transient schedule.
-                        $retryBase *= 5; $retryMax *= 2; $providerDelay = $false
-                    }
-                    $seconds = $providerDelay ? [double]$cause.Data['RetryDelaySeconds'] : [Math]::Min($retryMax, $retryBase * [Math]::Pow(2, $loop.StreamRetries - 1))
-                    $rateSeconds = 0.0
-                    if ($cause.Data['ProviderStatusCode'] -eq 429 -and $turn.Config.'RateLimit.TokensPerMinute' -gt 0) {
-                        $rateSeconds = Get-EngineRateDelay $Store.RateWindow $turn.RateLimitTokens $turn.Config.'RateLimit.TokensPerMinute'
-                    }
-                    $seconds = [Math]::Max([Math]::Max(0.0, $seconds), $rateSeconds)
-                    Publish-EngineEvent $Store AgentRequestRetryScheduled @{ SessionId = $State.SessionId; RunId = $loop.Run.Id; Step = $loop.Steps; Reason = ($cause.Data['AgentStopReason'] ? [string]$cause.Data['AgentStopReason'] : "ProviderStatus$($cause.Data['ProviderStatusCode'])"); Attempt = $loop.StreamRetries; DelaySeconds = [double]$seconds }
-                    Wait-EngineRequestDelay $turn $seconds -RateStatus:($rateSeconds -gt 0)
-                }
-            }
-            while ($retry)
-            $loop.StreamRetries = 0
-            $metadata = $turn.Response.PSObject.Properties['Metadata'] ? $turn.Response.Metadata : $null
-            $attempts = ($metadata -and $metadata.PSObject.Properties['ProviderAttempts']) ? $metadata.ProviderAttempts : @()
-            $loop.ChargedTokens += Get-EngineAgentUsageAdjustment $turn.Response.Usage $attempts $loop.Reservation
-            Add-EngineUsage $State.Usage $turn.Response.Usage
+            Send-EngineAgentRequest $Store $loop (@($Store.AgentTools.Schemas) + @($loop.Tools.Values | Where-Object { -not $_.Runtime } | Sort-Object Name | ForEach-Object { $_.Schema }))
             if ($loop.ChargedTokens -gt $loop.Settings.'Agent.MaxTotalTokens') {
                 return Complete-EngineAgentRun $Store $loop TokenLimit
             }
@@ -485,6 +406,181 @@ function Invoke-EngineAgentContinuation {
     finally {
         $loop.Advancing = $false
     }
+}
+function Send-EngineAgentRequest {
+    # One model request of a run: build, middleware, reservation, bounded retries and usage charging on $Loop.Turn.
+    param($Store, $Loop, [object[]]$AgentTools)
+    $loop = $Loop; $turn = $Loop.Turn
+    Build-EngineRequestStage $turn
+    $turn.Request | Add-Member NoteProperty AgentTools @($AgentTools)
+    Invoke-EngineMiddlewareStage $turn
+    $turn.Request | Add-Member NoteProperty AgentRetryManaged $true
+    $turn.Request | Add-Member NoteProperty AgentRetryAttempt 0
+    $estimate = ${function:Get-EngineTokenEstimate}
+    $turn.Request | Add-Member NoteProperty EstimateWireTokens { param([string]$Text) & $estimate $Store $Text $turn.Config -Uncalibrated }.GetNewClosure()
+    $reserve = ${function:Add-EngineAgentRequestReservation}
+    $assert = ${function:Assert-EngineAgentDispatch}
+    $loop.FirstAttempt = $true
+    $turn.Request | Add-Member NoteProperty BeforeRequest {
+        param([string]$WireBody)
+        if ($loop.FirstAttempt) {
+            & $assert $Store $loop
+            $loop.FirstAttempt = $false
+        }
+        else {
+            & $reserve $Store $loop
+        }
+        if ($WireBody) {
+            & $reserve $Store $loop $WireBody
+        }
+    }.GetNewClosure()
+    $turn.Request.Config.TimeoutSeconds = [Math]::Max(1, [Math]::Min($turn.Config.TimeoutSeconds, [int][Math]::Ceiling(($loop.Run.DeadlineUtc - $Store.Clock.Now()).TotalSeconds)))
+    if ($turn.RequestKind -cne 'Continue') {
+        $turn.StitchedText = ''
+    }
+    if (-not $turn.Response) {
+        Add-EngineAgentRequestReservation $Store $loop
+    }
+    $retryPrefix = $turn.StitchedText
+    do {
+        $retry = $false
+        $turn.Request.AgentRetryAttempt = $loop.StreamRetries
+        try {
+            Send-EngineRequestStage $turn -DeferProviderFault
+        }
+        catch {
+            if (Test-EngineRequestedCancellation $Store $_ $turn.Token) {
+                throw
+            }
+            $cause = $_.Exception.GetBaseException()
+            if ($loop.StopReason -or $cause.Data['AgentStopReason'] -ceq 'CostLimit') {
+                throw
+            }
+            # Rate limits outlast ordinary transient failures: two more retries on a fivefold schedule (retries off stays off).
+            $rateLimited = $cause.Data['ProviderStatusCode'] -eq 429
+            $retryLimit = $turn.Config.ContainsKey('Agent.RetryCount') ? $turn.Config.'Agent.RetryCount' : 2
+            if ($rateLimited -and $retryLimit) {
+                $retryLimit += 2
+            }
+            $retry = -not $cause.Data['OutputCallbackFailure'] -and $cause.Data['FailureOrigin'] -cne 'ClientCallback' -and ($cause.Data['AgentStopReason'] -in @('StreamStalled', 'ProviderStall') -or $cause.Data['ProviderStatusCode'] -in @(408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529)) -and $loop.StreamRetries -lt $retryLimit
+            $provider = $Store.Points.Providers[$turn.Config.Provider]
+            if ($provider -and $cause.Data['FailureOrigin'] -cne 'ClientCallback') {
+                Write-EngineFault $Store $provider.Extension $provider.Name $_ -Terminating:(-not $retry)
+            }
+            if (-not $retry) {
+                throw
+            }
+            Add-EngineAgentFailureUsage $loop $cause
+            $loop.StreamRetries++
+            $turn.StitchedText = $retryPrefix; $turn.Session.StreamingText = $retryPrefix
+            $retryBase = $turn.Config.ContainsKey('RetryBaseSeconds') ? $turn.Config.RetryBaseSeconds : 1.0
+            $retryMax = $turn.Config.ContainsKey('RetryMaxSeconds') ? $turn.Config.RetryMaxSeconds : 30.0
+            $providerDelay = $cause.Data.Contains('RetryDelaySeconds')
+            if ($rateLimited -and -not $cause.Data['RetryAfterProvided']) {
+                # Without Retry-After a rate limit needs longer than the ordinary transient schedule.
+                $retryBase *= 5; $retryMax *= 2; $providerDelay = $false
+            }
+            $seconds = $providerDelay ? [double]$cause.Data['RetryDelaySeconds'] : [Math]::Min($retryMax, $retryBase * [Math]::Pow(2, $loop.StreamRetries - 1))
+            $rateSeconds = 0.0
+            if ($cause.Data['ProviderStatusCode'] -eq 429 -and $turn.Config.'RateLimit.TokensPerMinute' -gt 0) {
+                $rateSeconds = Get-EngineRateDelay $Store.RateWindow $turn.RateLimitTokens $turn.Config.'RateLimit.TokensPerMinute'
+            }
+            $seconds = [Math]::Max([Math]::Max(0.0, $seconds), $rateSeconds)
+            Publish-EngineEvent $Store AgentRequestRetryScheduled @{ SessionId = $turn.Session.SessionId; RunId = $loop.Run.Id; Step = $loop.Steps; Reason = ($cause.Data['AgentStopReason'] ? [string]$cause.Data['AgentStopReason'] : "ProviderStatus$($cause.Data['ProviderStatusCode'])"); Attempt = $loop.StreamRetries; DelaySeconds = [double]$seconds }
+            Wait-EngineRequestDelay $turn $seconds -RateStatus:($rateSeconds -gt 0)
+        }
+    }
+    while ($retry)
+    $loop.StreamRetries = 0
+    $metadata = $turn.Response.PSObject.Properties['Metadata'] ? $turn.Response.Metadata : $null
+    $attempts = ($metadata -and $metadata.PSObject.Properties['ProviderAttempts']) ? $metadata.ProviderAttempts : @()
+    $loop.ChargedTokens += Get-EngineAgentUsageAdjustment $turn.Response.Usage $attempts $loop.Reservation
+    Add-EngineUsage $turn.Session.Usage $turn.Response.Usage
+}
+function Invoke-EngineAgentDelegate {
+    # A read-only sub-agent for one tool call of the active run: a fresh exchange with a subset of the run's read-only
+    # tools. Its requests, tool calls and tokens count against the run's limits; only its final text returns.
+    param($Store, $Context, [string]$Task, [string]$Instructions, [string[]]$ToolNames, [int]$MaxSteps)
+    $null = $Store.Host.AgentControl.AssertRun($Context.State, $Context.AgentLease)
+    $parent = (Get-EngineAgentState $Store $Context.State).Loop
+    if (-not $parent -or -not [object]::ReferenceEquals($parent.Lease, $Context.AgentLease) -or $parent['Delegating'] -or -not $parent.Schemas) {
+        throw 'A sub-agent starts only from a native tool call of the active run, never from another sub-agent.'
+    }
+    if ([string]::IsNullOrWhiteSpace($Task) -or $Task.Length -gt 8192 -or $MaxSteps -lt 1) {
+        throw 'A sub-agent needs a task of at most 8192 characters.'
+    }
+    $schemas = New-HarnessFrozen @($parent.Schemas | Where-Object { $_.Name -cin $ToolNames -and $parent.Tools[$_.Name].Policy -ceq 'ReadOnly' })
+    $turn = New-EngineTurn $Store $Task $Context.State $null $parent.Turn.Token $parent.Turn.OnIdle
+    # Sub-agent text is evidence for the parent model, not output for the user.
+    $turn.Callback = { param($fragment, $session) }
+    $turn.Config = @{} + $parent.Turn.Config
+    $turn.Config.SystemPrompt = $Instructions
+    if ($turn.Config.'Agent.ExploreModel') {
+        # The same provider and profile with a model the user chose for sub-agents.
+        $turn.Config.Model = $turn.Config.'Agent.ExploreModel'
+    }
+    $turn.RulesText = $parent.Turn.RulesText
+    $turn.BaseMessages = @((New-HarnessMessage -Role (Get-EngineInstructionRole $turn.Config) -Content $Instructions), (New-HarnessMessage user "<USER_REQUEST>`n$($Store.Host.OperationControl.ProtectText($Context.State, $Task))`n</USER_REQUEST>"))
+    $turn | Add-Member NoteProperty FinalizeRequest { param($request) $request.AgentTools = $schemas }.GetNewClosure()
+    $loop = @{} + $parent
+    $loop.Turn = $turn; $loop.Schemas = $schemas; $loop.Calls = @(); $loop.Index = 0; $loop.Results = [Collections.Generic.List[object]]::new()
+    $loop.CallErrors = @{}; $loop.StopReason = ''; $loop.ToolRepairs = 0; $loop.StreamRetries = 0; $loop.Delegating = $true
+    $parent.Delegating = $true
+    $stop = ''
+    try {
+        for ($step = 0; -not $stop; $step++) {
+            if ($step -ge $MaxSteps) {
+                $stop = 'DelegateStepLimit'; break
+            }
+            Send-EngineAgentRequest $Store $loop @($schemas)
+            if ($loop.ChargedTokens -gt $loop.Settings.'Agent.MaxTotalTokens') {
+                $stop = 'TokenLimit'; break
+            }
+            $metadata = $turn.Response.PSObject.Properties['Metadata'] ? $turn.Response.Metadata : $null
+            $calls = ($metadata -and $metadata.ToolCalls) ? @($metadata.ToolCalls) : @()
+            $repair = ($metadata -and $metadata.PSObject.Properties['ToolCallRepair']) ? [string]$metadata.ToolCallRepair : ''
+            if (-not $repair -and -not $calls.Count) {
+                break
+            }
+            $validated = $repair ? @() : @(ConvertTo-EngineAgentBatch $Store $loop $calls)
+            if (-not $validated.Count) {
+                if (-not (Request-EngineAgentCallRepair $loop ($repair ? $repair : 'Invalid tool identity. Use only the declared read-only tools and fresh unique call IDs.'))) {
+                    $stop = 'InvalidToolCall'
+                }
+                continue
+            }
+            if ($loop.ToolCalls + $validated.Count -gt $loop.Settings.'Agent.MaxToolCalls') {
+                $stop = 'ToolLimit'; break
+            }
+            $loop.Calls = $validated
+            foreach ($call in $validated) {
+                Assert-EngineAgentDispatch $Store $loop
+                $callContext = [pscustomobject]@{ State = $Context.State; Confirm = $null; Pump = $turn.OnIdle; CancellationToken = $turn.Token; AgentLease = $loop.Lease; AgentStep = $loop.Steps; Delegated = $true }
+                $loop.ToolCalls++
+                $outcome = $loop.CallErrors.ContainsKey($call.Id) ? $loop.CallErrors[$call.Id] : (Invoke-EngineAgentTool $Store $loop $callContext $call)
+                Assert-HarnessToolResult $outcome
+                $turn.Token.ThrowIfCancellationRequested()
+                $loop.Results.Add($outcome); $loop.Index++
+            }
+            Add-EngineAgentBatch $loop
+        }
+    }
+    catch {
+        # Run limits end the sub-agent with what it found; the parent's next request meets the same limit.
+        if (-not $loop.StopReason -or $turn.Token.IsCancellationRequested) {
+            throw
+        }
+        $stop = $loop.StopReason
+    }
+    finally {
+        $parent.Steps = $loop.Steps; $parent.ToolCalls = $loop.ToolCalls; $parent.ChargedTokens = $loop.ChargedTokens; $parent.Delegating = $false
+        Add-EngineUsage $parent.Turn.Usage $turn.Usage
+        foreach ($request in $turn.Requests) {
+            $parent.Turn.Requests.Add($request)
+        }
+    }
+    $text = $turn.Response ? [string]$turn.Response.Text : ''
+    [pscustomobject]@{ Text = $Store.Host.OperationControl.ProtectText($Context.State, $text); Steps = $turn.Requests.Count; StopReason = $stop }
 }
 function Stop-EngineSuspendedAgent {
     param($Store, $Session)

@@ -190,6 +190,7 @@ function Invoke-HarnessRun {
         }
         $start.RedirectStandardInput = $true
         $start.Environment['PAGER'] = 'cat'
+        Remove-PackChildCredential $start $State.Config
         $task.Persistent = [bool]$Terminal
         if ($Terminal -and $Terminal.Task) {
             $task.Process = $Terminal.Task.Process

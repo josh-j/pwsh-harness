@@ -5,7 +5,12 @@ function Format-AuthoringReview {
     $files = @($Preview.Files | ForEach-Object { "  $($_.Name) ($($_.Lines) lines)" }) -join "`n"
     $capabilities = @($Preview.Capabilities | ForEach-Object { "$($_.Capability): $($_.File):$($_.Line) $($_.Code)" }) -join "`n"
     $diagnostics = @($Preview.Diagnostics | ForEach-Object { "$($_.Severity) $($_.Code) line $($_.Line): $($_.Message)" }) -join "`n"
-    "$($Preview.ReferenceInfo)`nManifest:`n$manifest`nFiles:`n$files`nCapabilities (advisory; trusted in-process code after approval):`n$capabilities`nDiagnostics:`n$diagnostics`nDiff:`n$($Preview.Diff)"
+    $changes = ''
+    if ($Preview.CapabilityChanges) {
+        $added = @($Preview.CapabilityChanges.Added) -join ', '; $removed = @($Preview.CapabilityChanges.Removed) -join ', '
+        $changes = "`nCapability changes from the installed version: added $($added ? $added : 'none'); removed $($removed ? $removed : 'none')."
+    }
+    "$($Preview.ReferenceInfo)`nManifest:`n$manifest`nFiles:`n$files`nCapabilities (advisory; trusted in-process code after approval):`n$capabilities$changes`nDiagnostics:`n$diagnostics`nDiff:`n$($Preview.Diff)"
 }
 function Get-AuthoringApprovals {
     param($Preview, [scriptblock]$Confirmation)

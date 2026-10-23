@@ -6,6 +6,7 @@ function Invoke-HarnessFrontend {
     $update = ${function:Update-HarnessSessionView}
     $setAgentView = ${function:Set-HarnessAgentView}
     $setToolView = ${function:Update-HarnessToolView}
+    $setPlanView = ${function:Set-HarnessPlanView}
     $renderWorker = $null
     try {
         foreach ($eventName in @('TurnStarted', 'ChunkReceived', 'TurnCompleted', 'DiagnosticsProduced', 'HistoryTrimmed', 'HistoryCompacted', 'ActionCompleted', 'OperationPrepared', 'OperationTransitioned', 'StatusItem', 'Notice')) {
@@ -78,6 +79,9 @@ function Invoke-HarnessFrontend {
                     param($payload)
                     if ($payload.SessionId -ceq $Session.SessionId) {
                         & $setAgentView $View ($HarnessHost.AgentControl.GetState($Session))
+                        if ($eventName -ceq 'AgentToolCompleted') {
+                            & $setPlanView $View $payload.Result
+                        }
                         if (-not $LineMode) {
                             & $setToolView $View $eventName $payload
                         }

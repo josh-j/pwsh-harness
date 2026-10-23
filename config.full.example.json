@@ -7,6 +7,7 @@
   "Agent.CompactTokens": 0,
   "Agent.CompletionReview": true,
   "Agent.Enabled": true,
+  "Agent.ExploreModel": "",
   "Agent.Headless": false,
   "Agent.InputTokenBudget": 65536,
   "Agent.MaxCaptureBytes": 1048576,

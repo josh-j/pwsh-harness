@@ -44,6 +44,19 @@ function Set-HarnessAgentView {
     $View.StatusBar.Steps = "step $($Agent.Steps)/$($Agent.MaxSteps)"
     $View.Dirty = $true
 }
+function Set-HarnessPlanView {
+    # The run's latest update_plan result as a short status field: completed/total and the step in progress.
+    param($View, $Result)
+    $plan = @(Get-HarnessDisplayValue (Get-HarnessDisplayValue $Result Data $null) Plan @())
+    if ((Get-HarnessDisplayValue $Result Tool) -cne 'update_plan' -or (Get-HarnessDisplayValue $Result Status) -cne 'ok' -or -not $plan.Count) {
+        return
+    }
+    $done = @($plan | Where-Object { (Get-HarnessDisplayValue $_ Status) -ceq 'completed' }).Count
+    $current = @($plan | Where-Object { (Get-HarnessDisplayValue $_ Status) -ceq 'in_progress' } | Select-Object -First 1)
+    $step = $current.Count ? ((ConvertTo-HarnessSafeText ([string](Get-HarnessDisplayValue $current[0] Step))) -replace '\s+', ' ').Trim() : ''
+    $View.StatusBar.Plan = "plan $done/$($plan.Count)" + ($step ? ": $($step.Length -gt 32 ? $step.Substring(0, 31) + ($View.StatusBar.Ascii ? '...' : '…') : $step)" : '')
+    $View.Dirty = $true
+}
 function Set-HarnessViewSnapshot {
     param($View, $Snapshot, [switch]$Conversation)
     if ($Conversation) {
@@ -98,6 +111,10 @@ function Set-HarnessViewSnapshot {
     $View.Editor.HistoryIndex = $View.Editor.History.Count
     $bar = $View.StatusBar
     Set-HarnessAgentView $View $Snapshot.Agent
+    if (-not $Snapshot.Agent.HasRun) {
+        # A plan belongs to its run.
+        $bar.Plan = ''
+    }
     if (-not $Snapshot.Agent.HasRun -and (Test-HarnessRecordProperty $Snapshot.LastResult 'AgentSummary')) {
         $bar.Steps = "step $($Snapshot.LastResult.AgentSummary.Steps)/$($Snapshot.Agent.MaxSteps)"
     }

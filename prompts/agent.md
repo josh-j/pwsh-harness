@@ -30,7 +30,7 @@ Work in short patch-and-check cycles:
 1. Read the files the request names, the code you will change and its tests, batching independent reads.
 2. Edit as soon as you know what to change. The first edit usually belongs within the first few steps; an imperfect edit corrected by a check costs less than more reading.
 3. Run the project's focused check or the changed code itself, then fix what it reports.
-For a task with several distinct steps, keep a short plan with update_plan and mark each step as you finish it. In PowerShell files, view_file_outline and view_code_item find and show functions and classes without reading whole files.
+For a task with several distinct steps, keep a short plan with update_plan and mark each step as you finish it. In PowerShell files, view_file_outline and view_code_item find and show functions and classes without reading whole files, and find_symbol lists a name's definitions and uses across the workspace. For a broad investigation whose details you do not need, explore delegates it to a read-only sub-agent and returns only its findings. After changing a PowerShell file, check_file reports the parse and analyzer problems you introduced; rename_symbol renames a function, class or enum and its uses across files in one change.
 Do not run one-off shell experiments to probe language or library behavior that your change and its checks will exercise. Write the code and let the check show the behavior; experiment separately only when no check can reveal the fact you need.
 </work_cycle>
 <software_engineering>

@@ -50,5 +50,56 @@
       },
       "required": ["File", "NodePaths"]
     }
+  },
+  {
+    "Name": "find_symbol",
+    "Description": "Find where a PowerShell function, class, enum, method or property is defined and used across the workspace's .ps1 and .psm1 files.\nNames match case-insensitively; use Class.Member for members. References are command calls, type uses and member accesses, with their lines.",
+    "Parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "Name": { "type": "string", "description": "Symbol name, e.g. Get-Item, MyClass or MyClass.Method." },
+        "Path": { "type": "string", "description": "Optional absolute or workspace-relative file or directory to search within." }
+      },
+      "required": ["Name"]
+    }
+  },
+  {
+    "Name": "explore",
+    "Description": "Hand a read-only investigation to a sub-agent with a fresh context; only its findings return.\nUse it for broad searches whose intermediate results you do not need. It can read, search and navigate code but not change files or run commands; its steps and tokens count against this run's limits.",
+    "Parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "Task": { "type": "string", "description": "What to find out and report, with any paths or names you already know." }
+      },
+      "required": ["Task"]
+    }
+  },
+  {
+    "Name": "check_file",
+    "Description": "Check a PowerShell file (.ps1, .psm1, .psd1) for parse errors and analyzer warnings and errors under the workspace analyzer policy, without running it.\nFor a file this run changed, only problems the run introduced are listed.",
+    "Parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "AbsolutePath": { "type": "string", "description": "Absolute or workspace-relative file path." }
+      },
+      "required": ["AbsolutePath"]
+    }
+  },
+  {
+    "Name": "rename_symbol",
+    "Description": "Rename a PowerShell function, class or enum defined in the workspace, with its calls, type uses, Export-ModuleMember entries and manifest exports, as one reviewed change.\nString-built and dynamic references are not renamed; search for them afterwards.",
+    "Parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "Name": { "type": "string", "description": "Current function, class or enum name." },
+        "NewName": { "type": "string", "description": "New name; must not already be defined." },
+        "Path": { "type": "string", "description": "Optional absolute or workspace-relative file or directory to limit the rename to." }
+      },
+      "required": ["Name", "NewName"]
+    }
   }
 ]

@@ -48,5 +48,5 @@
         })
     $Harness.RequestMiddleware.Add('AgentPrompt', ${function:Add-PackAgentPrompt}, 50)
     $Harness.Commands.Add('tool', ${function:Invoke-PackToolCommand}, 'Prepare one built-in agent tool: /tool read|write|edit|pwsh {arguments}; mutations require /approve.')
-    $Harness.Commands.Add('undo', ${function:Invoke-PackUndoCommand}, 'Prepare reversing the latest changing agent run''s file changes, including command changes, except files changed since; /approve applies it.')
+    $Harness.Commands.Add('undo', ${function:Invoke-PackUndoCommand}, 'Prepare reversing the latest changing agent run''s file changes, including command changes, except files changed since; /undo N reverses the latest N runs, /undo list shows them; /approve applies it.')
 }
