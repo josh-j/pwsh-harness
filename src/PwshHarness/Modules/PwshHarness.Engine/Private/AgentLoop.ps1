@@ -989,6 +989,8 @@ function Send-EngineAgentRequest {
     Add-EngineTranscript -State $turn.Session -Role 'agent-usage' -Text '' -Metadata @{ RunId = $loop.Run.Id; Step = $loop.Steps; Model = [string]$turn.Request.Model
         InputTokens = $counts.InputTokens; CachedInputTokens = $counts.CachedInputTokens; OutputTokens = $counts.OutputTokens
         Cost = ($usage -and $null -ne $usage.Cost) ? [double]$usage.Cost : $null; Reported = [bool]($counts.InputTokens -or $counts.OutputTokens); Attempts = @($attempts).Count
+        # The provider's name for the backend that served the request, when it reports one: attributes cache misses.
+        Upstream = ($metadata -and $metadata.PSObject.Properties['Upstream']) ? [string]$metadata.Upstream : ''
     }
 }
 function Invoke-EngineAgentDelegate {

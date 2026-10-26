@@ -176,8 +176,15 @@ function Complete-AgentToolCall {
     $presented = (Test-AgentPresentedName $Call.Name) -or $Context.PSObject.Properties['PresentedCall']
     $truncated = [bool]$model['truncated'] -or [bool]$model['OutputLimit'] -or [bool]$model['OutputIncomplete']
     $remaining = [Math]::Min($Context.State.Config.'Agent.MaxReadBytes', $Context.State.Config.'Agent.MaxCaptureBytes')
+    $saved = $hint = ''
     if ($Call.Name -ceq 'pwsh') {
         $remaining = [Math]::Min(8192, $remaining)
+        if ([Text.Encoding]::UTF8.GetByteCount("$($model['Output'])$($model['ErrorOutput'])") -gt $remaining) {
+            # As opencode does: keep the captured output so the model searches it instead of rerunning the command.
+            $saved = Save-AgentFullOutput -State $Context.State -CallId $Call.Id -Text "$($model['Output'])$($model['ErrorOutput'] ? "`n[stderr]`n$($model['ErrorOutput'])" : '')"
+            $hint = $saved ? "`n[Output shortened to its head and tail. The full captured output is saved at $saved for this run: search it with Select-String or read line ranges with Get-Content instead of rerunning the command.]" : ''
+            $remaining -= [Text.Encoding]::UTF8.GetByteCount($hint)
+        }
     }
     foreach ($name in @('ErrorOutput', 'Output') | Where-Object { $model.Contains($_) }) {
         $excerpt = Get-HarnessTextExcerpt $model[$name] $remaining -HeadAndTail:($Call.Name -ceq 'pwsh')
@@ -185,8 +192,11 @@ function Complete-AgentToolCall {
         $remaining -= [Text.Encoding]::UTF8.GetByteCount($excerpt.Text)
         $truncated = $truncated -or $excerpt.Truncated
     }
+    if ($hint) {
+        $model['Output'] += $hint
+    }
     if (-not $presented -and $truncated -and $Call.Name -ceq 'pwsh') {
-        $model.notice = 'Output head and tail retained; truncated; narrow the command to retrieve the relevant output.'
+        $model.notice = $saved ? "Output head and tail retained; full output saved at $saved." : 'Output head and tail retained; truncated; narrow the command to retrieve the relevant output.'
     }
     if (-not $presented -and $Call.Name -ceq 'read' -and $model.Contains('total_lines')) {
         $entire = -not $truncated -and $model.start_line -eq 1

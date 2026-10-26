@@ -184,6 +184,33 @@ function New-AgentRunScratch {
     $null = $IsWindows ? [IO.Directory]::CreateDirectory($path) : [IO.Directory]::CreateDirectory($path, [IO.UnixFileMode]'UserRead, UserWrite, UserExecute')
     $script:PackRunScratch[$SessionId] = @{ RunId = $RunId; Path = $path }
 }
+function Save-AgentFullOutput {
+    # Writes a shortened command's captured (already redacted) output into the run scratch; returns its path or ''.
+    [CmdletBinding()]
+    param($State, [string]$CallId, [string]$Text)
+    $scratch = Get-AgentRunScratch $State
+    if (-not $scratch -or -not $Text) {
+        return ''
+    }
+    $name = $CallId -cmatch '^[A-Za-z0-9_-]{1,64}$' ? $CallId : [guid]::NewGuid().ToString('N')
+    $path = Join-Path $scratch "output-$name.txt"
+    try {
+        # CreateNew never follows or replaces an existing entry.
+        $stream = [IO.FileStream]::new($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+        try {
+            $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Text)
+            $stream.Write($bytes, 0, $bytes.Length)
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    catch [IO.IOException], [UnauthorizedAccessException] {
+        # A missing or unwritable scratch leaves the shortened result as it was.
+        return ''
+    }
+    $path
+}
 function Remove-AgentRunScratch {
     [CmdletBinding()]
     param([string]$SessionId, [string]$RunId)

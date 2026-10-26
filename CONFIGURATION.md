@@ -9,10 +9,16 @@ step and timeout budgets. A minimal config lets the selected profile evolve:
 {
   "Provider": "OpenAICompatible",
   "Model": "google/gemini-3.8-flash",
-  "BaseUrl": "https://openrouter.ai/api",
-  "Agent.CodeSearchExact": true
+  "BaseUrl": "https://openrouter.ai/api"
 }
 ```
+
+These three values are also the built-in defaults, so with an API key no file is
+needed. Do not copy other reference values into a working config: the `Agent.*`
+budgets, `MaxTokens` and `ContextWindowTokens` replace the profile's larger
+limits (32 instead of 256 steps for Gemini Flash), `"Autonomy": "Approve"`
+turns off the interactive Auto start, and `SystemPrompt` freezes the prompt so
+later releases cannot improve it.
 
 Use your gateway's model identifier and URL. `/config` shows effective session
 values; `/config schema` shows declared names, types and base defaults. JSON file,
@@ -33,10 +39,13 @@ does not name the harness credential store. Explicitly saved harness credentials
 are bound to gateway origin and provider: DPAPI on Windows, a permission-0600
 plaintext file on Linux/macOS. Saving a key requires the user's explicit request.
 
-Approval is the default. Select `/mode Auto` or `-Autonomy Auto` explicitly for
-the current conversation to run the host-approved tools without individual
-execution confirmations. Auto is never enabled by this example or a saved session.
-Extension installation and loading still require source-bound approval.
+`Start-PwshHarness` starts interactive sessions in Auto, which runs the
+host-approved tools without individual execution confirmations. Select Approve
+with `-Autonomy Approve`, `/mode Approve` or a saved `"Autonomy": "Approve"`.
+`Invoke-PwshHarness` returns proposals unless given `-Agent` or `-Autonomy`.
+Configuration, the environment or a restored session never enables Auto, and
+`"Autonomy": "Auto"` is rejected. Extension installation and loading still
+require source-bound approval.
 
 Exact workspace search is local, read-only and bounded, and is on by default so
 the agent avoids shell search proposals and their execution reviews. Disable it

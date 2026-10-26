@@ -273,6 +273,7 @@ function Invoke-OpenAIHttpProvider {
                         if ($complete.Raw.id) {
                             $null = $generationIds.Add((Protect-HarnessText ([string]$complete.Raw.id) $redact))
                         }
+                        Set-OpenAIAttemptUpstream -Attempt $observations[-1] -Raw $complete.Raw
                         foreach ($choice in $complete.Raw.choices) {
                             if ($choice.message) {
                                 $choice.delta = $choice.message
@@ -332,6 +333,7 @@ function Invoke-OpenAIHttpProvider {
                             if ($eventName.Raw.id) {
                                 $null = $generationIds.Add((Protect-HarnessText ([string]$eventName.Raw.id) $redact))
                             }
+                            Set-OpenAIAttemptUpstream -Attempt $observations[-1] -Raw $eventName.Raw
                             if (-not $toolRepair) {
                                 try {
                                     Add-OpenAIToolDelta -Calls $toolCalls -StreamEvent $eventName -Enabled (-not $toolsDisabled) -Agent:$agent
@@ -450,7 +452,7 @@ function Invoke-OpenAIHttpProvider {
                     WireFinishReason   = $wireFinishReason
                     NativeToolCalls    = $toolCalls.Count
                     ToolArgumentDeltas = [int](($toolCalls.Values | Measure-Object ArgumentDeltas -Sum).Sum)
-                    Metadata           = New-HarnessFrozen @{ ProviderUsage = $usage; ProviderAttempts = @(ConvertTo-OpenAIUsageAttempt $observations); GenerationIds = @($observations | ForEach-Object { $_.GenerationIds } | Select-Object -Unique); ToolCalls = $agentCalls; FinishReason = $wireFinishReason; ToolFallback = [bool]($agent -and $toolsDisabled)
+                    Metadata           = New-HarnessFrozen @{ ProviderUsage = $usage; ProviderAttempts = @(ConvertTo-OpenAIUsageAttempt $observations); GenerationIds = @($observations | ForEach-Object { $_.GenerationIds } | Select-Object -Unique); Upstream = @($observations | ForEach-Object { $_['Upstream'] } | Where-Object { $_ } | Select-Object -Unique) -join ','; ToolCalls = $agentCalls; FinishReason = $wireFinishReason; ToolFallback = [bool]($agent -and $toolsDisabled)
                         ToolCallRepair = $toolRepair; ProviderData = @{ Turn = $providerTurn; Arguments = $arguments }; ReasoningDetailCount = $reasoningDetails.Count; ReasoningDetailBytes = $reasoningDetails.Count ? [Text.Encoding]::UTF8.GetByteCount($reasoningJson) : 0
                         WireTokenOverhead = ($reasoningDetails.Count -and $Context.PSObject.Properties['EstimateWireTokens']) ? (& $Context.EstimateWireTokens $reasoningJson) : 0
                     }

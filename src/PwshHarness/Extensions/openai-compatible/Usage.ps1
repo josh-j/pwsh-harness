@@ -32,6 +32,16 @@ function ConvertFrom-OpenAIWireUsage {
     }
     New-HarnessUsage @values
 }
+function Set-OpenAIAttemptUpstream {
+    # The gateway's name for the backend that served an attempt (OpenRouter's top-level "provider"), so prompt-cache
+    # misses can be attributed to routing. Only a short plain name is kept.
+    [CmdletBinding()]
+    param([hashtable]$Attempt, $Raw)
+    $name = $Raw -is [Collections.IDictionary] ? $Raw['provider'] : $null
+    if ($name -is [string] -and $name -cmatch '\A[A-Za-z0-9][A-Za-z0-9 ._()/:-]{0,63}\z') {
+        $Attempt.Upstream = $name
+    }
+}
 function ConvertTo-OpenAIUsageAttempt {
     [CmdletBinding()]
     param($Attempts)

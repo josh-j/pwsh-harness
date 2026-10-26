@@ -29,8 +29,8 @@ Invoke-PwshHarness -Provider Mock -Prompt 'Write a greeting'
 ```
 
 Context, patches and approved commands use the chosen/current folder. Portable settings live beside the launcher under `state/`; installed modules use per-user storage.
-The agent is on by default in interactive use, with bounded `read`, `write`, `edit` and `pwsh` tools. **Approve** is the default mode: every change or command is reviewed. `Invoke-PwshHarness` returns proposals unless explicitly given `-Agent` or `-Autonomy Auto`; `/agent off` gives proposals only.
-Select **Auto** with `/mode Auto` or `-Autonomy Auto` for each launch or session; it is never persisted, and `/resume` resets to Approve. Auto runs commands with your user permissions and no sandbox: use a disposable VM or account for untrusted work. `/mode Approve` restores review; the frontend always shows the effective mode. Generated extensions require explicit source approval in every mode.
+The agent is on by default in interactive use, with bounded `read`, `write`, `edit` and `pwsh` tools. Interactive sessions start in **Auto**: commands and changes run without per-action review. `Invoke-PwshHarness` returns proposals unless explicitly given `-Agent` or `-Autonomy Auto`; `/agent off` gives proposals only.
+Select **Approve** with `-Autonomy Approve`, `/mode Approve` or a saved `"Autonomy": "Approve"` to review every change or command; `/resume` also returns to Approve until you select Auto again. Auto runs commands with your user permissions and no sandbox: use a disposable VM or account for untrusted work. The frontend always shows the effective mode. Generated extensions require explicit source approval in every mode.
 Defaults target Windows/Core/7.6/CRLF. Bounded README/Git context, local retrieval, parser repair, scaffolding, examples and semantic checks are enabled. Retrieval uses PowerShell ASTs and declaration hints for Python, Go, Rust, JavaScript/TypeScript and C#. Embeddings and generated-test execution require opting in.
 Windows command discovery is automatic. Optional snapshot export: `.\tools\Export-HarnessCommandCatalog.ps1`.
 
