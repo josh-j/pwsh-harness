@@ -1,0 +1,214 @@
+[
+  {
+    "Name": "view_file",
+    "Description": "Read a UTF-8 text file with a line number before every line. One call returns at most 800 lines and 46080 bytes.\nOmit StartLine and EndLine to read from the start; give StartLine to continue from a line, EndLine to read the lines before it, or both for a range. When the result says the content was truncated at the byte limit, call again with the ContentOffset it gives.\nViewing a file in this run lets you edit it.",
+    "Parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "AbsolutePath": {
+          "description": "Absolute path of the file.",
+          "type": "string"
+        },
+        "StartLine": {
+          "description": "First line to show (1-based).",
+          "type": "integer"
+        },
+        "EndLine": {
+          "description": "Last line to show (inclusive).",
+          "type": "integer"
+        },
+        "ContentOffset": {
+          "description": "Byte offset to continue from after a view truncated at the byte limit.",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "AbsolutePath"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "Name": "run_command",
+    "Description": "Run a command on the USER's machine. OS: {{OS}}. Shell: {{SHELL}}.\n{{SHELL_NOTE}}Set Cwd to the workspace directory the command needs instead of starting with cd; reach files outside the workspace, such as the run's scratch directory, by absolute path. Output is captured, not paged, so bound long output (for example git log -n 20).\nA command still running after WaitMsBeforeAsync continues as a background task and returns its task id. Its completion arrives automatically: continue other work or end your turn instead of polling. manage_task reads its output, sends input or stops it.\nEach command has a hard {{COMMAND_TIMEOUT}}-second deadline, in the background too, and the run deadline may be shorter, so prefer focused checks to full suites.",
+    "Parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "CommandLine": {
+          "description": "The command, exactly as the shell should receive it.",
+          "type": "string"
+        },
+        "Cwd": {
+          "description": "Absolute path of an existing workspace directory to run in.",
+          "type": "string"
+        },
+        "WaitMsBeforeAsync": {
+          "description": "Milliseconds (0-10000) to wait for the command to finish before it moves to the background. Allow enough for a normal run to finish; for a server or watcher, about 500 to catch start-up failures.",
+          "type": "integer"
+        },
+        "IsDaemon": {
+          "description": "True for a process meant to keep running, such as a dev server or file watcher.",
+          "type": "boolean"
+        },
+        "RunPersistent": {
+          "description": "Run in a persistent terminal that keeps variables between commands, and get its TerminalID. Each command still starts in Cwd.",
+          "type": "boolean"
+        },
+        "RequestedTerminalID": {
+          "description": "TerminalID of an idle persistent terminal to reuse; requires RunPersistent.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "CommandLine",
+        "Cwd",
+        "WaitMsBeforeAsync"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "Name": "manage_task",
+    "Description": "List background tasks, or act on one started by run_command: status returns its state and output, send_input writes to its stdin, and kill stops it.\nCompletion notices arrive automatically, so call status only when you need output now: one call with WaitMs and the previous Cursor. Repeated status calls on a task that printed nothing new wait longer each time (15, 30, 60 seconds and so on).\nWhen telling the USER about a task, name what it runs rather than its id.",
+    "Parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "Action": {
+          "description": "list, status, send_input or kill.",
+          "enum": [
+            "list",
+            "kill",
+            "status",
+            "send_input"
+          ],
+          "type": "string"
+        },
+        "TaskId": {
+          "description": "The task id; required for every action except list.",
+          "type": "string"
+        },
+        "Input": {
+          "description": "Text to send to the task's stdin; required for send_input.",
+          "type": "string"
+        },
+        "WaitMs": {
+          "description": "For status: wait up to this many milliseconds for the task to finish (default 10000, at most 300000 and the run deadline).",
+          "type": "integer"
+        },
+        "Cursor": {
+          "description": "For status: the Cursor from the previous status call, to receive only newer output. Omit to read from the beginning.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "Action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "Name": "replace_file_content",
+    "Description": "Edit an existing file that you viewed in this run (or whose ExpectedSha256 you give).\nGive one replacement (StartLine, EndLine, TargetContent, ReplacementContent and optionally AllowMultiple), or ReplacementChunks for up to 64 edits applied together. TargetContent must match the file exactly, including indentation and without view_file's line-number prefixes, and occur once in its line range unless AllowMultiple is true. Chunk line ranges refer to the original file, ascending and non-overlapping. If any edit fails, nothing is written.\nWait for the result before editing the same file again.",
+    "Parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "TargetFile": {
+          "description": "Absolute path of the file.",
+          "type": "string"
+        },
+        "StartLine": {
+          "description": "First line (1-based) of the range that contains TargetContent.",
+          "type": "integer"
+        },
+        "EndLine": {
+          "description": "Last line (inclusive) of the range that contains TargetContent.",
+          "type": "integer"
+        },
+        "TargetContent": {
+          "description": "The exact text to replace.",
+          "type": "string"
+        },
+        "ReplacementContent": {
+          "description": "The text to put in its place.",
+          "type": "string"
+        },
+        "AllowMultiple": {
+          "description": "Replace every occurrence in the range instead of requiring exactly one.",
+          "type": "boolean"
+        },
+        "ReplacementChunks": {
+          "description": "Several edits applied together; do not combine with the single-replacement fields.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "StartLine",
+              "EndLine",
+              "TargetContent",
+              "ReplacementContent"
+            ],
+            "properties": {
+              "StartLine": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "EndLine": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "TargetContent": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ReplacementContent": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "ExpectedSha256": {
+          "description": "SHA-256 of the original file bytes; needed only when you have not viewed the file in this run.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "TargetFile"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "Name": "write_to_file",
+    "Description": "Create a file, or replace or append to an existing one. The parent folder must exist.\nAn existing file is changed only with Overwrite or Append, and only after you viewed it in this run. To change part of a file, use replace_file_content.",
+    "Parameters": {
+      "additionalProperties": false,
+      "properties": {
+        "TargetFile": {
+          "description": "Absolute path of the file.",
+          "type": "string"
+        },
+        "CodeContent": {
+          "description": "The full file content, or the text to append.",
+          "type": "string"
+        },
+        "Overwrite": {
+          "description": "True to replace the content of an existing file.",
+          "type": "boolean"
+        },
+        "Append": {
+          "description": "True to add CodeContent to the end of the file, creating it if missing. Not with Overwrite.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "TargetFile",
+        "CodeContent"
+      ],
+      "type": "object"
+    }
+  }
+]

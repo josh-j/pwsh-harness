@@ -1,0 +1,64 @@
+[
+  {
+    "Name": "grep_search",
+    "Description": "Search workspace files for literal text, or a regular expression when IsRegex is true.\nReturns numbered matching lines with a line of context, grouped by file. Protected and ignored paths are skipped.",
+    "Parameters": {
+      "type": "object",
+      "properties": {
+        "Query": {
+          "type": "string",
+          "description": "The text, or a .NET regular expression with IsRegex."
+        },
+        "SearchPath": {
+          "type": "string",
+          "description": "Absolute path of the workspace file or directory to search."
+        },
+        "Includes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Path wildcards limiting the files searched, such as *.ps1."
+        },
+        "IsRegex": {
+          "type": "boolean",
+          "description": "Treat Query as a regular expression (matched under a short timeout)."
+        },
+        "CaseInsensitive": {
+          "type": "boolean",
+          "description": "Ignore case."
+        },
+        "MatchPerLine": {
+          "type": "boolean",
+          "description": "True (default) returns every matching line; false returns only the first match in each file."
+        }
+      },
+      "required": [
+        "Query",
+        "SearchPath"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "Name": "codebase_search",
+    "Description": "Find code related to a description or identifiers, ranked by relevance (BM25, plus embeddings when the USER enabled hybrid search).\nReturns whole functions or bounded chunks with their locations. Use grep_search for exact text.",
+    "Parameters": {
+      "type": "object",
+      "properties": {
+        "Query": {
+          "type": "string",
+          "description": "Words or identifiers describing what you are looking for."
+        },
+        "SearchPath": {
+          "type": "string",
+          "description": "Optional absolute path of a workspace file or directory to search within."
+        }
+      },
+      "required": [
+        "Query"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

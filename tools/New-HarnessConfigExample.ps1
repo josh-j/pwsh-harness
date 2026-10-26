@@ -17,7 +17,7 @@ $template = Join-Path $Root 'config.full.example.json'
 if (-not (Test-Path -LiteralPath $template)) {
     $template = Join-Path $Root 'public/config.full.example.json'
 }
-Import-Module (Join-Path $Root 'PwshHarness/PwshHarness.psd1') -Force
+Import-Module (Join-Path $Root 'src/PwshHarness/PwshHarness.psd1') -Force
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ('config-example-' + [guid]::NewGuid().ToString('N'))
 $h = $null
 try {

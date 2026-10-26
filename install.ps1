@@ -72,7 +72,10 @@ $backup = $null
 $target = $null
 $swapped = $false
 try {
-    $source = Join-Path $PSScriptRoot 'PwshHarness'
+    $source = Join-Path $PSScriptRoot 'src/PwshHarness'
+    if (-not (Test-Path -LiteralPath $source)) {
+        $source = Join-Path $PSScriptRoot 'PwshHarness'
+    }
     $checkout = Test-Path -LiteralPath (Join-Path $source 'PwshHarness.psd1')
     if (-not $checkout) {
         $versions = @(Get-ChildItem -LiteralPath $source -Directory | Where-Object {
@@ -109,7 +112,7 @@ try {
         Copy-Item -LiteralPath $entry.FullName -Destination $temporary -Recurse -Force
     }
     if ($checkout) {
-        foreach ($name in @('extensions', 'profiles', 'prompts', 'skills', 'bench', 'docs')) {
+        foreach ($name in @('bench', 'docs')) {
             $resource = Join-Path $PSScriptRoot $name
             if (Test-Path -LiteralPath $resource) {
                 Copy-Item -LiteralPath $resource -Destination (Join-Path $temporary $name) -Recurse -Force

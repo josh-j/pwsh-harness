@@ -44,7 +44,7 @@ with `/config set Agent.CodeSearchExact false`. Ranked and hybrid search remain 
 requires explicit embedding model/pricing and a spending bound. Batch independent
 searches and reads to reduce model round trips.
 
-For scripting, import `PwshHarness/PwshHarness.psd1`, create `New-HarnessHost`
+For scripting, import `src/PwshHarness/PwshHarness.psd1`, create `New-HarnessHost`
 with an explicitly isolated `-ConfigPath` and `-ExtensionPaths @()`, call
 `$h.ConfigService.Describe()`, and dispose the host in `finally`. This API lists
 metadata objects with `Name`, `Type`, `Default`, `Environment` and `Extension`,

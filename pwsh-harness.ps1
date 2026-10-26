@@ -24,7 +24,7 @@ param(
     [hashtable]$Options = @{}
 )
 $ErrorActionPreference = 'Stop'
-$manifestPath = Join-Path $PSScriptRoot 'PwshHarness/PwshHarness.psd1'
+$manifestPath = Join-Path $PSScriptRoot 'src/PwshHarness/PwshHarness.psd1'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     $versions = @(foreach ($moduleRoot in @((Join-Path $PSScriptRoot 'PwshHarness'), (Join-Path $PSScriptRoot 'modules/PwshHarness'))) {
             if (-not [IO.Directory]::Exists($moduleRoot)) {

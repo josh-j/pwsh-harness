@@ -7,14 +7,14 @@ Run on Windows PowerShell 7.6. Captures installed commands and applications, inc
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$OutputPath = (Join-Path $PSScriptRoot '../extensions/builtin/powershell/windows-7.6.json'),
+    [string]$OutputPath = (Join-Path $PSScriptRoot '../src/PwshHarness/Extensions/powershell/windows-7.6.json'),
     [string[]]$IncludeModules = @()
 )
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) {
     throw 'Run this catalog export on the real Windows 7.6 target.'
 }
-. (Join-Path $PSScriptRoot '../extensions/builtin/powershell/catalog.ps1')
+. (Join-Path $PSScriptRoot '../src/PwshHarness/Extensions/powershell/Catalog.ps1')
 $entries = @{
 }
 $gitFiles = @()
@@ -43,15 +43,15 @@ foreach ($command in $commands) {
     if ($entries.ContainsKey($command.Name)) {
         continue
     }
-    $entries[$command.Name] = ConvertTo-CatalogEntry $command 'Captured'
+    $entries[$command.Name] = ConvertTo-PowerShellCatalogEntry $command 'Captured'
 }
 foreach ($file in $gitFiles) {
     if (-not $entries.ContainsKey($file.Name)) {
-        $entries[$file.Name] = ConvertTo-CatalogApplicationEntry -File $file
+        $entries[$file.Name] = ConvertTo-PowerShellCatalogApplicationEntry -File $file
     }
 }
 $installedModules = @(Get-Module -ListAvailable)
-$installedNames = Get-HarnessInstalledCommandNames $installedModules
+$installedNames = Get-PowerShellInstalledCommandName $installedModules
 foreach ($name in $installedNames.Keys) {
     if (-not $entries.ContainsKey($name)) {
         $entries[$name] = $installedNames[$name]
