@@ -193,6 +193,8 @@ function Invoke-PowerShellRun {
             }
         }
         $start.RedirectStandardInput = $true
+        # Task input is UTF-8 without a byte order mark on every system; on Windows the default is the console code page.
+        $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
         $start.Environment['PAGER'] = 'cat'
         Remove-PowerShellChildCredential $start $State.Config
         $task.Persistent = [bool]$Terminal

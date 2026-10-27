@@ -1,5 +1,8 @@
 #Requires -Version 7.6
-$script:PackUtf8Prelude = '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; '
+# Windows children start in the console code page; standard input, output and pipes to native tools use UTF-8 as on
+# Unix. Input switches once, because each switch replaces [Console]::In and drops anything it had buffered.
+$script:PackUtf8Prelude = '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; ' +
+'if ([Console]::InputEncoding.CodePage -ne 65001) { try { [Console]::InputEncoding = [Text.UTF8Encoding]::new($false) } catch { $null = $_ } }; '
 function Invoke-PowerShellSaveGitQuery {
     [CmdletBinding()]
     param([string]$Directory, [string[]]$Arguments)
