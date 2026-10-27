@@ -157,7 +157,8 @@ $script:FlashPresentationDescriptor = @{
     Names                    = [string[]](@($script:FlashTools.Name) + @($script:FlashSearchTools.Name))
     Schemas                  = @($script:FlashTools) + @($script:FlashSearchTools)
     Retired                  = Get-FlashPresentationRetiredArgument
-    InputTokenReservePercent = 0
+    # A small reserve covers wire framing that per-message estimates approximate; at 0 a full history overshoots admission.
+    InputTokenReservePercent = 3
     AdvertisedSchemas        = ${function:Get-FlashPresentationAdvertisedSchema}
     SearchSchemas            = ${function:Get-FlashPresentationSearchSchema}
     ValidateField            = ${function:Test-FlashPresentationField}

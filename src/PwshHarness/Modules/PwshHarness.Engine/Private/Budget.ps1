@@ -277,10 +277,14 @@ function Limit-EngineRequest {
     $count = {
         $tokens = 0
         foreach ($message in $messages) {
-            $raw = & $estimate $Turn.Store $message.Content $request.Config -Uncalibrated
-            $tokens += [Math]::Max($raw, (& $estimate $Turn.Store $message.Content $request.Config)) + 4
+            # Count the escaped wire form: backslashes and quotes in paths and command output double on the wire.
+            $wire = ConvertTo-Json -InputObject ([string]$message.Content) -Compress
+            $raw = & $estimate $Turn.Store $wire $request.Config -Uncalibrated
+            $tokens += [Math]::Max($raw, (& $estimate $Turn.Store $wire $request.Config)) + 4
             if ($message.PSObject.Properties['NativeBatch']) {
-                $tokens += [int][Math]::Ceiling([Math]::Max(0, [int]$message.NativeBatch.TokenOverhead) * $wireRatio)
+                # Each native call and result travels as its own wire message with role, identity and type fields.
+                $framing = 16 * (@($message.NativeBatch.Calls).Count + @($message.NativeBatch.Results).Count)
+                $tokens += [int][Math]::Ceiling(([Math]::Max(0, [int]$message.NativeBatch.TokenOverhead) + $framing) * $wireRatio)
             }
         }
         $tokens

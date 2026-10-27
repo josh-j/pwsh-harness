@@ -164,12 +164,26 @@ function Add-EngineAgentRequestReservation {
         $Loop.StopReason = 'StepLimit'; throw 'Agent step limit reached.'
     }
     $request = $Loop.Turn.Request
-    $messages = @($request.Messages | ForEach-Object {
-            $_.PSObject.Properties['NativeBatch'] ? $_.NativeBatch : @{ Role = $_.Role; Content = $_.Content }
-        })
-    $inputTokens = Get-EngineTokenEstimate -Store $Store -Text ($WireBody ? $WireBody : (($messages, $request.AgentTools) | ConvertTo-Json -Depth 40 -Compress)) -Config $request.Config
+    $inputTokens = if ($WireBody) {
+        Get-EngineTokenEstimate -Store $Store -Text $WireBody -Config $request.Config
+    }
+    else {
+        # Before the provider builds its body, count what it will send, as packing does: each message's provider-visible
+        # text and native wire overhead, not a batch's raw result data, which a result's ModelContent replaces.
+        $ratio = [Math]::Max(1, (Get-EngineCalibration $Store $request.Config).Ratio)
+        $overhead = 0
+        foreach ($message in $request.Messages) {
+            if ($message.PSObject.Properties['NativeBatch']) {
+                $overhead += [int][Math]::Ceiling([Math]::Max(0, [int]$message.NativeBatch.TokenOverhead) * $ratio)
+            }
+        }
+        $visible = @($request.Messages | ForEach-Object { @{ Role = $_.Role; Content = $_.Content } })
+        $overhead + (Get-EngineTokenEstimate -Store $Store -Text (($visible, $request.AgentTools) | ConvertTo-Json -Depth 40 -Compress) -Config $request.Config)
+    }
     if ($inputTokens -gt $request.InputBudget.Limit) {
-        $Loop.StopReason = 'InputTooLarge'; throw 'Agent schema and framing exceed the input budget.'
+        $setting = $request.PSObject.Properties['AgentTools'] ? 'Agent.InputTokenBudget' : 'InputTokenBudget'
+        $Loop.StopReason = 'InputTooLarge'
+        throw "The agent request needs about $inputTokens input tokens with tool schemas and wire framing; the input budget allows $($request.InputBudget.Limit). Raise $setting for your gateway or start a narrower task. No request was sent."
     }
     if ($WireBody) {
         $request | Add-Member NoteProperty WireInputTokens (Get-EngineTokenEstimate -Store $Store -Text $WireBody -Config $request.Config -Uncalibrated) -Force

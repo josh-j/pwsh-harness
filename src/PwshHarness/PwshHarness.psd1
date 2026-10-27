@@ -12,7 +12,7 @@
     PowerShellVersion = '7.6'
     FunctionsToExport = @(
         'Get-HarnessUsageCounter', 'New-HarnessUsage', 'New-HarnessNativeBatch', 'Get-HarnessSha256', 'Get-HarnessPathSnapshot', 'Read-HarnessTextFile',
-        'ConvertTo-HarnessSafeText', 'Get-HarnessSecretPattern', 'Get-HarnessSecretSuffixLength', 'Protect-HarnessText',
+        'ConvertTo-HarnessSafeText', 'Get-HarnessSecretPattern', 'Get-HarnessSecretSuffixLength', 'Protect-HarnessText', 'Test-HarnessSecretName',
         'Get-HarnessCredentialOrigin', 'New-HarnessToolCall', 'Assert-HarnessToolCall',
         'New-HarnessToolResult', 'Assert-HarnessToolResult',
         'New-HarnessAgentRun', 'Assert-HarnessAgentRun',

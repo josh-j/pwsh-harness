@@ -34,7 +34,7 @@ while ($directories.Count) {
     foreach ($entry in Get-ChildItem -LiteralPath $directories.Dequeue() -Force | Sort-Object Name) {
         if ($entry.Name -in @('.git', '.hg', '.svn', 'out', 'state') -or $entry.FullName -eq $output -or
             $entry.Name -like '*.bundle.ps1' -or $entry.Name -like '*.log' -or $entry.Name -like '.env*' -or
-            $entry.Name -in @('credentials.json', 'config.json')) {
+            $entry.Name -in @('credentials.json', 'config.json', '.pwsh-harness-bundle.json')) {
             continue
         }
         if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
@@ -97,7 +97,9 @@ Restore the embedded repository files without running the restored scripts.
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$Destination = (Join-Path $PSScriptRoot 'PwshHarness-unpacked'),
-    [switch]$Force
+    [switch]$Force,
+    # Replace an earlier extraction in place: rewrite its files and remove the ones this bundle no longer ships.
+    [switch]$Upgrade
 )
 $ErrorActionPreference = 'Stop'
 $text = [IO.File]::ReadAllText($PSCommandPath)
@@ -156,8 +158,8 @@ foreach ($file in $manifest.Files) {
             throw 'A destination parent is a file.'
         }
     }
-    if ([IO.Directory]::Exists($target) -or ((Test-Path -LiteralPath $target) -and -not $Force)) {
-        throw 'A destination file already exists. Choose an empty Destination or use -Force.'
+    if ([IO.Directory]::Exists($target) -or ((Test-Path -LiteralPath $target) -and -not ($Force -or $Upgrade))) {
+        throw 'A destination file already exists. Choose an empty Destination, or use -Upgrade or -Force.'
     }
     if ($file.Content -isnot [string] -or $file.SHA256 -isnot [string]) {
         throw 'Invalid bundle file record.'
@@ -178,12 +180,63 @@ foreach ($relative in $paths) {
         }
     }
 }
-if ($PSCmdlet.ShouldProcess($destinationPath, "Restore $($files.Count) repository files")) {
+$recordPath = Join-Path $destinationPath '.pwsh-harness-bundle.json'
+$stale = [Collections.Generic.List[string]]::new()
+$kept = [Collections.Generic.List[string]]::new()
+if ($Upgrade -and [IO.Directory]::Exists($destinationPath)) {
+    # The extraction record names what the earlier bundle wrote; a file changed since then is the user's and stays.
+    # Without a record (an older unpacker), only the module trees are the bundle's: state/, out/ and settings never are.
+    $candidates = if ([IO.File]::Exists($recordPath)) {
+        @(([IO.File]::ReadAllText($recordPath) | ConvertFrom-Json -AsHashtable).Files)
+    }
+    else {
+        foreach ($root in @('src/PwshHarness', 'PwshHarness')) {
+            $tree = Join-Path $destinationPath $root
+            if ([IO.Directory]::Exists($tree) -and -not ((Get-Item -LiteralPath $tree -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                Get-ChildItem -LiteralPath $tree -Recurse -File -Force | ForEach-Object {
+                    @{ Path = [IO.Path]::GetRelativePath($destinationPath, $_.FullName).Replace('\', '/'); SHA256 = '' }
+                }
+            }
+        }
+    }
+    foreach ($candidate in $candidates) {
+        $relative = [string]$candidate.Path
+        if (-not $relative -or $paths.Contains($relative) -or $relative -match '[\x00-\x1f\\:*?"<>|]' -or $relative.StartsWith('/') -or
+            @($relative.Split('/') | Where-Object { -not $_ -or $_ -in @('.', '..') }).Count) {
+            continue
+        }
+        $target = [IO.Path]::GetFullPath((Join-Path $destinationPath $relative))
+        $linked = $false
+        for ($parent = $target; $parent -and $parent.Length -gt $destinationPath.Length; $parent = [IO.Path]::GetDirectoryName($parent)) {
+            if ((Test-Path -LiteralPath $parent) -and ((Get-Item -LiteralPath $parent -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                $linked = $true
+            }
+        }
+        if ($linked -or -not [IO.File]::Exists($target)) {
+            continue
+        }
+        if ($candidate.SHA256 -and [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($target))).ToLowerInvariant() -cne $candidate.SHA256) {
+            $kept.Add($relative)
+            continue
+        }
+        $stale.Add($target)
+    }
+}
+if ($PSCmdlet.ShouldProcess($destinationPath, "Restore $($files.Count) repository files" + ($stale.Count ? " and remove $($stale.Count) it no longer ships" : ''))) {
     foreach ($file in $files) {
         $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($file.Path))
         [IO.File]::WriteAllBytes($file.Path, $file.Bytes)
     }
-    [pscustomobject]@{ Destination = $destinationPath; Files = $files.Count }
+    foreach ($target in $stale) {
+        [IO.File]::Delete($target)
+        for ($parent = [IO.Path]::GetDirectoryName($target); $parent.Length -gt $destinationPath.Length -and
+            -not [IO.Directory]::EnumerateFileSystemEntries($parent).GetEnumerator().MoveNext(); $parent = [IO.Path]::GetDirectoryName($parent)) {
+            [IO.Directory]::Delete($parent)
+        }
+    }
+    $record = [ordered]@{ Format = 'PwshHarness.BundleExtraction'; Version = 1; Files = @($manifest.Files | ForEach-Object { [ordered]@{ Path = $_.Path; SHA256 = $_.SHA256 } }) }
+    [IO.File]::WriteAllText($recordPath, ($record | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+    [pscustomobject]@{ Destination = $destinationPath; Files = $files.Count; Removed = $stale.Count; KeptChanged = @($kept) }
 }
 #<PwshHarnessBundleV1>
 __PAYLOAD__

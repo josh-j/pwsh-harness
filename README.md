@@ -8,7 +8,7 @@ PowerShell 7.6+. Git and PSScriptAnalyzer are optional; generated-test verificat
 
 ## Install
 
-From a checkout or extracted package: `pwsh -NoProfile -File .\install.ps1`. Build one self-extracting script with `pwsh -NoProfile -File .\package.ps1`; output: `out/PwshHarness.bundle.ps1`. The published `PwshHarness.bundle.ps1` is ready to download. Extract with `pwsh -NoProfile -File .\PwshHarness.bundle.ps1 -Destination .\PwshHarness`; then launch or install from that folder. Extraction verifies file hashes and never runs restored scripts. Existing files require `-Force`.
+From a checkout or extracted package: `pwsh -NoProfile -File .\install.ps1`. Build one self-extracting script with `pwsh -NoProfile -File .\package.ps1`; output: `out/PwshHarness.bundle.ps1`. The published `PwshHarness.bundle.ps1` is ready to download. Extract with `pwsh -NoProfile -File .\PwshHarness.bundle.ps1 -Destination .\PwshHarness`; then launch or install from that folder. Extraction verifies file hashes and never runs restored scripts. Existing files require `-Force`. To upgrade that folder, download the new bundle and run `pwsh -NoProfile -File .\PwshHarness.bundle.ps1 -Destination .\PwshHarness -Upgrade` (add `-WhatIf` to preview): it rewrites the shipped files, removes ones the new release dropped unless you edited them, and keeps `state/`, your settings and other files. If you installed the module from that folder, run its `install.ps1` again.
 
 ## Configure
 

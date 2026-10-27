@@ -196,6 +196,12 @@ function Invoke-PowerShellRun {
         # Task input is UTF-8 without a byte order mark on every system; on Windows the default is the console code page.
         $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
         $start.Environment['PAGER'] = 'cat'
+        # Nobody can answer a prompt or close an editor: Git for Windows would otherwise open its editor or the
+        # credential manager's sign-in window and hold the run until its timeout. A commit without -m now aborts at once.
+        $start.Environment['GIT_PAGER'] = 'cat'
+        $start.Environment['GIT_EDITOR'] = ':'
+        $start.Environment['GIT_TERMINAL_PROMPT'] = '0'
+        $start.Environment['GCM_INTERACTIVE'] = 'never'
         Remove-PowerShellChildCredential $start $State.Config
         $task.Persistent = [bool]$Terminal
         if ($Terminal -and $Terminal.Task) {
