@@ -57,7 +57,8 @@ function Get-PowerShellAnalyzer {
                 $a = $script:PackAnalyzer; $a.Source = $candidate.Source; $a.Path = $candidate.Path; $a.Version = $candidate.Version
                 $a.Runspace = [runspacefactory]::CreateRunspace(); $a.Runspace.Open()
                 $a.Pipeline = [powershell]::Create(); $a.Pipeline.Runspace = $a.Runspace
-                $a.Module = @(Invoke-PowerShellAnalyzerPipeline -Analyzer $a -Command 'Import-Module' -Parameters @{ Name = $a.Path; Scope = 'Local'; PassThru = $true; ErrorAction = 'Stop' } -Context $Context)[0]
+                # A cold import on a loaded or virus-scanned Windows machine takes well over one check's budget.
+                $a.Module = @(Invoke-PowerShellAnalyzerPipeline -Analyzer $a -Command 'Import-Module' -Parameters @{ Name = $a.Path; Scope = 'Local'; PassThru = $true; ErrorAction = 'Stop' } -Context $Context -TimeoutMilliseconds 30000)[0]
             }
         }
         catch {
@@ -65,6 +66,12 @@ function Get-PowerShellAnalyzer {
                 $Context.CancellationToken.ThrowIfCancellationRequested()
             }
             $script:PackAnalyzer.Error = $_.Exception.Message
+            if ($_.Exception -is [TimeoutException]) {
+                # A slow start fails this check only; the next one starts the analyzer again instead of losing it for the session.
+                $failed = $script:PackAnalyzer; $script:PackAnalyzer = $null
+                $null = $failed.Runspace.CloseAsync()
+                return $failed
+            }
         }
     }
     $script:PackAnalyzer
@@ -112,7 +119,12 @@ function Invoke-PowerShellAnalyzerPipeline {
                 $Context.CancellationToken.ThrowIfCancellationRequested()
                 if ($watch.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
                     $seconds = [Math]::Round($TimeoutMilliseconds / 1000.0)
-                    throw [TimeoutException]::new($Command -ceq 'Invoke-ScriptAnalyzer' ? "Analysis exceeded its $($seconds -eq 5 ? 'five' : $seconds)-second budget." : 'Formatter exceeded its five-second budget; original source retained.')
+                    $messages = @{
+                        'Invoke-ScriptAnalyzer' = "Analysis exceeded its $($seconds -eq 5 ? 'five' : $seconds)-second budget."
+                        'Import-Module'         = "PSScriptAnalyzer did not start within $seconds seconds; the next check tries again."
+                        'Invoke-Formatter'      = 'Formatter exceeded its five-second budget; original source retained.'
+                    }
+                    throw [TimeoutException]::new($messages[$Command])
                 }
                 if ($Context.Pump) {
                     $null = & $Context.Pump

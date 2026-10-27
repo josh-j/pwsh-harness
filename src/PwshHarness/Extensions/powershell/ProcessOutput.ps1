@@ -2,7 +2,7 @@
 function New-PowerShellRunCapture {
     [CmdletBinding()]
     param([IO.StreamReader]$Reader, $Budget = $null)
-    $buffer = [char[]]::new(4096)
+    $buffer = [char[]]::new(65536)
     $cancellation = [Threading.CancellationTokenSource]::new()
     [pscustomobject]@{ Reader = $Reader; Buffer = $buffer; Text = [Text.StringBuilder]::new()
         Budget = $Budget; Cancellation = $cancellation; Pending = $Reader.ReadAsync([Memory[char]]::new($buffer), $cancellation.Token).AsTask(); Finished = $false; Failure = $null
@@ -29,6 +29,11 @@ function Update-PowerShellRunCapture {
             }
             $null = $Capture.Text.Append($chunk)
             $Capture.Pending = $Capture.Reader.ReadAsync([Memory[char]]::new($Capture.Buffer), $Capture.Cancellation.Token).AsTask()
+            if ($count -eq $Capture.Buffer.Length) {
+                # A full buffer means more output is queued. Windows pipe reads complete on the thread pool, never
+                # inline, so without this short wait each 50 ms pass would drain one buffer and large output would crawl.
+                $null = ([IAsyncResult]$Capture.Pending).AsyncWaitHandle.WaitOne(20)
+            }
         }
         catch {
             $Capture.Failure = $_.Exception

@@ -11,6 +11,11 @@ function Wait-OpenAITask {
         if ($Context.PSObject.Properties['Pump'] -and $Context.Pump) {
             $null = Invoke-OpenAIClientCallback -Callback $Context.Pump -Arguments @() -CancellationToken $CancellationToken
         }
+        # Windows completes most stream reads on the thread pool rather than inline: wait for the read itself first,
+        # or every buffer would also cost a 50 ms pass and an 8 MiB response would take a minute.
+        if (([IAsyncResult]$Task).AsyncWaitHandle.WaitOne(10)) {
+            continue
+        }
         $script:Clock.Wait(50, $Output)
     }
     $CancellationToken.ThrowIfCancellationRequested()
@@ -33,7 +38,7 @@ function Wait-OpenAITask {
 function New-OpenAIStreamLineState {
     [CmdletBinding()]
     param()
-    @{ Buffer = [char[]]::new(4096); Encoded = [byte[]]::new(16384); Chunk = ''; Newlines = [char[]]@(13, 10); Offset = 0; Count = 0; SkipLf = $false; Bytes = 0; Text = [Text.StringBuilder]::new(); Encoder = [Text.Encoding]::UTF8.GetEncoder() }
+    @{ Buffer = [char[]]::new(16384); Encoded = [byte[]]::new(65536); Chunk = ''; Newlines = [char[]]@(13, 10); Offset = 0; Count = 0; SkipLf = $false; Bytes = 0; Text = [Text.StringBuilder]::new(); Encoder = [Text.Encoding]::UTF8.GetEncoder() }
 }
 function New-OpenAIStreamOutput {
     [CmdletBinding()]

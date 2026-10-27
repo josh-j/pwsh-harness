@@ -220,7 +220,7 @@ function Write-EngineTranscriptEntry {
                 [IO.File]::SetUnixFileMode($stream.SafeFileHandle, [IO.UnixFileMode]384)
             }
             elseif ($stream.Length -eq 0) {
-                Protect-HarnessPrivateItem $stream
+                Protect-HarnessPrivateItem ([IO.FileInfo]::new($file))
             }
             Repair-EngineSessionTail $stream
             $null = $stream.Seek(0, [IO.SeekOrigin]::End)

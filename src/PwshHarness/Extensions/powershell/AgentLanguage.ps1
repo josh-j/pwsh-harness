@@ -214,7 +214,9 @@ function Get-PowerShellCommandParameter {
             # A manifest's root module defines its functions.
             $pair = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.HashtableAst] }, $false) | ForEach-Object KeyValuePairs | Where-Object { $_.Item1.Extent.Text.Trim('''"') -eq 'RootModule' })[0]
             if ($pair -and $pair.Item2.Extent.Text.Trim('''"') -match '\.ps[m]?1$') {
-                $files.Enqueue([IO.Path]::Combine([IO.Path]::GetDirectoryName($file), $pair.Item2.Extent.Text.Trim('''"')))
+                # Keep the command's own separators; Windows path helpers would rewrite ./M.psd1 as .\M.psm1.
+                $folder = $file.Substring(0, $file.LastIndexOfAny([char[]]'/\') + 1)
+                $files.Enqueue($folder + $pair.Item2.Extent.Text.Trim('''"'))
             }
             continue
         }
