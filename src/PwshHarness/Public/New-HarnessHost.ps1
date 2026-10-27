@@ -162,6 +162,22 @@ function New-HarnessHost {
             [IO.File]::AppendAllText($path, $prefix + '- ' + ($text -replace '\r?\n', ' ') + "`n")
             "Remembered in $path; the agent follows it from the next request."
         }.GetNewClosure(), 'Add a standing rule for the agent: /remember <rule> for every project, /remember --project <rule> for AGENTS.local.md here.', '/remember [--project] <rule>')
+    $hostInstance.Commands.Add('init', {
+            param($context)
+            if ($context.UserInitiated -cne $true) {
+                throw 'Init requires explicit user input.'
+            }
+            if (-not $context.State.Config.'Agent.Enabled') {
+                throw 'Init asks the agent to write AGENTS.md; turn it on with /agent on.'
+            }
+            # The project AGENTS.md sits beside AGENTS.local.md; the agent writes it through its normal file tools and mode.
+            $path = Join-Path ([IO.Path]::GetDirectoryName($hostInstance.GetRulePaths($context.State).Local)) 'AGENTS.md'
+            $guidance = ([string]$context.Arguments).Trim()
+            $task = [IO.File]::Exists($path) ? 'Review and improve' : 'Create'
+            $prompt = [IO.File]::ReadAllText((Join-Path $dataRoot 'Prompts/init.md')).Replace('{{TASK}}', $task).Replace('{{PATH}}', $path)
+            $prompt = $prompt.Replace('{{GUIDANCE}}', $($guidance ? "`nThe user adds: $guidance" : ''))
+            [pscustomobject]@{ Action = 'Send'; Prompt = $prompt; DisplayPrompt = ('/init ' + $guidance).TrimEnd() }
+        }.GetNewClosure(), 'Ask the agent to explore this project and write or improve its AGENTS.md; text after /init adds guidance.', '/init [guidance]')
     $hostInstance.ExtensionLoader.Load($ExtensionPaths)
     foreach ($eventName in @('ext.core-commands.ConversationReset', 'ext.core-commands.ConversationRestored')) {
         $hostInstance.Events.Subscribe($eventName, 'root-agent-authority-' + $eventName, {
