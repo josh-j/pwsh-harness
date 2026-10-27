@@ -210,12 +210,17 @@ function Write-EngineTranscriptEntry {
     if ($State.Persist) {
         $stream = $null
         try {
-            $null = $IsWindows ? [IO.Directory]::CreateDirectory($State.Config.SessionDirectory) : [IO.Directory]::CreateDirectory($State.Config.SessionDirectory, [IO.UnixFileMode]448)
+            if (-not [IO.Directory]::Exists($State.Config.SessionDirectory)) {
+                Protect-HarnessPrivateItem ($IsWindows ? [IO.Directory]::CreateDirectory($State.Config.SessionDirectory) : [IO.Directory]::CreateDirectory($State.Config.SessionDirectory, [IO.UnixFileMode]448))
+            }
             $file = Join-Path $State.Config.SessionDirectory "$($State.SessionId).jsonl"
             $null = Get-EngineSessionFile $file
             $stream = Open-EngineSessionStream $file
             if (-not $IsWindows) {
                 [IO.File]::SetUnixFileMode($stream.SafeFileHandle, [IO.UnixFileMode]384)
+            }
+            elseif ($stream.Length -eq 0) {
+                Protect-HarnessPrivateItem $stream
             }
             Repair-EngineSessionTail $stream
             $null = $stream.Seek(0, [IO.SeekOrigin]::End)

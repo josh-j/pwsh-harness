@@ -268,6 +268,10 @@ function Resolve-AgentPresentedPath {
     }
     $root = Get-HarnessOperationDirectory $Context.State
     $relative = [IO.Path]::GetRelativePath($root, $Path)
+    if ($relative -ceq '.') {
+        # The workspace itself, often echoed with a trailing separator, is a search scope or command folder.
+        return $relative
+    }
     $null = Resolve-AgentToolPath -State $Context.State -Root $root -Path $relative -Context $Context
     $relative
 }

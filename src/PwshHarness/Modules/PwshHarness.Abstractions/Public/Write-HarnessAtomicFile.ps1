@@ -20,7 +20,11 @@ function Write-HarnessAtomicFile {
         # Windows refuses to replace a read-only file, where a Unix rename does not; say so instead of access denied.
         throw 'The file is read-only; clear its read-only attribute before replacing it.'
     }
-    $null = $Private -and -not $IsWindows ? [IO.Directory]::CreateDirectory($parent, [IO.UnixFileMode]448) : [IO.Directory]::CreateDirectory($parent)
+    $created = -not [IO.Directory]::Exists($parent)
+    $folder = $Private -and -not $IsWindows ? [IO.Directory]::CreateDirectory($parent, [IO.UnixFileMode]448) : [IO.Directory]::CreateDirectory($parent)
+    if ($Private -and $created) {
+        Protect-HarnessPrivateItem $folder
+    }
     $parents = (Get-HarnessPathSnapshot $Path -AllowMissing -NoHardLinks).Parents
     if (-not $parents.EndsWith($initial.Parents, [StringComparison]::Ordinal)) {
         throw 'Physical parent changed while creating the file directory.'
@@ -36,6 +40,9 @@ function Write-HarnessAtomicFile {
             $options.UnixCreateMode = $mode
         }
         $stream = [IO.FileStream]::new($temporary, $options)
+        if ($Private) {
+            Protect-HarnessPrivateItem $stream
+        }
         if ((Get-HarnessPathSnapshot $Path -AllowMissing -NoHardLinks).Parents -cne $parents) {
             throw 'Physical parent changed while creating the temporary file.'
         }
@@ -58,6 +65,10 @@ function Write-HarnessAtomicFile {
             if ((Get-HarnessPathSnapshot $Path -AllowMissing -NoHardLinks).Parents -cne $parents) {
                 throw 'Physical parent changed before file replacement.'
             }
+        }
+        if ($Private -and $exists) {
+            # Windows keeps the replaced file's access list.
+            Protect-HarnessPrivateItem ([IO.FileInfo]::new($Path))
         }
     }
     finally {

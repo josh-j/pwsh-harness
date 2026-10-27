@@ -457,10 +457,19 @@ function Get-EngineAgentReplay {
     [CmdletBinding()]
     param($Loop)
     $request = $Loop.Turn.Request
-    if (-not $request -or $Loop.Turn.ReplayStart -le 0 -or $Loop.Turn.ReplayStart -ge @($request.Messages).Count) {
+    if (-not $request) {
         return ''
     }
-    $json = @{ Version = 1; Messages = @(ConvertTo-EngineMessageRecord @($request.Messages | Select-Object -Skip $Loop.Turn.ReplayStart)) } | ConvertTo-Json -Depth 64 -Compress
+    # Compaction can remove preceding history and context. Locate the surviving task/context group,
+    # rather than an index captured before those removals; replayed earlier turns have history groups.
+    $start = 0
+    while ($start -lt $request.Messages.Count -and -not ($request.Messages[$start].PSObject.Properties['BudgetGroup'] -and $request.Messages[$start].BudgetGroup -cin @('context', 'task'))) {
+        $start++
+    }
+    if ($start -ge $request.Messages.Count) {
+        return ''
+    }
+    $json = @{ Version = 1; Messages = @(ConvertTo-EngineMessageRecord @($request.Messages | Select-Object -Skip $start)); Answer = $Loop.Turn.ResponseText } | ConvertTo-Json -Depth 64 -Compress
     # Oversized turns fall back to the prompt and answer alone.
     $json.Length -le 4MB ? $json : ''
 }
@@ -753,7 +762,7 @@ function Invoke-EngineAgentContinuation {
                 if ($decision.Kind -ceq 'Complete') {
                     throw 'Incomplete response exhausted the continuation bound.'
                 }
-                $turn.Exchange.Add((New-EngineAgentAssistantMessage $turn.Response))
+                $turn.Exchange.Add((New-EngineAgentAssistantMessage -Response $turn.Response -Text $turn.ResponseText))
                 $turn.Exchange.Add((New-HarnessMessage user $decision.Message))
                 $turn.Continuations++; $turn.RequestKind = 'Continue'
                 continue
@@ -763,7 +772,7 @@ function Invoke-EngineAgentContinuation {
                 $turn.Result = $parsed
                 $decision = Get-EngineRepairDecision $turn
                 if ($decision.Kind -ceq 'Repair') {
-                    $turn.Exchange.Add((New-EngineAgentAssistantMessage $turn.Response))
+                    $turn.Exchange.Add((New-EngineAgentAssistantMessage -Response $turn.Response -Text $turn.ResponseText))
                     $turn.Exchange.Add((New-HarnessMessage user $decision.Message))
                     $turn.Repairs++; $turn.RequestKind = 'Repair'
                     Set-EngineRepairMessage $turn $decision.Message
@@ -777,7 +786,7 @@ function Invoke-EngineAgentContinuation {
                 Update-EngineAgentTask -Store $Store -Loop $loop -Mode Wait
                 # A pending steering note keeps the run going so the model sees it before finishing.
                 if ($loop.TaskNotices.Count -or $loop.Steering.Count) {
-                    $turn.Exchange.Add((New-EngineAgentAssistantMessage $turn.Response))
+                    $turn.Exchange.Add((New-EngineAgentAssistantMessage -Response $turn.Response -Text $turn.ResponseText))
                     Publish-EngineEvent -Store $Store -EventName AgentStepContinued -Payload @{ SessionId = $State.SessionId; RunId = $loop.Run.Id; Step = $loop.Steps }
                     $turn.RequestKind = 'Agent'
                     continue
@@ -786,7 +795,7 @@ function Invoke-EngineAgentContinuation {
                 # their own limits; they see the steps and seconds that remain, so a review never turns Complete into a limit stop.
                 $verdict = Invoke-EngineRunPolicy -Store $Store -State $State -Loop $loop -Moment Completing -Answer ([string]$turn.Response.Text)
                 if ($verdict -and $verdict.Continue) {
-                    $turn.Exchange.Add((New-EngineAgentAssistantMessage $turn.Response))
+                    $turn.Exchange.Add((New-EngineAgentAssistantMessage -Response $turn.Response -Text $turn.ResponseText))
                     foreach ($message in $verdict.Messages) {
                         Add-EngineRunPolicyMessage -Store $Store -State $State -Loop $loop -Message $message -Answer $verdict.Answer
                     }

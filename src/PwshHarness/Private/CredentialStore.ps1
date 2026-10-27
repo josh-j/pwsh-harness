@@ -22,12 +22,7 @@ function Get-HarnessCredentialIdentity {
 function Set-HarnessCredentialAcl {
     [CmdletBinding()]
     param([string]$Path)
-    $identity = Get-HarnessCredentialIdentity
-    $acl = [Security.AccessControl.FileSecurity]::new()
-    $acl.SetOwner($identity)
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'Allow'))
-    [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($Path), $acl)
+    Protect-HarnessPrivateItem ([IO.FileInfo]::new($Path))
 }
 function Test-HarnessCredentialAcl {
     [CmdletBinding()]
@@ -78,7 +73,7 @@ function Initialize-HarnessCredentialDirectory {
     param([string]$Directory)
     if (-not [IO.Directory]::Exists($Directory)) {
         if (Test-HarnessCredentialWindows) {
-            $null = [IO.Directory]::CreateDirectory($Directory)
+            Protect-HarnessPrivateItem ([IO.Directory]::CreateDirectory($Directory))
         }
         else {
             $null = [IO.Directory]::CreateDirectory($Directory, [IO.UnixFileMode]448)

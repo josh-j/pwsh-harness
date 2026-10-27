@@ -132,6 +132,10 @@ try {
             }
         }
     }
+    if ($IsWindows) {
+        # A downloaded release carries the internet zone mark, which RemoteSigned refuses to import.
+        Get-ChildItem -LiteralPath $temporary -Recurse -File -Force | Unblock-File
+    }
     # Verify staging before touching the installed version, then verify the final path.
     Test-HarnessInstalledModule (Join-Path $temporary 'PwshHarness.psd1')
     if (Test-Path -LiteralPath $target) {

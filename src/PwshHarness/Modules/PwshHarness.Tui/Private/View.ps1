@@ -140,6 +140,14 @@ function Update-TuiSessionView {
     }
     $View.Dirty = $true
 }
+# Symbols below U+1F000 that terminals draw as two-cell emoji by default (East Asian Width W), such as ✅ ❌ ⭐ ✨;
+# ⚠ and ✔ stay one cell unless U+FE0F follows.
+$script:TuiWideSymbols = [Collections.Generic.HashSet[int]]::new([int[]]@(
+        0x231A, 0x231B, 0x23E9, 0x23EA, 0x23EB, 0x23EC, 0x23F0, 0x23F3, 0x25FD, 0x25FE, 0x2614, 0x2615,
+        0x2648, 0x2649, 0x264A, 0x264B, 0x264C, 0x264D, 0x264E, 0x264F, 0x2650, 0x2651, 0x2652, 0x2653,
+        0x267F, 0x2693, 0x26A1, 0x26AA, 0x26AB, 0x26BD, 0x26BE, 0x26C4, 0x26C5, 0x26CE, 0x26D4, 0x26EA,
+        0x26F2, 0x26F3, 0x26F5, 0x26FA, 0x26FD, 0x2705, 0x270A, 0x270B, 0x2728, 0x274C, 0x274E, 0x2753,
+        0x2754, 0x2755, 0x2757, 0x2795, 0x2796, 0x2797, 0x27B0, 0x27BF, 0x2B1B, 0x2B1C, 0x2B50, 0x2B55))
 function Get-TuiGlyphWidth {
     [CmdletBinding()]
     param([string]$Glyph)
@@ -155,7 +163,12 @@ function Get-TuiGlyphWidth {
     if ($value -in @(0x200D, 0xFE0F) -or [Globalization.CharUnicodeInfo]::GetUnicodeCategory($Glyph, 0) -in @('NonSpacingMark', 'EnclosingMark', 'Format')) {
         return 0
     }
+    # Emoji presentation selector (U+FE0F, also in keycaps such as 1️⃣) makes a symbol wide; U+FE0E keeps it narrow.
+    if ($Glyph.Length -gt 1 -and $Glyph.Contains([char]0xFE0F)) {
+        return 2
+    }
     if (($value -ge 0x1100 -and $value -le 0x115F) -or ($value -ge 0x2329 -and $value -le 0x232A) -or
+        ($Glyph.Length -eq 1 -and $script:TuiWideSymbols.Contains($value)) -or
         ($value -ge 0x2E80 -and $value -le 0xA4CF) -or ($value -ge 0xAC00 -and $value -le 0xD7A3) -or
         ($value -ge 0xF900 -and $value -le 0xFAFF) -or ($value -ge 0xFE10 -and $value -le 0xFE6F) -or
         ($value -ge 0xFF01 -and $value -le 0xFF60) -or ($value -ge 0xFFE0 -and $value -le 0xFFE6) -or

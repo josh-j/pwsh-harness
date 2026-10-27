@@ -21,11 +21,11 @@ function Get-EngineResponseWireData {
 }
 function New-EngineAgentAssistantMessage {
     [CmdletBinding()]
-    param($Response)
-    $message = New-HarnessMessage assistant $Response.Text
+    param($Response, [AllowEmptyString()][string]$Text = $Response.Text)
+    $message = New-HarnessMessage assistant $Text
     $wire = Get-EngineResponseWireData -Response $Response
     if ($wire.ProviderData) {
-        $message | Add-Member NoteProperty NativeBatch (New-HarnessNativeBatch -Text $Response.Text -ProviderData $wire.ProviderData -TokenOverhead $wire.TokenOverhead)
+        $message | Add-Member NoteProperty NativeBatch (New-HarnessNativeBatch -Text $Text -ProviderData $wire.ProviderData -TokenOverhead $wire.TokenOverhead)
     }
     $message
 }
@@ -34,7 +34,7 @@ function Add-EngineAgentBatch {
     param($Loop)
     $response = $Loop.Turn.Response
     $wire = Get-EngineResponseWireData -Response $response
-    $batch = New-HarnessNativeBatch -Text $response.Text -Calls $Loop.Calls -Results $Loop.Results.ToArray() `
+    $batch = New-HarnessNativeBatch -Text $Loop.Turn.ResponseText -Calls $Loop.Calls -Results $Loop.Results.ToArray() `
         -ProviderData $wire.ProviderData -TokenOverhead $wire.TokenOverhead
     $message = New-HarnessMessage user (Get-EngineNativeBatchText $batch)
     $message | Add-Member NoteProperty NativeBatch $batch
@@ -51,7 +51,7 @@ function Request-EngineAgentCallRepair {
     }
     $Loop.ToolRepairs++
     # An invalid native batch has no trustworthy correlation identity to replay.
-    $Loop.Turn.Exchange.Add((New-HarnessMessage assistant $Loop.Turn.Response.Text))
+    $Loop.Turn.Exchange.Add((New-HarnessMessage assistant $Loop.Turn.ResponseText))
     $Loop.Turn.Exchange.Add((New-HarnessMessage user $Message))
     $Loop.Turn.RequestKind = 'Agent'
     $true

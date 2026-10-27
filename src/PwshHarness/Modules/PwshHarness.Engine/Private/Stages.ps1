@@ -36,7 +36,6 @@ function Resolve-EngineContextStage {
         $message | Add-Member NoteProperty BudgetGroup "history:$exchange" -Force
         $messages.Add($message)
     }
-    $Turn.ReplayStart = $messages.Count
     if ($context.VolatileText) {
         $message = New-HarnessMessage user "<project-context>`n$($context.VolatileText)`n</project-context>"
         $message | Add-Member NoteProperty BudgetGroup 'context'
@@ -45,7 +44,9 @@ function Resolve-EngineContextStage {
     $time = $Turn.PSObject.Properties['TaskTime'] ? $Turn.TaskTime : [datetimeoffset]::Now.ToString('o')
     $Turn | Add-Member NoteProperty TaskTime $time -Force
     $task = (Get-EngineAgentState $Turn.Store $Turn.Session).Loop ? "<USER_REQUEST>`n$($Turn.Prompt)`n</USER_REQUEST>`n<ADDITIONAL_METADATA>`nThe current local time is: $time.`n</ADDITIONAL_METADATA>" : $Turn.Prompt
-    $messages.Add((New-HarnessMessage user $task))
+    $message = New-HarnessMessage user $task
+    $message | Add-Member NoteProperty BudgetGroup 'task'
+    $messages.Add($message)
     if (-not $Resume) {
         Add-EngineTranscript -State $Turn.Session -Role user -Text $Turn.Prompt
     }
@@ -186,7 +187,8 @@ function Send-EngineRequestStage {
     $observedPrompt = ($metadata -and $metadata.PSObject.Properties['ProviderAttempts'] -and $metadata.ProviderAttempts.Count) ? (Get-HarnessUsageCounter $metadata.ProviderAttempts[-1].Usage InputTokens) : $usage.InputTokens
     Update-EngineCalibration -Store $Turn.Store -Config $Turn.Config -Actual $observedPrompt -Estimated $estimated
     Publish-EngineEvent -Store $Turn.Store -EventName ResponseReceived -Payload $Turn.Response
-    $Turn.StitchedText += $Turn.Response.Text
+    $Turn.ResponseText = $Turn.Response.Text
+    $Turn.StitchedText += $Turn.ResponseText
     $metadata = $Turn.Response.PSObject.Properties['Metadata'] ? $Turn.Response.Metadata : $null
     $Turn.Response = New-HarnessChatResponse -Text $Turn.StitchedText -Usage $Turn.Response.Usage -FinishReason $Turn.Response.FinishReason
     if ($metadata) {
@@ -384,7 +386,7 @@ function Invoke-EngineSamplingStage {
             continue
         }
         $Turn.SamplingCompleted = $true
-        $best = $Turn.Result; $bestResponse = $Turn.Response
+        $best = $Turn.Result; $bestResponse = $Turn.Response; $bestResponseText = $Turn.ResponseText
         $bestScore = Get-EngineCandidateScore -Store $Turn.Store -Policy $policy -Score $plan.Score -Result $best
         $initialTemperature = $Turn.Request.Config.Temperature
         $initialKind = $Turn.RequestKind
@@ -401,14 +403,14 @@ function Invoke-EngineSamplingStage {
                 $candidate = Invoke-EngineProcessResponse -Store $Turn.Store -Response $Turn.Response -Config $Turn.Config -State $Turn.Session -Attempt $Turn.Repairs
                 $score = Get-EngineCandidateScore -Store $Turn.Store -Policy $policy -Score $plan.Score -Result $candidate
                 if ($score -lt $bestScore -or ($score -eq $bestScore -and $candidate.Text.Length -lt $best.Text.Length)) {
-                    $best = $candidate; $bestResponse = $Turn.Response; $bestScore = $score
+                    $best = $candidate; $bestResponse = $Turn.Response; $bestResponseText = $Turn.ResponseText; $bestScore = $score
                 }
             }
         }
         finally {
             $Turn.Request.Config.Temperature = $initialTemperature
             $Turn.RequestKind = $initialKind
-            $Turn.Result = $best; $Turn.Response = $bestResponse; $Turn.StitchedText = $bestResponse.Text
+            $Turn.Result = $best; $Turn.Response = $bestResponse; $Turn.ResponseText = $bestResponseText; $Turn.StitchedText = $bestResponse.Text
         }
         break
     }
@@ -444,11 +446,11 @@ function New-EngineTurn {
         Prompt            = $Prompt
         Token             = $CancellationToken
         BaseMessages      = @()
-        ReplayStart       = 0
         RulesText         = ''
         Exchange          = [Collections.Generic.List[object]]::new()
         Request           = $null
         Response          = $null
+        ResponseText      = ''
         Result            = $null
         StitchedText      = ''
         SamplingCompleted = $false
@@ -516,7 +518,7 @@ function Invoke-EngineTurnRunner {
             if ($decision.Kind -eq 'Complete') {
                 break
             }
-            $Turn.Exchange.Add((New-HarnessMessage assistant $Turn.Response.Text))
+            $Turn.Exchange.Add((New-HarnessMessage assistant ($decision.Kind -ceq 'Continue' ? $Turn.ResponseText : $Turn.Response.Text)))
             $Turn.Exchange.Add((New-HarnessMessage user $decision.Message))
             $Turn.RequestKind = $decision.Kind
             if ($decision.Kind -eq 'Repair') {

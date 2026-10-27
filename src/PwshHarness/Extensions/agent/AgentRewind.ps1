@@ -42,7 +42,7 @@ function Write-AgentRewindFile {
         $missing.Push($directory)
     }
     foreach ($directory in $missing) {
-        $null = $IsWindows ? [IO.Directory]::CreateDirectory($directory) : [IO.Directory]::CreateDirectory($directory, [IO.UnixFileMode]448)
+        Protect-HarnessPrivateItem ($IsWindows ? [IO.Directory]::CreateDirectory($directory) : [IO.Directory]::CreateDirectory($directory, [IO.UnixFileMode]448))
     }
     $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
     $options = [IO.FileStreamOptions]@{ Mode = 'CreateNew'; Access = 'Write' }
@@ -51,6 +51,7 @@ function Write-AgentRewindFile {
     }
     $stream = [IO.FileStream]::new($temp, $options)
     try {
+        Protect-HarnessPrivateItem $stream
         $stream.Write($Bytes, 0, $Bytes.Length); $stream.Flush([bool]$Durable)
     }
     finally {

@@ -139,7 +139,7 @@ function Get-EngineExtensionHash {
                     $directories.Push($name)
                 }
             }
-            elseif ($item.Name -cnotmatch '(?s)\A(?:.*\.(?:swp|swo|swx)|.*~|\.\#.*|\#.*\#|4913|\.DS_Store|Thumbs\.db)\z') {
+            elseif ($item.Name -cnotmatch '(?s)\A(?:.*\.(?:swp|swo|swx)|.*~|\.\#.*|\#.*\#|4913|\.DS_Store|Thumbs\.db|[Dd]esktop\.ini)\z') {
                 $files.Add($item)
             }
             if ($files.Count -gt 256) {

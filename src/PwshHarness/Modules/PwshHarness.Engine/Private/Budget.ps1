@@ -21,6 +21,9 @@ function Get-EngineBudgetedHistory {
     [CmdletBinding()]
     param($Store, $State, [string]$Prompt)
     $modelProfile = Get-EngineProfile $Store $State.Config
+    # Only an active agent run uses its larger input/history allowance; ordinary chat keeps its own.
+    $agent = [bool](Get-EngineAgentState $Store $State).Loop
+    $inputBudget = $agent ? $State.Config.'Agent.InputTokenBudget' : $State.Config.InputTokenBudget
     $exchanges = [Collections.Generic.List[object]]::new()
     $current = [Collections.Generic.List[object]]::new()
     foreach ($record in $State.Transcript) {
@@ -35,21 +38,26 @@ function Get-EngineBudgetedHistory {
             $current.Clear()
         }
         $replay = $record.Role -eq 'assistant' -and $metadata ? ($metadata -is [Collections.IDictionary] ? $metadata['Replay'] : ($metadata.PSObject.Properties['Replay'] ? $metadata.Replay : $null)) : $null
+        $answer = $record.Text
         if ($replay) {
             try {
                 # The turn's messages as sent replace its prompt and steering notes, keeping the prefix cacheable.
-                $sent = @(ConvertFrom-EngineMessageRecord @((ConvertFrom-Json -InputObject ([string]$replay) -AsHashtable -Depth 64 -DateKind String).Messages))
+                $saved = ConvertFrom-Json -InputObject ([string]$replay) -AsHashtable -Depth 64 -DateKind String
+                $sent = @(ConvertFrom-EngineMessageRecord @($saved.Messages))
                 for ($index = 1; $index -lt $sent.Count; $index++) {
                     $sent[$index] | Add-Member NoteProperty ReplayPart $true
                 }
                 $current.Clear()
                 $current.AddRange([object[]]$sent)
+                if ($saved.ContainsKey('Answer')) {
+                    $answer = [string]$saved.Answer
+                }
             }
             catch {
                 Write-Verbose "Replaying the turn failed; using its prompt and answer: $($_.Exception.Message)"
             }
         }
-        $current.Add((New-HarnessMessage $record.Role $record.Text))
+        $current.Add((New-HarnessMessage $record.Role $answer))
     }
     if ($current.Count) {
         $exchanges.Add($current.ToArray())
@@ -68,17 +76,15 @@ function Get-EngineBudgetedHistory {
         $modelProfile.ContextWindowTokens - $State.Config.MaxTokens
     }
     else {
-        $State.Config.InputTokenBudget
+        $inputBudget
     }
-    $budget = [Math]::Max(0, [Math]::Min($window, $State.Config.InputTokenBudget) - $State.Config.ContextTokenBudget - $reserved)
+    $budget = [Math]::Max(0, [Math]::Min($window, $inputBudget) - $State.Config.ContextTokenBudget - $reserved)
     $windowBudget = if ($modelProfile -or $State.Config.ContextWindowTokens -gt 0) {
         [Math]::Max(0, $window - $State.Config.ContextTokenBudget - $reserved)
     }
     else {
         [int]::MaxValue
     }
-    # Only an agent run's own requests use the agent budget; chat sends keep HistoryTokenBudget.
-    $agent = [bool](Get-EngineAgentState $Store $State).Loop
     # Agent history replays whole turns; a larger budget, dropped to 60% when exceeded, keeps the
     # retained prefix unchanged for many turns instead of shifting (and missing the cache) every turn.
     $budget = [Math]::Min($budget, ($agent ? $State.Config.'Agent.HistoryTokenBudget' : $State.Config.HistoryTokenBudget))

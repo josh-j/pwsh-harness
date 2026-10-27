@@ -175,9 +175,38 @@ function Set-TuiTerminalState {
         $Terminal.Changed[$Name] = $previous
     }
 }
+function New-TuiTerminalRescue {
+    # Ctrl+Break (SIGQUIT to .NET; Ctrl+\ on Unix) ends pwsh without running finally blocks, which would leave the console
+    # in the alternate screen with a hidden cursor and changed code pages. This handler runs first on the signal thread,
+    # where PowerShell cannot run, so it is compiled from an expression tree; the signal then proceeds as before.
+    [CmdletBinding()]
+    param([string]$Text, [Collections.IDictionary]$Changed)
+    $e = [Linq.Expressions.Expression]
+    $out = $e::Property($null, [Console], 'Out')
+    $steps = [Collections.Generic.List[Linq.Expressions.Expression]]::new()
+    $steps.Add($e::Call($out, [IO.TextWriter].GetMethod('Write', [type[]]@([string])), $e::Constant($Text)))
+    $steps.Add($e::Call($out, [IO.TextWriter].GetMethod('Flush', [type[]]@())))
+    foreach ($entry in @(@('Control', 'TreatControlCAsInput'), @('Cursor', 'CursorVisible'), @('InputEncoding', 'InputEncoding'), @('OutputEncoding', 'OutputEncoding'))) {
+        if ($Changed.Contains($entry[0])) {
+            $property = [Console].GetProperty($entry[1])
+            $steps.Add($e::Assign($e::Property($null, $property), $e::Constant($Changed[$entry[0]], $property.PropertyType)))
+        }
+    }
+    # Each step is separate, so a closed handle cannot stop the rest.
+    $guarded = @(foreach ($step in $steps) {
+            $e::TryCatch($e::Block([void], [Linq.Expressions.Expression[]]@($step)), [Linq.Expressions.CatchBlock[]]@($e::Catch([Exception], $e::Empty())))
+        })
+    $context = $e::Parameter([Runtime.InteropServices.PosixSignalContext], 'context')
+    $handler = $e::Lambda([Action[Runtime.InteropServices.PosixSignalContext]], $e::Block([void], [Linq.Expressions.Expression[]]$guarded), [Linq.Expressions.ParameterExpression[]]@($context)).Compile()
+    [pscustomobject]@{ Handler = $handler; Registration = [Runtime.InteropServices.PosixSignalRegistration]::Create([Runtime.InteropServices.PosixSignal]::SIGQUIT, $handler) }
+}
 function Restore-TuiTerminalState {
     [CmdletBinding()]
     param($Terminal)
+    if ($Terminal.PSObject.Properties['Rescue'] -and $Terminal.Rescue) {
+        $Terminal.Rescue.Registration.Dispose()
+        $Terminal.Rescue = $null
+    }
     if ($Terminal.InlineActive) {
         try {
             $down = if ($Terminal.InlineState) {
@@ -297,7 +326,7 @@ function New-TuiConsoleTerminal {
     $terminal = [pscustomobject]@{
         Kind = 'Console'; Api = $ConsoleApi; Capabilities = $Capabilities
         SupportsVirtualTerminal = $Capabilities.SupportsVT; Interactive = $true
-        Previous = $null; Changed = [ordered]@{}; Entered = $false
+        Previous = $null; Changed = [ordered]@{}; Entered = $false; Rescue = $null
         Inline = $false; InlineActive = $false; InlineState = $null; InlineContinue = $false
     }
     $terminal | Add-Member ScriptMethod GetSize { [pscustomobject]@{
@@ -310,6 +339,7 @@ function New-TuiConsoleTerminal {
     $terminal | Add-Member ScriptMethod Now { [Environment]::TickCount64 }
     $setState = ${function:Set-TuiTerminalState}
     $restoreState = ${function:Restore-TuiTerminalState}
+    $rescue = ${function:New-TuiTerminalRescue}
     $terminal | Add-Member ScriptMethod Enter {
         param([bool]$UseAlternate = $true)
         $utf8 = [Text.UTF8Encoding]::new($false)
@@ -330,6 +360,9 @@ function New-TuiConsoleTerminal {
                 $this.Api.Write("`r`n")
                 $this.InlineActive = $true
             }
+        }
+        if ($this.Api.Kind -ceq 'ConsoleApi' -and -not $this.Rescue) {
+            $this.Rescue = & $rescue ($this.Entered ? "`e[0m`e[?25h`e[?1049l" : "`r`n`e[0m`e[?25h") $this.Changed
         }
     }.GetNewClosure()
     $terminal | Add-Member ScriptMethod Restore { & $restoreState $this }.GetNewClosure()

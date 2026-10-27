@@ -44,7 +44,7 @@ function Invoke-AgentCommand {
     if (-not [IO.Path]::IsPathRooted($cwd)) {
         throw 'An absolute workspace Cwd is required.'
     }
-    $cwd = [IO.Path]::GetFullPath($cwd)
+    $cwd = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($cwd))
     if (-not [string]::Equals($cwd, $store.Root, (Get-HarnessPathComparison))) {
         $null = Resolve-AgentPresentedPath $Context $cwd
     }
