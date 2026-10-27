@@ -3,8 +3,7 @@ function Invoke-OpenAIEmbedding {
     param([string[]]$Texts, $Services)
     $config = $Services.Config
     $uri = Get-OpenAIGatewayUri $config.BaseUrl '/v1/embeddings'
-    $client = [Net.Http.HttpClient]::new()
-    $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+    $client = Get-OpenAIHttpClient
     $linked = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($Services.CancellationToken)
     $script:Clock.CancelAfter($linked, $config.TimeoutSeconds * 1000)
     $message = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, $uri)
@@ -79,6 +78,6 @@ function Invoke-OpenAIEmbedding {
         throw [InvalidOperationException]::new($safeMessage)
     }
     finally {
-        $message.Dispose(); $client.Dispose(); $linked.Dispose(); $key = $null
+        $message.Dispose(); $linked.Dispose(); $key = $null
     }
 }

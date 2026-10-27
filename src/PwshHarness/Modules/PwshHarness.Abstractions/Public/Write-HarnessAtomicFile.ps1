@@ -53,26 +53,10 @@ function Write-HarnessAtomicFile {
         if ((Get-HarnessSha256 $prepared.Bytes) -cne (Get-HarnessSha256 $Bytes)) {
             throw 'Temporary file changed before replacement.'
         }
-        # On Windows a virus scanner or indexer that just opened either file briefly blocks the swap: retry for about a
-        # second on sharing, lock or access errors, checking the parents again before each attempt.
-        for ($attempt = 1; ; $attempt++) {
-            try {
-                if ($exists) {
-                    [IO.File]::Replace($temporary, $Path, [NullString]::Value)
-                }
-                else {
-                    [IO.File]::Move($temporary, $Path)
-                }
-                break
-            }
-            catch [IO.IOException], [UnauthorizedAccessException] {
-                if (-not $IsWindows -or $attempt -ge 6 -or ($_.Exception.HResult -band 0xFFFF) -notin @(5, 32, 33, 1175)) {
-                    throw
-                }
-                [Threading.Thread]::Sleep(25 * [Math]::Pow(2, $attempt - 1))
-                if ((Get-HarnessPathSnapshot $Path -AllowMissing -NoHardLinks).Parents -cne $parents) {
-                    throw 'Physical parent changed before file replacement.'
-                }
+        $swap = $exists ? { [IO.File]::Replace($temporary, $Path, [NullString]::Value) } : { [IO.File]::Move($temporary, $Path) }
+        Invoke-HarnessFileRetry -Operation $swap -BeforeRetry {
+            if ((Get-HarnessPathSnapshot $Path -AllowMissing -NoHardLinks).Parents -cne $parents) {
+                throw 'Physical parent changed before file replacement.'
             }
         }
     }

@@ -170,9 +170,11 @@ function Read-HarnessCredentialEntry {
     }
 }
 function Move-HarnessCredentialFile {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'Temporary', Justification = 'Used inside the retried scriptblock.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'Path', Justification = 'Used inside the retried scriptblock.')]
     [CmdletBinding()]
     param([string]$Temporary, [string]$Path)
-    [IO.File]::Move($Temporary, $Path, $true)
+    Invoke-HarnessFileRetry { [IO.File]::Move($Temporary, $Path, $true) }
 }
 function Write-HarnessCredentialEntry {
     [CmdletBinding()]

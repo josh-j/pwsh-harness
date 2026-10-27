@@ -17,6 +17,8 @@ function Get-OpenAIHttpClient {
         $handler.KeepAlivePingDelay = [TimeSpan]::FromSeconds(30)
         $handler.KeepAlivePingTimeout = [TimeSpan]::FromSeconds(20)
         $handler.KeepAlivePingPolicy = [Net.Http.HttpKeepAlivePingPolicy]::WithActiveRequests
+        # A system proxy that requires sign-in, usual on corporate Windows networks, gets the user's own logon.
+        $handler.DefaultProxyCredentials = [Net.CredentialCache]::DefaultCredentials
         $client = [Net.Http.HttpClient]::new($handler)
         $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
         $script:HttpClient = $client

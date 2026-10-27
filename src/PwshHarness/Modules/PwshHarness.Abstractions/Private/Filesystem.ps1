@@ -15,4 +15,5 @@ $script:NoFollowFlags = $script:NoFollowOpen ? [Enum]::Parse($script:NoFollowOpe
 . (Join-Path $PSScriptRoot '../Public/Read-HarnessFileByte.ps1')
 . (Join-Path $PSScriptRoot '../Public/Read-HarnessTextFile.ps1')
 . (Join-Path $PSScriptRoot '../Public/Test-HarnessLinkItem.ps1')
+. (Join-Path $PSScriptRoot '../Public/Invoke-HarnessFileRetry.ps1')
 . (Join-Path $PSScriptRoot '../Public/Write-HarnessAtomicFile.ps1')

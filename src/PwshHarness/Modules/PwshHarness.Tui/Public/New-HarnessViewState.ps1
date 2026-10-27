@@ -109,6 +109,7 @@ function New-HarnessViewState {
         ReloadPending       = $false
         AutoSend            = ''
         LastControlC        = -2000L
+        BurstReturn         = $false
         Renderer            = 'Default'
         Dirty               = $true
     }

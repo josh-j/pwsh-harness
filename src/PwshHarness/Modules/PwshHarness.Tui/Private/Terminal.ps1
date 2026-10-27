@@ -249,17 +249,37 @@ function New-TuiStreamTerminal {
     $terminal | Add-Member ScriptMethod Now { [Environment]::TickCount64 }
     $setState = ${function:Set-TuiTerminalState}
     $restoreState = ${function:Restore-TuiTerminalState}
+    $codePage = {
+        param($Api, $Name)
+        try {
+            $Api.Get($Name).CodePage
+        }
+        catch {
+            0
+        }
+    }
     $terminal | Add-Member ScriptMethod Enter {
         param([bool]$UseAlternate = $false)
-        if (-not $this.Capabilities.OutputIsConsole) {
-            $utf8 = [Text.UTF8Encoding]::new($false)
-            # Output encoding is optional on redirected handles; record only successful mutations.
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        # Encodings are optional on stream handles; record only successful mutations. A Windows console keeps its
+        # OEM code page unless it is set, and piped input arrives in that code page too.
+        if (-not $this.Capabilities.OutputIsConsole -or (& $codePage $this.Api 'OutputEncoding') -ne 65001) {
             try {
                 & $setState $this 'OutputEncoding' $utf8
             }
             catch {
                 return
             }
+        }
+        if (-not $this.Capabilities.InputIsConsole -and (& $codePage $this.Api 'InputEncoding') -ne 65001) {
+            try {
+                & $setState $this 'InputEncoding' $utf8
+            }
+            catch {
+                $null = $_
+            }
+        }
+        if (-not $this.Capabilities.OutputIsConsole) {
             & $setState $this 'PipeEncoding' $utf8
         }
     }.GetNewClosure()

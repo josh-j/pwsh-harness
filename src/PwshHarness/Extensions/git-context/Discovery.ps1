@@ -104,7 +104,7 @@ function Test-GitContextRepositoryCandidate {
 function Invoke-GitContextGit {
     [CmdletBinding()]
     param([string]$Path, [string[]]$Arguments, $Request = $script:DiscoveryRequest, [switch]$RawOutput, [switch]$Result)
-    $git = Get-Command git -ErrorAction Ignore
+    $git = Get-Command git -CommandType Application -ErrorAction Ignore | Select-Object -First 1
     if (-not $git) {
         return $null
     }

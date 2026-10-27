@@ -6,7 +6,7 @@ $script:PackUtf8Prelude = '[Console]::OutputEncoding = [Text.UTF8Encoding]::new(
 function Invoke-PowerShellSaveGitQuery {
     [CmdletBinding()]
     param([string]$Directory, [string[]]$Arguments)
-    $git = Get-Command git -ErrorAction Ignore
+    $git = Get-Command git -CommandType Application -ErrorAction Ignore | Select-Object -First 1
     if (-not $git) {
         return ''
     }

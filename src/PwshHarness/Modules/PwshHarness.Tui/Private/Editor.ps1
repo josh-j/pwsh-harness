@@ -18,6 +18,12 @@ function Update-TuiEditor {
     [CmdletBinding()]
     param($View, [ConsoleKeyInfo]$Key, [bool]$MoreKeys = $false, [long]$Now = ([Environment]::TickCount64))
     $editor = $View.Editor
+    # A pasted CRLF arrives as Enter then LF in one burst (Windows Terminal); it is one line break.
+    $afterReturn = $View.BurstReturn
+    $View.BurstReturn = $MoreKeys -and $Key.Key -eq 'Enter' -and [int]$Key.KeyChar -eq 13
+    if ($afterReturn -and [int]$Key.KeyChar -eq 10 -and $Key.Modifiers -eq 0) {
+        return
+    }
     if (-not [char]::IsControl($Key.KeyChar) -and -not (Test-TuiControlShortcut $Key)) {
         Add-TuiEditorText $View ([string]$Key.KeyChar); return
     }

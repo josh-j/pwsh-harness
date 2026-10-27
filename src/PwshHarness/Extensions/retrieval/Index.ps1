@@ -275,7 +275,9 @@ function Get-RetrievalIndexIdentity {
                 $Request.State.Context.Path
             }))
     $paths = $Request.PSObject.Properties['ToolRoot'] ? @() : $Request.Config.RagPaths
-    @{ Root = $root; Key = (Get-HarnessSha256 -Text ($root + "`n" + ($paths -join "`n"))); Directory = 'retrieval' }
+    # Windows paths ignore case, so c:\proj and C:\proj share one index instead of rebuilding a second.
+    $keyRoot = $IsWindows ? $root.ToLowerInvariant() : $root
+    @{ Root = $root; Key = (Get-HarnessSha256 -Text ($keyRoot + "`n" + ($paths -join "`n"))); Directory = 'retrieval' }
 }
 function New-RetrievalIndex {
     [CmdletBinding()]
@@ -288,7 +290,7 @@ function New-RetrievalIndex {
     if ([IO.File]::Exists($path)) {
         try {
             $saved = [IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
-            if ($saved.Schema -ne 1 -or $saved.Root -cne $root -or $saved.Files -isnot [hashtable]) {
+            if ($saved.Schema -ne 1 -or -not [string]::Equals($saved.Root, $root, (Get-HarnessPathComparison)) -or $saved.Files -isnot [hashtable]) {
                 throw 'Index schema mismatch.'
             }
             foreach ($file in $saved.Files.psbase.Values) {

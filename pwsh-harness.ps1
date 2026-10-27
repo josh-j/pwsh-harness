@@ -66,6 +66,13 @@ try {
                 $parameters[$name] = $PSBoundParameters[$name]
             }
         }
+        if ($parameters.ContainsKey('IncludeFiles')) {
+            # pwsh -File (pwsh-harness.cmd) binds a,b as one string; split it unless that name is itself a file.
+            $workspace = $Path ? $Path : (Get-Location).ProviderPath
+            $parameters.IncludeFiles = @($IncludeFiles | ForEach-Object {
+                    (Test-Path -LiteralPath ([IO.Path]::Combine($workspace, $_))) ? $_ : @($_ -split ',' | Where-Object { $_ })
+                })
+        }
         if ($PSBoundParameters.ContainsKey('Prompt')) {
             $session = $instance.NewSession()
             if (-not $parameters.ContainsKey('Agent')) {

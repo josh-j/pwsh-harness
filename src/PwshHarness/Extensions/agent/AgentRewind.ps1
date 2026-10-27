@@ -56,7 +56,7 @@ function Write-AgentRewindFile {
     finally {
         $stream.Dispose()
     }
-    [IO.File]::Move($temp, $Path, $true)
+    Invoke-HarnessFileRetry { [IO.File]::Move($temp, $Path, $true) }
 }
 function Save-AgentRewindBlob {
     [CmdletBinding()]

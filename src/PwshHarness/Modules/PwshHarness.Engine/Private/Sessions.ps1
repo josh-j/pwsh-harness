@@ -34,7 +34,8 @@ function Assert-EngineAuditAdmission {
 function Test-EngineSessionId {
     [CmdletBinding()]
     param([string]$Id)
-    $Id -cmatch '\A[a-zA-Z0-9_-]+\z'
+    # Device names such as con or nul are refused everywhere, so a session store opens on Windows too.
+    $Id -cmatch '\A[a-zA-Z0-9_-]+\z' -and $Id -notmatch '(?i)\A(?:con|prn|aux|nul|com[1-9]|lpt[1-9])\z'
 }
 function Assert-EngineSessionId {
     [CmdletBinding()]
@@ -127,6 +128,7 @@ function Copy-EngineAuditMetadata {
     return , $Metadata
 }
 function Open-EngineSessionStream {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'Path', Justification = 'Used inside the retried scriptblock.')]
     [CmdletBinding()]
     param([string]$Path)
     $options = [IO.FileStreamOptions]::new()
@@ -135,7 +137,7 @@ function Open-EngineSessionStream {
     if (-not $IsWindows) {
         $options.UnixCreateMode = [IO.UnixFileMode]384
     }
-    [IO.FileStream]::new($Path, $options)
+    Invoke-HarnessFileRetry { [IO.FileStream]::new($Path, $options) }
 }
 function Repair-EngineSessionTail {
     [CmdletBinding()]
