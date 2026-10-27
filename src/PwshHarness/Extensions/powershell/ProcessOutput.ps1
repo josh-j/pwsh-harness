@@ -10,9 +10,9 @@ function New-PowerShellRunCapture {
 }
 function Update-PowerShellRunCapture {
     [CmdletBinding()]
-    param($Capture)
+    param($Capture, [int]$MaxReads = 128)
     # Bound each drain pass so continuous output cannot starve cancellation or the other stream.
-    for ($read = 0; $read -lt 128 -and -not $Capture.Finished -and $Capture.Pending.IsCompleted; $read++) {
+    for ($read = 0; $read -lt $MaxReads -and -not $Capture.Finished -and $Capture.Pending.IsCompleted; $read++) {
         try {
             $count = $Capture.Pending.GetAwaiter().GetResult()
             if ($count -eq 0) {
@@ -67,8 +67,19 @@ function Update-PowerShellRunTask {
     [CmdletBinding()]
     param($Task)
     Assert-PowerShellCommandWatchdog $Task
-    Update-PowerShellRunCapture $Task.Stdout
-    Update-PowerShellRunCapture $Task.Stderr
+    # Alternate single reads: draining one stream first would let it spend the whole shared budget before the other is read.
+    for ($read = 0; $read -lt 128; $read++) {
+        $progress = $false
+        foreach ($capture in @($Task.Stdout, $Task.Stderr)) {
+            if (-not $capture.Finished -and $capture.Pending.IsCompleted) {
+                Update-PowerShellRunCapture $capture -MaxReads 1
+                $progress = $true
+            }
+        }
+        if (-not $progress) {
+            break
+        }
+    }
     if ($Task.Budget -and $Task.Budget.Exceeded -and $Task.Budget.StopOnLimit) {
         throw [IO.IOException]::new('Child output limit exceeded (OutputLimit).')
     }
