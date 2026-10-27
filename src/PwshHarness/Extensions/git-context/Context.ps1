@@ -326,7 +326,7 @@ function Get-GitContextGitContext {
         if (-not $item.Exists) {
             continue
         }
-        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        if (Test-HarnessLinkItem $item) {
             continue
         }
         if ($item.Length -gt $Request.Config.ContextMaxFileBytes) {
@@ -503,7 +503,7 @@ function Resolve-GitContextContextSelection {
         if (-not $item.Exists) {
             throw 'Selected context file no longer exists.'
         }
-        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        if (Test-HarnessLinkItem $item) {
             throw 'Symbolic links cannot be added to project context.'
         }
     }

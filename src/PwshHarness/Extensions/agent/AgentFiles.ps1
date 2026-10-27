@@ -184,6 +184,22 @@ function Get-AgentWorkspaceListing {
         $skip = [Collections.Generic.HashSet[string]]::new([string[]]@($ignored.Text -split "`0"), [StringComparer]::Ordinal)
         return @($listed.Text -split "`0" | Where-Object { -not $skip.Contains($_) -and (& $permitted $_) })
     }
-    $options = [IO.EnumerationOptions]@{ RecurseSubdirectories = $true; AttributesToSkip = [IO.FileAttributes]::ReparsePoint; IgnoreInaccessible = $true }
-    @([IO.Directory]::EnumerateFiles($Root, '*', $options) | Select-Object -First ($script:PackWorkspaceMaxFiles + 1) | ForEach-Object { ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Root, $_)) } | Where-Object { & $permitted $_ })
+    # The walk never enters links; storage reparse points such as OneDrive placeholders are ordinary items.
+    $options = [IO.EnumerationOptions]@{ AttributesToSkip = [IO.FileAttributes]0; IgnoreInaccessible = $true }
+    $files = [Collections.Generic.List[string]]::new()
+    $pending = [Collections.Generic.Queue[string]]::new(); $pending.Enqueue($Root)
+    while ($pending.Count -and $files.Count -le $script:PackWorkspaceMaxFiles) {
+        foreach ($item in [IO.DirectoryInfo]::new($pending.Dequeue()).EnumerateFileSystemInfos('*', $options)) {
+            if (Test-HarnessLinkItem $item) {
+                continue
+            }
+            if ($item -is [IO.DirectoryInfo]) {
+                $pending.Enqueue($item.FullName)
+            }
+            elseif ($files.Count -le $script:PackWorkspaceMaxFiles) {
+                $files.Add((ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Root, $item.FullName))))
+            }
+        }
+    }
+    @($files | Where-Object { & $permitted $_ })
 }

@@ -148,7 +148,7 @@ function Find-AgentSymbol {
         try {
             $path = Resolve-AgentToolPath -State $state -Root $root -Path $name -Context $Context -Inventory
             $info = [IO.FileInfo]::new($path)
-            if (-not $info.Exists -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            if (-not $info.Exists -or (Test-HarnessLinkItem $info)) {
                 continue
             }
             if ($files -ge 2000 -or $info.Length -gt $maxFile -or $bytes + $info.Length -gt 33554432) {
@@ -663,7 +663,7 @@ function New-AgentRenameChange {
         }
         $path = Resolve-AgentToolPath -State $Tool.State -Root $Tool.Root -Path $relative -Context $Tool.Context -Inventory
         $info = [IO.FileInfo]::new($path)
-        if (-not $info.Exists -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        if (-not $info.Exists -or (Test-HarnessLinkItem $info)) {
             continue
         }
         if (++$count -gt 2000 -or $info.Length -gt $maxFile -or ($bytes += $info.Length) -gt 33554432) {
@@ -677,8 +677,7 @@ function New-AgentRenameChange {
         }
         $definitions += $result.Definitions; $conflicts += $result.Conflicts
         if ($result.Count) {
-            $encoding = [Text.UTF8Encoding]::new($file.Bom, $true)
-            [byte[]]$final = $encoding.GetPreamble() + $encoding.GetBytes($result.Text)
+            [byte[]]$final = ConvertTo-HarnessFileText -Text $result.Text -File $file -AsByte
             if ($final.Length -gt $maxFile) {
                 throw "Renaming in $relative exceeds Agent.MaxFileBytes."
             }

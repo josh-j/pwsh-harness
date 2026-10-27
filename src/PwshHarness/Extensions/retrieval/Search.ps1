@@ -13,10 +13,11 @@ function Find-RetrievalTool {
     }
     $scope = [IO.Path]::GetRelativePath($Request.ToolRoot, $Request.SearchScope).Replace('\', '/')
     $prefix = $scope.TrimEnd('/') + '/'; $comparison = Get-HarnessPathComparison
-    # Filter with literal paths rather than passing a provider name from model input.
+    # Filter with literal paths rather than passing a provider name from model input. Include patterns take the paths'
+    # slash form, so a Windows-style src\*.ps1 still matches; -like escapes with a backtick, never a backslash.
     $allowed = @($paths | Sort-Object -CaseSensitive | Where-Object {
             $path = $_
-            (Test-RetrievalIncludedPath -Request $Request -Path $path -Root $Request.ToolRoot) -and ($scope -ceq '.' -or $path.Equals($scope, $comparison) -or $path.StartsWith($prefix, $comparison)) -and @($arguments.includes -split ';' | Where-Object { $_ -and $path -like $_ }).Count
+            (Test-RetrievalIncludedPath -Request $Request -Path $path -Root $Request.ToolRoot) -and ($scope -ceq '.' -or $path.Equals($scope, $comparison) -or $path.StartsWith($prefix, $comparison)) -and @($arguments.includes -split ';' | Where-Object { $_ -and $path -like $_.Replace('\', '/') }).Count
         })
     if ($arguments.mode -ceq 'exact') {
         $options = [Text.RegularExpressions.RegexOptions]::CultureInvariant

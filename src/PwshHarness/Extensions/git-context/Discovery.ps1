@@ -22,7 +22,7 @@ function Get-GitContextRootReason {
             return 'protected root; explicit indexing required'
         }
     }
-    if (([IO.DirectoryInfo]::new($Root).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    if (Test-HarnessLinkItem ([IO.DirectoryInfo]::new($Root))) {
         return 'linked root; automatic indexing disabled'
     }
     ''
@@ -46,7 +46,7 @@ function Get-GitContextListing {
     $pending = [Collections.Generic.Queue[object]]::new()
     $pending.Enqueue(@{ Path = $Root; Level = 1 })
     $options = [IO.EnumerationOptions]::new()
-    $options.IgnoreInaccessible = $true; $options.AttributesToSkip = [IO.FileAttributes]::ReparsePoint
+    $options.IgnoreInaccessible = $true; $options.AttributesToSkip = [IO.FileAttributes]0
     $truncated = $false
     while ($pending.Count -and -not $truncated) {
         $directory = $pending.Dequeue()
@@ -64,6 +64,9 @@ function Get-GitContextListing {
                     $truncated = $true; break
                 }
                 $item = $iterator.Current
+                if (Test-HarnessLinkItem $item) {
+                    continue
+                }
                 $entries.Add($item)
                 if ($directory.Level -lt $Depth -and ($item.Attributes -band [IO.FileAttributes]::Directory)) {
                     $pending.Enqueue(@{ Path = $item.FullName; Level = $directory.Level + 1 })

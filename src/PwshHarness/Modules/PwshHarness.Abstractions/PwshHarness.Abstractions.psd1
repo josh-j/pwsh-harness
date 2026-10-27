@@ -6,7 +6,7 @@
         'ConvertTo-HarnessContextPattern', 'New-HarnessContextPathPattern',
         'Select-HarnessUniquePath',
         'Get-HarnessTextExcerpt', 'Invoke-HarnessService', 'Get-HarnessOperationDirectory', 'Get-HarnessRunSetting', 'New-HarnessPathTable', 'Invoke-HarnessCheckpoint',
-        'Get-HarnessPathSnapshot', 'Get-HarnessSha256', 'Get-HarnessPathComparison', 'ConvertTo-HarnessSlashPath', 'Read-HarnessFileByte', 'Read-HarnessTextFile', 'Write-HarnessAtomicFile',
+        'Get-HarnessPathSnapshot', 'Test-HarnessLinkItem', 'Get-HarnessSha256', 'Get-HarnessPathComparison', 'ConvertTo-HarnessSlashPath', 'Read-HarnessFileByte', 'Read-HarnessTextFile', 'ConvertTo-HarnessFileText', 'Write-HarnessAtomicFile',
         'ConvertTo-HarnessSafeText', 'Get-HarnessSecretPattern', 'Get-HarnessSecretSuffixLength', 'Protect-HarnessText', 'Test-HarnessSecretName'
         'New-HarnessUsage', 'Get-HarnessUsageCounter', 'New-HarnessNativeBatch',
         'Get-HarnessCredentialOrigin', 'New-HarnessToolCall', 'Assert-HarnessToolCall',

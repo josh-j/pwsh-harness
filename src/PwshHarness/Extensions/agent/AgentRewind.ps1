@@ -109,7 +109,7 @@ function Get-AgentRewindScan {
         try {
             $path = Resolve-AgentToolPath -State $State -Root $Root -Path $name -Context $Context -Inventory
             $info = [IO.FileInfo]::new($path)
-            if (-not $info.Exists -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            if (-not $info.Exists -or (Test-HarnessLinkItem $info)) {
                 if ($isRequired) {
                     $files[$name] = $info.Exists ? '?' : $null
                 }

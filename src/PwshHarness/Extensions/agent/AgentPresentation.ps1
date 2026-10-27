@@ -29,6 +29,7 @@ function Get-AgentShell {
 $script:PackPresentationHost = @{
     Root              = { param($Context) Get-HarnessOperationDirectory $Context.State }
     ResolvePath       = { param($Context, $Path) Resolve-AgentPresentedPath $Context $Path }
+    FileUri           = { param($Path) [uri]::new([IO.Path]::GetFullPath((ConvertFrom-AgentPresentedUri $Path))).AbsoluteUri }
     ParseEditHunks    = { param($Value, $Names) ConvertFrom-AgentEditHunk $Value $Names }
     ReadTarget        = {
         param($Context, $Path)
@@ -230,12 +231,23 @@ function Get-AgentRunScratch {
     $scratch = $null
     $State -and $script:PackRunScratch.TryGetValue([string]$State.SessionId, [ref]$scratch) ? $scratch.Path : ''
 }
+function ConvertFrom-AgentPresentedUri {
+    # A model may echo the file URI view_file shows, or on Windows its /C:/ path with the scheme dropped.
+    [CmdletBinding()]
+    param([string]$Path, [bool]$Windows = $IsWindows)
+    $uri = $null
+    if ($Path -match '^file:' -and [uri]::TryCreate($Path, [UriKind]::Absolute, [ref]$uri) -and $uri.IsFile -and -not $uri.IsUnc) {
+        $Path = $Windows ? $uri.LocalPath : [uri]::UnescapeDataString($uri.AbsolutePath)
+    }
+    $Windows -and $Path -match '^/[A-Za-z]:[\\/]' ? $Path.Substring(1) : $Path
+}
 function Resolve-AgentPresentedPath {
     [CmdletBinding()]
     param($Context, [string]$Path)
     if (-not $Path -or $Path.Length -gt 4096) {
         throw 'Invalid tool path length.'
     }
+    $Path = ConvertFrom-AgentPresentedUri $Path
     if ($Path.StartsWith('skill:', [StringComparison]::Ordinal)) {
         return $Path
     }

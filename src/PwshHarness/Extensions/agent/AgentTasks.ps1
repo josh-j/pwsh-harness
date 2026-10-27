@@ -40,10 +40,11 @@ function Invoke-AgentCommand {
     if ([string]::IsNullOrWhiteSpace($arguments.CommandLine) -or $arguments.CommandLine.Length -gt 65536) {
         throw 'Command is outside its declared bounds.'
     }
-    if (-not [IO.Path]::IsPathRooted($arguments.Cwd)) {
+    $cwd = ConvertFrom-AgentPresentedUri $arguments.Cwd
+    if (-not [IO.Path]::IsPathRooted($cwd)) {
         throw 'An absolute workspace Cwd is required.'
     }
-    $cwd = [IO.Path]::GetFullPath($arguments.Cwd)
+    $cwd = [IO.Path]::GetFullPath($cwd)
     if (-not [string]::Equals($cwd, $store.Root, (Get-HarnessPathComparison))) {
         $null = Resolve-AgentPresentedPath $Context $cwd
     }

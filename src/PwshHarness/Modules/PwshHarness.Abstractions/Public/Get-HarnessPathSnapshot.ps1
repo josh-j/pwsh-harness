@@ -44,7 +44,7 @@ function Get-HarnessPathSnapshot {
         if (-not $item) {
             continue
         }
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        if ((Test-HarnessLinkItem $item) -or
             ($item -is [IO.FileInfo] -and ((-not $IsWindows -and $stat.ItemType -ne 'File') -or
                 ($NoHardLinks -and ($IsWindows ? [bool]$item.LinkType : ($stat.HardlinkCount -ne 1)))))) {
             throw 'Literal paths require regular files and physical directories, not links or special files.'

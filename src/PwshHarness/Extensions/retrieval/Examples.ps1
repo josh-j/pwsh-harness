@@ -72,7 +72,7 @@ function Get-RetrievalExampleInventory {
         $folder = $source.Path
         $number++; $watch.Add($folder)
         $root = [IO.DirectoryInfo]::new($folder)
-        if (-not $root.Exists -or ($root.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        if (-not $root.Exists -or (Test-HarnessLinkItem $root)) {
             $missing++; continue
         }
         # Inventory and exclusion rules are shared with repository retrieval, including linked/sensitive files.

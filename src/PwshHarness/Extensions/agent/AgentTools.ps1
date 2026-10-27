@@ -327,13 +327,18 @@ function New-AgentToolFileChange {
     if ($file.Exists -ne [bool]$expected -or ($expected -and $expected -cne $file.Hash)) {
         throw (New-AgentRefusal -Code StaleTarget -Message 'Tool target hash is stale.' -Next 'Read the file again and retry with its current sha256.')
     }
-    $text = $Tool.Spec.Edit ? '' : $arguments.text
+    # Reads show lines without their endings: written text, the text an edit finds and its replacement all take the
+    # file's own line ending.
+    $eol = { param($value) ConvertTo-HarnessFileText -Text $value -File $file }
+    $text = $Tool.Spec.Edit ? '' : (& $eol $arguments.text)
     $ranges = [Collections.Generic.List[object]]::new()
+    $editHunks = @($arguments.hunks | Where-Object { $_ } | ForEach-Object { @{ start_line = $_.start_line; end_line = $_.end_line; before = (& $eol $_.before); after = (& $eol $_.after) } })
+    $before = & $eol $arguments.before; $after = & $eol $arguments.after
     if ($Tool.Spec.Edit -and $arguments.ContainsKey('hunks')) {
         $starts = @(0) + @([regex]::Matches($file.Text, '\r\n|\n|\r') | ForEach-Object { $_.Index + $_.Length })
         $builder = [Text.StringBuilder]::new()
         $cursor = 0; $previous = 0; $lineDelta = 0; $number = 0
-        foreach ($hunk in $arguments.hunks) {
+        foreach ($hunk in $editHunks) {
             $number++
             if ($hunk.start_line -le $previous -or $hunk.end_line -lt $hunk.start_line -or $hunk.end_line -gt $starts.Count) {
                 throw 'Edit hunks require ordered nonoverlapping original-file line ranges.'
@@ -372,27 +377,27 @@ function New-AgentToolFileChange {
         $start = $starts[$arguments.start_line - 1]
         $end = $arguments.end_line -lt $starts.Count ? $starts[$arguments.end_line] : $file.Text.Length
         $region = $file.Text.Substring($start, $end - $start)
-        $match = $region.IndexOf($arguments.before, [StringComparison]::Ordinal)
+        $match = $region.IndexOf($before, [StringComparison]::Ordinal)
         if ($match -lt 0) {
             throw 'Edit target not found. Copy the exact text and whitespace from read, without the line-number prefix.'
         }
         $count = 0
-        for ($index = $match; $index -ge 0; $index = $region.IndexOf($arguments.before, $index + 1, [StringComparison]::Ordinal)) {
+        for ($index = $match; $index -ge 0; $index = $region.IndexOf($before, $index + 1, [StringComparison]::Ordinal)) {
             $count++
         }
         if ($count -ne 1 -and -not $arguments.allow_multiple) {
             throw "Edit target appears $count times. Include more surrounding text or narrow the line anchors."
         }
         $offset = $start + $match
-        $text = $arguments.allow_multiple ? ($file.Text.Substring(0, $start) + $region.Replace($arguments.before, $arguments.after, [StringComparison]::Ordinal) + $file.Text.Substring($end)) : ($file.Text.Substring(0, $offset) + $arguments.after + $file.Text.Substring($offset + $arguments.before.Length))
+        $text = $arguments.allow_multiple ? ($file.Text.Substring(0, $start) + $region.Replace($before, $after, [StringComparison]::Ordinal) + $file.Text.Substring($end)) : ($file.Text.Substring(0, $offset) + $after + $file.Text.Substring($offset + $before.Length))
     }
     $span = $Tool.Spec.Edit ? @{ Start = $start; End = $end; Offset = $offset } : $null
     $format = Invoke-HarnessService -Harness $script:Harness -Name 'source.format' -Arguments @($Tool, $text, $span)
     if ($format) {
         $text = $format.Text
     }
-    $encoding = [Text.UTF8Encoding]::new(($Tool.Spec.Edit -and $file.Bom), $true)
-    [byte[]]$final = $encoding.GetPreamble() + $encoding.GetBytes($text)
+    # A replaced file keeps its byte order mark, which Windows PowerShell 5.1 needs to read non-ASCII scripts as UTF-8.
+    [byte[]]$final = ConvertTo-HarnessFileText -Text $text -File $file -AsByte
     if ($final.Length -gt $Tool.State.Config.'Agent.MaxFileBytes') {
         throw 'Tool replacement exceeds Agent.MaxFileBytes.'
     }

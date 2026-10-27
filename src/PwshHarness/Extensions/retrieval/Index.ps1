@@ -162,7 +162,7 @@ function Get-RetrievalInventory {
         $names = [Collections.Generic.List[string]]::new()
         $pending = [Collections.Generic.Stack[string]]::new(); $pending.Push($Root)
         $options = [IO.EnumerationOptions]::new()
-        $options.IgnoreInaccessible = $true; $options.AttributesToSkip = [IO.FileAttributes]::ReparsePoint
+        $options.IgnoreInaccessible = $true; $options.AttributesToSkip = [IO.FileAttributes]0
         # Per-entry work is inlined and the checkpoint runs every 32 entries: this loop visits every file under the root.
         $separator = [IO.Path]::DirectorySeparatorChar
         $visited = 0
@@ -176,6 +176,9 @@ function Get-RetrievalInventory {
                         Invoke-HarnessCheckpoint $Request
                     }
                     $entry = $iterator.Current
+                    if (Test-HarnessLinkItem $entry) {
+                        continue
+                    }
                     $relative = [IO.Path]::GetRelativePath($Root, $entry.FullName).Replace($separator, [char]'/')
                     if ($script:RetrievalGeneratedPattern.IsMatch($relative) -or $script:RetrievalSecretPattern.IsMatch($relative)) {
                         continue
@@ -214,7 +217,7 @@ function Get-RetrievalInventory {
         if (-not $file.Exists) {
             continue
         }
-        if ($file.Length -gt 262144 -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        if ($file.Length -gt 262144 -or (Test-HarnessLinkItem $file)) {
             continue
         }
         if ($null -eq $tracked) {
