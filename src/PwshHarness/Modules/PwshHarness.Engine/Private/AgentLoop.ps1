@@ -17,6 +17,10 @@ function Get-EngineAgentUsageAdjustment {
         $adjustment = 0L
         foreach ($attempt in $Attempts) {
             $actual = Get-EngineAgentChargedToken $attempt.Usage
+            if ($actual -lt 0 -and $attempt -is [Collections.IDictionary] -and $attempt['EstimatedTokens'] -is [long]) {
+                # The provider reported nothing for an accepted attempt: charge its estimate, not its reservation.
+                $actual = $attempt['EstimatedTokens']
+            }
             if ($actual -ge 0) {
                 $adjustment += $actual - $attempt.ReservedTokens
             }
@@ -986,9 +990,12 @@ function Send-EngineAgentRequest {
     foreach ($name in @('InputTokens', 'CachedInputTokens', 'OutputTokens')) {
         $counts[$name] = Get-HarnessUsageCounter $usage $name
     }
+    $estimated = @($attempts | Where-Object { $_ -is [Collections.IDictionary] -and $_['EstimatedTokens'] -is [long] }).Count -gt 0
     Add-EngineTranscript -State $turn.Session -Role 'agent-usage' -Text '' -Metadata @{ RunId = $loop.Run.Id; Step = $loop.Steps; Model = [string]$turn.Request.Model
         InputTokens = $counts.InputTokens; CachedInputTokens = $counts.CachedInputTokens; OutputTokens = $counts.OutputTokens
-        Cost = ($usage -and $null -ne $usage.Cost) ? [double]$usage.Cost : $null; Reported = [bool]($counts.InputTokens -or $counts.OutputTokens); Attempts = @($attempts).Count
+        Cost = ($usage -and $null -ne $usage.Cost) ? [double]$usage.Cost : $null; Attempts = @($attempts).Count
+        # Estimated: an attempt ended without provider usage and the run was charged an estimate of its request and output.
+        Estimated = $estimated; Reported = [bool]($counts.InputTokens -or $counts.OutputTokens)
         # The provider's name for the backend that served the request, when it reports one: attributes cache misses.
         Upstream = ($metadata -and $metadata.PSObject.Properties['Upstream']) ? [string]$metadata.Upstream : ''
     }

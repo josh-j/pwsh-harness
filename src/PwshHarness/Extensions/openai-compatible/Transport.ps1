@@ -92,6 +92,7 @@ function Invoke-OpenAIHttpProvider {
     $reader = $null
     $stream = $null
     $observations = [Collections.Generic.List[object]]::new()
+    $attemptBodies = [Collections.Generic.List[string]]::new()
     $usage = $null
     $generationIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $activity = @{ Text = ''; At = 0L }
@@ -128,6 +129,7 @@ function Invoke-OpenAIHttpProvider {
                 $request.Content = [Net.Http.StringContent]::new($wireBody, [Text.Encoding]::UTF8, 'application/json')
                 $usage = $null
                 $generationIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                $attemptBodies.Add($wireBody)
                 $observations.Add(@{ OutputBytes = 0L; OutputChunks = 0; Usage = $null; GenerationIds = $generationIds; ReservedTokens = ($Context.PSObject.Properties['LastReservation'] ? $Context.LastReservation : 0) })
                 if ($progress) {
                     $progress.Clock.Restart(); $progress.Last = 0.0; $progress.First = $true
@@ -444,6 +446,7 @@ function Invoke-OpenAIHttpProvider {
                     $observations[-1].ElapsedMs = $progress.Clock.ElapsedMilliseconds; $observations[-1].LastChunkAgeMs = [int](1000 * ($progress.Clock.Elapsed.TotalSeconds - $progress.Last))
                 }
                 Complete-OpenAIGenerationUsage -Client $client -BaseUrl $config.BaseUrl -Key $key -Observations $observations -Context $Context
+                Complete-OpenAIEstimatedUsage -Observations $observations -Bodies $attemptBodies -Context $Context
                 return [pscustomobject]@{
                     Text               = $text.ToString()
                     Usage              = (ConvertFrom-OpenAIWireUsage (Get-OpenAIAttemptUsage $observations))
@@ -583,6 +586,7 @@ function Invoke-OpenAIHttpProvider {
         }
         if (-not $CancellationToken.IsCancellationRequested) {
             Complete-OpenAIGenerationUsage -Client $client -BaseUrl $config.BaseUrl -Key $key -Observations $observations -Context $Context
+            Complete-OpenAIEstimatedUsage -Observations $observations -Bodies $attemptBodies -Context $Context
         }
         $failure.Data['ProviderAttempts'] = New-HarnessFrozen @(ConvertTo-OpenAIUsageAttempt $observations)
         $failure.Data['GenerationIds'] = @($observations | ForEach-Object { $_.GenerationIds } | Select-Object -Unique)

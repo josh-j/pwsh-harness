@@ -219,6 +219,21 @@ function Invoke-OpenAIClientCallback {
     }
 }
 
+function Complete-OpenAIEstimatedUsage {
+    # Any gateway: an accepted attempt still without usage (an aborted stream, or a gateway that reports none) records an
+    # estimate of its request body and streamed output, which run budgets charge instead of its whole reservation.
+    # Reported usage, cost and calibration stay provider-reported only.
+    [CmdletBinding()]
+    param($Observations, [string[]]$Bodies, $Context)
+    $estimate = $Context.PSObject.Properties['EstimateWireTokens'] ? $Context.EstimateWireTokens : { param([string]$Text) [Math]::Ceiling($Text.Length / 4) }
+    for ($index = 0; $index -lt [Math]::Min($Observations.Count, $Bodies.Count); $index++) {
+        $observation = $Observations[$index]
+        if ($observation.Usage -or [int]$observation['HttpStatusCode'] -lt 200 -or [int]$observation['HttpStatusCode'] -ge 300) {
+            continue
+        }
+        $observation.EstimatedTokens = [long](& $estimate $Bodies[$index]) + [long][Math]::Ceiling($observation.OutputBytes / 4)
+    }
+}
 function Complete-OpenAIGenerationUsage {
     # OpenRouter reports an aborted or usage-less stream's tokens and cost only in its generation record.
     # Fill attempts that ended without usage from it; failures leave them as estimates.
