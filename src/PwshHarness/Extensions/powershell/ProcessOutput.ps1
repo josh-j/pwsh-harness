@@ -106,7 +106,8 @@ function Update-PowerShellRunTask {
     $false
 }
 function Test-PowerShellRunAwaitingInput {
-    # A child that went quiet on an interactive prompt is waiting for input nobody will send unasked.
+    # A child that went quiet on an interactive prompt is waiting for input nobody will send unasked. The forms cover
+    # Unix [y/N] and Windows (Y/N)? or choice's [Y,N]? alike.
     [CmdletBinding()]
     param($Task)
     if (-not $Task.Stdout -or -not $Task.Timer -or $Task.Process.HasExited) {
@@ -126,7 +127,7 @@ function Test-PowerShellRunAwaitingInput {
         $capture.Text.ToString($start, $capture.Text.Length - $start)
     }
     [bool](@($tails | Where-Object { $_ -match 'Supply values for the following parameters:' -or
-                $_ -match '(?i)(\(y(es)?/n(o)?\)|\[y/n\]|\(default is "[^"]*"\)|password[^\n]*:|passphrase[^\n]*:|press (enter|any key)[^\n]*)\s*$' }).Count)
+                $_ -match '(?i)(\(y(es)?/n(o)?[^)\n]*\)|\[y[/,]n\]|\(default is "[^"]*"\)|password[^\n]*:|passphrase[^\n]*:|press (enter|any key)[^\n]*)[?:]?\s*$' }).Count)
 }
 function Wait-PowerShellRunTask {
     [CmdletBinding()]

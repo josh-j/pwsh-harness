@@ -119,6 +119,10 @@ function Get-PowerShellWindowsChildStartInfo {
     $info.StandardErrorEncoding = [Text.Encoding]::UTF8
     $info.Environment['NO_COLOR'] = '1'
     $info.Environment['TERM'] = 'dumb'
+    if (-not $info.Environment.ContainsKey('PYTHONIOENCODING')) {
+        # Output is read as UTF-8; Python on Windows writes its ANSI code page to a pipe unless told otherwise.
+        $info.Environment['PYTHONIOENCODING'] = 'utf-8'
+    }
     foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass')) {
         $info.ArgumentList.Add($argument)
     }
