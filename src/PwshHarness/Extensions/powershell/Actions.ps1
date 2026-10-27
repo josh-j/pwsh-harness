@@ -225,8 +225,11 @@ function Invoke-PowerShellRun {
                 $location = "'" + $workingDirectory.Replace("'", "''") + "'"
                 $wrapper = '$global:LASTEXITCODE=0; $ErrorActionPreference=''Stop''; try { Set-Location -LiteralPath ' + $location + '; [Environment]::CurrentDirectory=' + $location + '; . ''' + $Task.ScriptFile.Replace("'", "''") + '''; $harness_rc=$LASTEXITCODE } catch { [Console]::Error.WriteLine($_); $harness_rc=1 }; [Console]::Out.WriteLine("`n' + $task.Marker + ':$harness_rc"); [Console]::Error.WriteLine(''' + $task.Marker + ':done'')'
             }
-            if ($IsWindows -and $Shell -ceq 'PowerShell') {
-                $wrapper = $script:PackUtf8Prelude + $wrapper
+            if ($Shell -ceq 'PowerShell') {
+                # The child decodes stdin in its console code page, which on Windows need not match ours; an ASCII line
+                # keeps a working folder or temp path outside that code page, such as a non-ASCII user name, intact.
+                $source = ($IsWindows ? $script:PackUtf8Prelude : '') + $wrapper
+                $wrapper = ". ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($source)))'))))"
             }
             $task.Process.StandardInput.WriteLine($wrapper)
             $task.Process.StandardInput.Flush()
