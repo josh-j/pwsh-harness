@@ -239,9 +239,11 @@ function Resolve-AgentPresentedPath {
     if ($Path.StartsWith('skill:', [StringComparison]::Ordinal)) {
         return $Path
     }
+    # Compared as full paths, so a Windows path echoed with other slashes or letter case still names its skill.
     $catalog = Get-AgentSkillCatalog $Context.State $Context.Pump
+    $full = [IO.Path]::IsPathRooted($Path) ? [IO.Path]::GetFullPath($Path) : $Path
     foreach ($skill in $catalog.Skills.Values) {
-        if ([string]::Equals($Path, (Join-Path $skill.Root $skill.Relative), [StringComparison]::Ordinal)) {
+        if ([string]::Equals($full, [IO.Path]::GetFullPath((Join-Path $skill.Root $skill.Relative)), (Get-HarnessPathComparison))) {
             return 'skill:' + $skill.Name
         }
     }

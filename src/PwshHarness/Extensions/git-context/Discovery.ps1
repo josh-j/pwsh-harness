@@ -160,8 +160,10 @@ function Invoke-GitContextGit {
 function Get-GitContextAgentsIgnore {
     # Workspace paths hidden from agent tools and context unless the user includes them: .agentsignore lines in the
     # exclusion syntax (wildcards or folder prefixes), with # comments. An unreadable file is an error, never no policy.
+    # Lines take the tools' slash form on every system, so a Windows-written secrets\ or .\keys\* still hides its files.
     [CmdletBinding()]
     param([string]$Root)
     $file = Read-HarnessTextFile (Join-Path $Root '.agentsignore') 65536 -AllowMissing -NoHardLinks
-    @($file.Text -split '\r?\n' | ForEach-Object { $_.Trim().TrimStart('/') } | Where-Object { $_ -and -not $_.StartsWith('#') })
+    $lines = @($file.Text -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
+    @($lines | ForEach-Object { ConvertTo-HarnessContextPattern $Root $_.Replace('\', '/').TrimStart('/') } | Where-Object { $_ })
 }
