@@ -50,6 +50,14 @@ function New-AgentRefusal {
     $exception.Data['Refusal'] = $Code; $exception.Data['Next'] = $Next
     $exception
 }
+function Test-AgentReservedPathPart {
+    # Device names on every system; on Windows also wildcard or quoting characters and names ending in a dot or
+    # space, which Windows strips. A "." segment is the current folder: the workspace root is a command's usual Cwd.
+    [CmdletBinding()]
+    param([string]$Part, [switch]$Windows)
+    $Part.Split('.')[0].TrimEnd(' ') -match '(?i)^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])$' -or
+    ($Windows -and $Part -cne '.' -and $Part -match '[<>"|*?]|[. ]$')
+}
 function Resolve-AgentToolPath {
     # -Inventory skips the per-path Git checks for a path taken from a Git listing that excluded ignored files,
     # or from a walk of a root that a full check already found outside any repository.
@@ -59,8 +67,7 @@ function Resolve-AgentToolPath {
         throw 'Tool path must be a bounded relative literal path without traversal, drives, providers or streams.'
     }
     foreach ($part in $Path -split '[\\/]') {
-        if ($part.Split('.')[0].TrimEnd(' ') -match '(?i)^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])$' -or
-            ($IsWindows -and ($part -match '[<>"|*?]|[. ]$'))) {
+        if (Test-AgentReservedPathPart -Part $part -Windows:$IsWindows) {
             throw 'Invalid or reserved device path.'
         }
         if ($part -match '(?i)^(?:extension-grants\.json|\.git|\.git-credentials|\.netrc|\.npmrc|\.pypirc|\.ssh|id_(?:rsa|dsa|ecdsa|ed25519)(?:_sk)?)$|^\.env|^credentials(?:$|[._-])|^\.credentials-|\.(pfx|p12|pem|key|jks|kdbx)$') {
