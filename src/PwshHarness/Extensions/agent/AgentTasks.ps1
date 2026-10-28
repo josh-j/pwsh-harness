@@ -78,7 +78,9 @@ function Invoke-AgentCommand {
         }
     }
     $copy = New-AgentPresentedContext $Context $Call
-    $copy | Add-Member NoteProperty AgentCommand @{ Cwd = $cwd; Parents = (Get-HarnessPathSnapshot $cwd -NoHardLinks).Parents; Shell = (Get-AgentShell $Context.State.Config); WaitSeconds = [Math]::Clamp([int]$arguments.WaitMsBeforeAsync, 0, 10000) / 1000.0; Terminal = $terminal; Store = $store; TaskId = ([guid]::NewGuid().ToString('N')); IsDaemon = [bool]$arguments.IsDaemon }
+    # Builds and test suites usually finish within two minutes; returning them in the same step saves a status poll that
+    # re-reads the whole context.
+    $copy | Add-Member NoteProperty AgentCommand @{ Cwd = $cwd; Parents = (Get-HarnessPathSnapshot $cwd -NoHardLinks).Parents; Shell = (Get-AgentShell $Context.State.Config); WaitSeconds = [Math]::Clamp([int]$arguments.WaitMsBeforeAsync, 0, 120000) / 1000.0; Terminal = $terminal; Store = $store; TaskId = ([guid]::NewGuid().ToString('N')); IsDaemon = [bool]$arguments.IsDaemon }
     $legacy = ConvertFrom-AgentToolArgument -Name pwsh -Json (@{ command = $arguments.CommandLine } | ConvertTo-Json -Compress) -Id $Call.Id
     Invoke-AgentToolCall $copy $legacy
 }

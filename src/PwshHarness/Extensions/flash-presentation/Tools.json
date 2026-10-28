@@ -43,7 +43,7 @@
           "type": "string"
         },
         "WaitMsBeforeAsync": {
-          "description": "Milliseconds (0-10000) to wait for the command to finish before it moves to the background. Allow enough for a normal run to finish; for a server or watcher, about 500 to catch start-up failures.",
+          "description": "Milliseconds (0-120000) to wait for the command to finish before it moves to the background. Allow enough for a normal run to finish: builds and test suites usually need 30000 to 120000, so they return in this step without a manage_task poll. For a server or watcher, about 500 to catch start-up failures.",
           "type": "integer"
         },
         "IsDaemon": {
