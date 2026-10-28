@@ -12,7 +12,6 @@
     $Harness.Settings.Declare('ContextIncludeReadme', [bool], $true)
     $Harness.Settings.Declare('ContextAutoFiles', [bool], $true)
     $Harness.Settings.Declare('ContextIncludeDiff', [bool], $true)
-    $Harness.Settings.Declare('ContextRecentCommits', [int], 5, { param($v) $v -ge 0 })
     $Harness.Settings.Declare('ContextMaxFileBytes', [int], 1048576, { param($v) $v -gt 0 })
     $Harness.ContextSources.Add('Git', {
             param($request)

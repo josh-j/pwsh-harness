@@ -412,7 +412,6 @@ Entries match `[A-Za-z0-9._:/*-]`, up to 128 characters.
 | `ContextIncludeDiff` | boolean | `true` | Include staged and unstaged diffs. |
 | `ContextIncludeReadme` | boolean | `true` | Include the README. |
 | `ContextMaxFileBytes` | integer > 0 | `1048576` | Larger files are skipped. |
-| `ContextRecentCommits` | integer >= 0 | `5` | Declared but not read by any current code; changing it has no effect. |
 | `Rag` | boolean | `true` | Add retrieved workspace text to chat context. |
 | `RagPaths` | array of paths | `[]` | Extra folders to index. |
 | `RagTopK` | integer > 0 | `6` | Maximum chunks. |

@@ -49,7 +49,6 @@
   "ContextIncludeReadme": true,
   "ContextMaxFileBytes": 1048576,
   "ContextPath": ".",
-  "ContextRecentCommits": 5,
   "ContextTokenBudget": 2000,
   "ContextWindowTokens": 0,
   "Continuation.MaxGoalChars": 4000,
