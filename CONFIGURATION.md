@@ -13,8 +13,10 @@ step and timeout budgets. A minimal config lets the selected profile evolve:
 }
 ```
 
-These three values are also the built-in defaults, so with an API key no file is
-needed. Do not copy other reference values into a working config: the `Agent.*`
+`Provider` and the model already default to `OpenAICompatible` and the
+`gemini-3.8-flash` profile, but `BaseUrl` has no default: without it in the
+file or in `OPENAI_BASE_URL`, an interactive start asks for it once and offers
+to save it. Do not copy other reference values into a working config: the `Agent.*`
 budgets, `MaxTokens` and `ContextWindowTokens` replace the profile's larger
 limits (32 instead of 256 steps for Gemini Flash), `"Autonomy": "Approve"`
 turns off the interactive Auto start, and `SystemPrompt` freezes the prompt so
@@ -272,8 +274,8 @@ bounds transport retries for other requests.
 ## Setting reference
 
 Defaults are the values in the full example, which equal the declared defaults
-(`Provider`, `Model` and `BaseUrl` are blank in the declaration and filled by
-the built-in provider; the other blanks stay blank). "Agent run" means the
+(`Provider` and `Model` are blank in the declaration and filled by the built-in
+provider; `BaseUrl` stays blank until configured; the other blanks stay blank). "Agent run" means the
 tool-calling agent; "chat turn" means a single request/response turn.
 
 ### Connection and model
@@ -281,8 +283,8 @@ tool-calling agent; "chat turn" means a single request/response turn.
 | Setting | Type, range | Default | Meaning and when to change |
 | --- | --- | --- | --- |
 | `Provider` | string | `OpenAICompatible` | Registered provider name. Change only with another provider extension. |
-| `Model` | string | `google/gemini-3.8-flash` | Model id sent to the gateway. Use your gateway's identifier. |
-| `BaseUrl` | URL or empty | `https://openrouter.ai/api` | Gateway origin. Credentials are never sent over non-loopback HTTP. |
+| `Model` | string | `gemini-3.8-flash` | Model id or profile name sent to the gateway. Use your gateway's identifier. |
+| `BaseUrl` | URL or empty | empty (`OPENAI_BASE_URL`, else asked at start) | Gateway origin, for example `https://openrouter.ai/api`. Credentials are never sent over non-loopback HTTP. |
 | `ModelProfile` | string | `gemini-3.8-flash` | Named profile supplying budgets, context window, reasoning effort and tool presentation. Match it to the model. |
 | `ApiKeyEnvironment` | string | `OPENAI_API_KEY` | Name of the environment variable holding the key. The key itself is never stored in config. |
 | `SecretName` | string | empty | Secret name for the optional SecretManagement `Get-Secret` lookup. |

@@ -665,7 +665,8 @@ function Invoke-AgentToolApproval {
         $data = & $tool.Spec.Execute $tool $Context
         $result = $tool.Result ? $tool.Result : (Complete-AgentToolCall -Context $tool.Context -Call $tool.Call -Data $data)
         foreach ($file in @($result.Status -ceq 'ok' ? $tool.Files : @()).Where({ $_ })) {
-            if ($null -ne $tool.Observations -and $tool.Observations.ContainsKey($file.Path)) {
+            # A file this run created holds exactly the text the model wrote, so a later step may replace it without a view.
+            if ($null -ne $tool.Observations -and ($tool.Observations.ContainsKey($file.Path) -or -not $file.BeforeExists)) {
                 $tool.Observations[$file.Path] = @{ Hash = $file.FinalHash; Step = $tool.Context.AgentStep }
             }
             if ($null -ne $tool.Changed -and -not $tool.Changed.ContainsKey($file.Path)) {

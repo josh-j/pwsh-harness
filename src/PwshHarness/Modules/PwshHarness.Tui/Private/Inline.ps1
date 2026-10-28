@@ -122,6 +122,13 @@ function Get-TuiInlineDraw {
         }
     }
     $end = [Math]::Max($oldCount, $drawRows.Count)
+    # Unchanged rows after the last change stay on screen: a spinner tick rewrites its own row, not the editor and
+    # status bar below it, which keeps remote and recorded terminals from receiving a full region per tick.
+    if ($Previous -and -not $archiveRows.Count -and -not $clearBelow -and $oldCount -eq $rows.Count) {
+        while ($end - 1 -gt $first -and (Test-TuiInlineRow $Previous.Rows[$end - 1] $rows[$end - 1])) {
+            $end--
+        }
+    }
     $cursorOnly = $Previous -and $first -eq $end -and -not $archiveRows.Count
     if ($cursorOnly) {
         $null = $builder.Clear()
