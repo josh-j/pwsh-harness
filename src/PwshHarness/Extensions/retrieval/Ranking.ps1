@@ -366,6 +366,10 @@ function Get-RetrievalContext {
     param($Request)
     $index = Update-RetrievalIndex $Request
     $budget = [Math]::Min($Request.Config.RagTokenBudget, $Request.RemainingTokenBudget)
+    if ($budget -le 0) {
+        $Request.State.Context | Add-Member -MemberType NoteProperty -Name Retrieval -Value @() -Force
+        return
+    }
     $query = Get-RetrievalQuery $Request
     $lists = @(foreach ($retriever in $script:Harness.Retrievers.List()) {
             @{ Name = $retriever.Name; Values = @($script:Harness.Retrievers.Invoke($retriever.Name, @($query, $budget, $Request, $index)) | Where-Object { Test-RetrievalIncludedPath -Request $Request -Path $_.Chunk.Path -Root $index.Root }) }
@@ -377,7 +381,7 @@ function Get-RetrievalContext {
             break
         }
         $chunk = $candidate.Chunk
-        if (-not (Test-RetrievalIncludedPath -Request $Request -Path $chunk.Path -Root $index.Root)) {
+        if (-not (Test-RetrievalIncludedPath -Request $Request -Path $chunk.Path -Root $index.Root -Read)) {
             continue
         }
         $title = "$($chunk.Path):$($chunk.StartLine)-$($chunk.EndLine) [$($candidate.Retrievers -join '+')]"

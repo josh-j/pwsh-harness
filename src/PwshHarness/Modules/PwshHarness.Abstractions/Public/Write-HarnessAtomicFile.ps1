@@ -50,22 +50,23 @@ function Write-HarnessAtomicFile {
         if (-not $IsWindows -and ($Private -or $exists)) {
             [IO.File]::SetUnixFileMode($temporary, $mode)
         }
-        if ($BeforeCommit) {
-            $null = & $BeforeCommit
-        }
-        if ((Get-HarnessPathSnapshot $Path -AllowMissing -NoHardLinks).Parents -cne $parents) {
-            throw 'Physical parent changed before file replacement.'
-        }
-        $prepared = Read-HarnessFileByte $temporary $Bytes.Length -NoHardLinks
-        if ((Get-HarnessSha256 $prepared.Bytes) -cne (Get-HarnessSha256 $Bytes)) {
-            throw 'Temporary file changed before replacement.'
-        }
-        $swap = $exists ? { [IO.File]::Replace($temporary, $Path, [NullString]::Value) } : { [IO.File]::Move($temporary, $Path) }
-        Invoke-HarnessFileRetry -Operation $swap -BeforeRetry {
+        # A Windows sharing retry must retain caller preconditions and the exact prepared bytes.
+        $commitCheck = $BeforeCommit
+        $validate = {
+            if ($commitCheck) {
+                $null = & $commitCheck
+            }
             if ((Get-HarnessPathSnapshot $Path -AllowMissing -NoHardLinks).Parents -cne $parents) {
                 throw 'Physical parent changed before file replacement.'
             }
+            $prepared = Read-HarnessFileByte $temporary $Bytes.Length -NoHardLinks
+            if ((Get-HarnessSha256 $prepared.Bytes) -cne (Get-HarnessSha256 $Bytes)) {
+                throw 'Temporary file changed before replacement.'
+            }
         }
+        $null = & $validate
+        $swap = $exists ? { [IO.File]::Replace($temporary, $Path, [NullString]::Value) } : { [IO.File]::Move($temporary, $Path) }
+        Invoke-HarnessFileRetry -Operation $swap -BeforeRetry $validate
         if ($Private -and $exists) {
             # Windows keeps the replaced file's access list.
             Protect-HarnessPrivateItem ([IO.FileInfo]::new($Path))

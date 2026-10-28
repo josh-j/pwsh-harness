@@ -65,7 +65,7 @@ function Invoke-EngineOperationFile {
             }
             $check = ${function:Invoke-EngineOperationTransition}
             if ($false -eq $file['FinalExists']) {
-                [IO.File]::Delete($file.Path)
+                Invoke-HarnessFileRetry -Operation { [IO.File]::Delete($file.Path) } -BeforeRetry { & $check $Store $Handle Check $Token $file }.GetNewClosure()
             }
             else {
                 Write-HarnessAtomicFile -Path $file.Path -Bytes $file.FinalBytes -BeforeCommit { & $check $Store $Handle Check $Token $file }.GetNewClosure()
@@ -90,7 +90,7 @@ function Invoke-EngineOperationFile {
                     Write-HarnessAtomicFile -Path $path -Bytes $file.BeforeBytes -BeforeCommit $validate
                 }
                 else {
-                    [IO.File]::Delete($path)
+                    Invoke-HarnessFileRetry -Operation { [IO.File]::Delete($path) } -BeforeRetry $validate
                 }
             }
             catch {

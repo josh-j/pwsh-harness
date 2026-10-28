@@ -2,16 +2,7 @@
 function Resolve-HarnessWorkspacePath {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
-    if ([IO.Path]::IsPathRooted($Path)) {
-        return [IO.Path]::GetFullPath($Path)
-    }
-    $provider = $null
-    $drive = $null
-    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref]$provider, [ref]$drive)
-    if ($provider.Name -ne 'FileSystem') {
-        throw 'The workspace must use a filesystem path.'
-    }
-    $resolved
+    Resolve-HarnessFileSystemPath -Path $Path -Purpose workspace
 }
 function Invoke-HarnessPublicError {
     [CmdletBinding()]
@@ -164,8 +155,8 @@ function Initialize-HarnessConnection {
     if (-not $save -and $Interactive) {
         $destination = $HarnessHost.ConfigService.GetPath($ConfigPath)
         if ($ConnectionParameters.Count) {
-            $stored = if (Test-Path -LiteralPath $destination) {
-                Get-Content -LiteralPath $destination -Raw | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            $stored = if ([IO.File]::Exists($destination)) {
+                [IO.File]::ReadAllText($destination) | ConvertFrom-Json -AsHashtable -ErrorAction Stop
             }
             else {
                 @{}

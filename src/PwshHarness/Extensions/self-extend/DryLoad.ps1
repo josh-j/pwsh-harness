@@ -44,10 +44,10 @@ try {
             throw "Extension tests: $($result.PassedCount) passed, $($result.FailedCount) failed, $($result.SkippedCount) skipped."
         }
     }
-    @{ Success = $true; Message = ''; Registrations = $registrations } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $ResultPath
+    [IO.File]::WriteAllText($ResultPath, (@{ Success = $true; Message = ''; Registrations = $registrations } | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
 }
 catch {
-    @{ Success = $false; Message = $_.Exception.Message; Registrations = @{} } | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $ResultPath
+    [IO.File]::WriteAllText($ResultPath, (@{ Success = $false; Message = $_.Exception.Message; Registrations = @{} } | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
     Write-Error -Message $_.Exception.Message -ErrorAction Continue
     exit 1
 }

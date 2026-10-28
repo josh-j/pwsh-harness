@@ -78,9 +78,9 @@ function Get-PowerShellHostCoreCatalog {
     $cacheDirectory = Join-Path $DataDirectory 'catalogs'
     $cachePath = Join-Path $cacheDirectory ("host-core-$($PSVersionTable.PSVersion).json")
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $hit = Test-Path -LiteralPath $cachePath
+    $hit = [IO.File]::Exists($cachePath)
     if ($hit) {
-        $data = Get-Content -LiteralPath $cachePath -Raw | ConvertFrom-Json -AsHashtable
+        $data = [IO.File]::ReadAllText($cachePath) | ConvertFrom-Json -AsHashtable
     }
     if ($hit -and (-not $data.ContainsKey('CacheSchemaVersion') -or $data.CacheSchemaVersion -ne 3)) {
         $hit = $false
@@ -329,7 +329,7 @@ function New-PowerShellComposedCatalog {
         }
     }
     # Content-addressed immutable entries can be shared; host selection and Live caches remain instance-owned.
-    $coreHash = (Get-FileHash -LiteralPath $core.CachePath -Algorithm SHA256).Hash
+    $coreHash = Get-HarnessSha256 -Bytes ([IO.File]::ReadAllBytes($core.CachePath)) -Uppercase
     $overlayHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
     $frozenKey = "catalog-v1:$coreHash`:$overlayHash"
     New-PowerShellLayeredCatalog -Layers $layers -Modules $modules -Cache $core -LiveResolver $resolver `

@@ -11,6 +11,10 @@ function New-HarnessHost {
     if (-not $ProfileDirectory) {
         $ProfileDirectory = Join-Path $project 'Data/Profiles'
     }
+    if ($ConfigPath) {
+        $ConfigPath = Resolve-HarnessFileSystemPath -Path $ConfigPath -Purpose 'configuration file'
+    }
+    $ProfileDirectory = Resolve-HarnessFileSystemPath -Path $ProfileDirectory -Purpose 'profile directory'
     if ($IsWindows) {
         $configDir = Join-Path $env:APPDATA 'PwshHarness'
         $dataDir = Join-Path $env:LOCALAPPDATA 'PwshHarness'
@@ -40,6 +44,8 @@ function New-HarnessHost {
     if ($DataDirectory) {
         $dataDir = $DataDirectory
     }
+    $configDir = Resolve-HarnessFileSystemPath -Path $configDir -Purpose 'configuration directory'
+    $dataDir = Resolve-HarnessFileSystemPath -Path $dataDir -Purpose 'data directory'
     $builtinDirectory = Join-Path $project 'Extensions'
     if ($null -eq $ExtensionPaths) {
         $ExtensionPaths = if ($Options.ContainsKey('ExtensionPaths')) {
@@ -49,9 +55,10 @@ function New-HarnessHost {
             @(Join-Path $configDir 'extensions')
         }
     }
+    $dataFileReader = { param($p) Import-HarnessDataFile -Path $p }
     $hostInstance = PwshHarness.Engine\New-HarnessHost -ConfigDirectory $configDir -DataDirectory $dataDir `
         -ConfigPath $ConfigPath -Options $Options -ExtensionPaths @() `
-        -ManifestReader { param($p) Import-PowerShellDataFile -LiteralPath $p } -EnvironmentPrefix 'PWSH_HARNESS_' -ProfileDirectory $ProfileDirectory -BuiltinDirectory $builtinDirectory `
+        -ManifestReader $dataFileReader -EnvironmentPrefix 'PWSH_HARNESS_' -ProfileDirectory $ProfileDirectory -BuiltinDirectory $builtinDirectory `
         -TrustedReaderDirectory (Join-Path $builtinDirectory 'openai-compatible') `
         -SavedCredentialFactory { param($service) New-HarnessCredentialStore $service }
     # One host-provided location for shipped prompts and skills, so extensions never walk relative paths to the data directory.
@@ -59,7 +66,7 @@ function New-HarnessHost {
     $hostInstance.Services.Add('host.data-root', { $dataRoot }.GetNewClosure())
     $hostInstance.ExtensionLoader.Initialize(@(Join-Path $project 'Extensions'))
     if ($hostInstance.Services.Contains('extension.authoring')) {
-        $authoring = $hostInstance.Services.Invoke('extension.authoring', @($hostInstance, $configDir, $dataDir, (Join-Path $project 'PwshHarness.psd1')))
+        $authoring = $hostInstance.Services.Invoke('extension.authoring', @($hostInstance, $configDir, $dataDir, (Join-Path $project 'PwshHarness.psd1'), $dataFileReader))
         if ($authoring.Error) {
             throw $authoring.Error
         }

@@ -2,8 +2,8 @@
 function Resolve-EnginePhysicalPath {
     [CmdletBinding()]
     param([string]$Path)
-    $directory = [IO.Directory]::Exists($Path)
-    $item = $directory ? [IO.DirectoryInfo]::new([IO.Path]::TrimEndingDirectorySeparator($Path)) : (Get-Item -LiteralPath $Path -Force -ErrorAction Stop)
+    $directory = [bool]([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::Directory)
+    $item = $directory ? [IO.DirectoryInfo]::new([IO.Path]::TrimEndingDirectorySeparator($Path)) : [IO.FileInfo]::new($Path)
     if ($directory ? $item.LinkTarget : $item.LinkType) {
         return $item.ResolveLinkTarget($true).FullName
     }
@@ -149,12 +149,7 @@ function Set-EngineExtensionDisabled {
         $names += $Name
     }
     $extensions = @{ Disabled = @($names | Sort-Object -Unique) }
-    $file = if (Test-Path -LiteralPath $Store.ConfigPath) {
-        Get-Content -LiteralPath $Store.ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
-    }
-    else {
-        @{}
-    }
+    $file = Read-EngineConfigFile -Path $Store.ConfigPath
     foreach ($key in @($file.Keys)) {
         if ((Test-HarnessSecretName $key)) {
             $file.Remove($key)
@@ -180,9 +175,9 @@ function Get-EngineExtensionInfo {
         $record = $Store.Known[$name]
         $generation = ''
         $metadata = Join-Path $record.Directory 'authoring-record.json'
-        if (Test-Path -LiteralPath $metadata) {
+        if ([IO.File]::Exists($metadata)) {
             try {
-                $generation = (Get-Content -LiteralPath $metadata -Raw | ConvertFrom-Json).Generation
+                $generation = ([IO.File]::ReadAllText($metadata) | ConvertFrom-Json).Generation
             }
             catch {
                 $generation = ''
@@ -205,12 +200,7 @@ function Get-EngineExtensionInfo {
 function Clear-EngineExtensionRecord {
     [CmdletBinding()]
     param($Store, [string]$Name)
-    $file = if (Test-Path -LiteralPath $Store.ConfigPath) {
-        Get-Content -LiteralPath $Store.ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
-    }
-    else {
-        @{}
-    }
+    $file = Read-EngineConfigFile -Path $Store.ConfigPath
     foreach ($key in @($file.Keys)) {
         if ((Test-HarnessSecretName $key)) {
             $file.Remove($key)

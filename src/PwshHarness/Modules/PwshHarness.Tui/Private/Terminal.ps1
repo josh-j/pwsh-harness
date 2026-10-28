@@ -153,7 +153,7 @@ function Get-TuiTerminalCapability {
             $null = $ConsoleApi.Get('Cursor'); $cursorObservable = $true
         }
         catch {
-            Write-Verbose 'Cursor state is not readable; use balanced VT cursor visibility.'
+            Write-Verbose 'Cursor state is not readable; use balanced VT cursor visibility.' -Verbose:($VerbosePreference -eq 'Continue')
         }
     }
     [pscustomobject]@{
@@ -224,7 +224,7 @@ function Restore-TuiTerminalState {
             $Terminal.Api.Write($move + "`r`n`e[0m`e[?25h")
         }
         catch {
-            Write-Verbose "Could not restore inline terminal: $_"
+            Write-Verbose "Could not restore inline terminal: $_" -Verbose:($VerbosePreference -eq 'Continue')
         }
         $Terminal.InlineActive = $false
         $Terminal.InlineState = $null
@@ -234,7 +234,7 @@ function Restore-TuiTerminalState {
             $Terminal.Api.Write("`e[0m`e[?25h`e[?1049l")
         }
         catch {
-            Write-Verbose "Could not leave alternate screen: $_"
+            Write-Verbose "Could not leave alternate screen: $_" -Verbose:($VerbosePreference -eq 'Continue')
         }
         $Terminal.Entered = $false
     }
@@ -245,7 +245,7 @@ function Restore-TuiTerminalState {
             $Terminal.Api.Set($name, $Terminal.Changed[$name])
         }
         catch {
-            Write-Verbose "Could not restore terminal member '$name': $_"
+            Write-Verbose "Could not restore terminal member '$name': $_" -Verbose:($VerbosePreference -eq 'Continue')
         }
     }
     $Terminal.Changed.Clear()

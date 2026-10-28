@@ -5,8 +5,8 @@
     param($Harness)
     $script:Harness = $Harness
     $Harness.Services.Add('extension.authoring', {
-            param($instance, $config, $data, $manifest)
-            $script:Authoring = New-SelfExtendExtensionAuthoringService -HarnessHost $instance -ConfigDirectory $config -DataDirectory $data -ModulePath $manifest
+            param($instance, $config, $data, $manifest, $dataFileReader)
+            $script:Authoring = New-SelfExtendExtensionAuthoringService -HarnessHost $instance -ConfigDirectory $config -DataDirectory $data -ModulePath $manifest -DataFileReader $dataFileReader
             $script:Authoring
         })
     $script:PendingAuthoring = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()

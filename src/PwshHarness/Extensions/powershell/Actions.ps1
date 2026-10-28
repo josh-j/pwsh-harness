@@ -15,14 +15,15 @@ function Save-PowerShellCode {
     [CmdletBinding(SupportsShouldProcess)]
     param([object]$State, [Parameter(Mandatory)][string]$Path, [object]$CodeBlock)
     $code = Get-PowerShellLastCode $State $CodeBlock
+    $full = Resolve-HarnessFileSystemPath -Path $Path -Purpose 'save destination'
     $target = $script:Harness.TargetProfiles.Get()
     if ($State.Config['Fix.Eol']) {
-        $code = Get-PowerShellWindowsSaveText -Code $code -Path $Path -Target $target
+        $code = Get-PowerShellWindowsSaveText -Code $code -Path $full -Target $target
     }
     $encoding = [Text.UTF8Encoding]::new($State.Config.SaveEncoding -eq 'utf8BOM')
     if ($PSCmdlet.ShouldProcess($Path,
             'Save generated PowerShell')) {
-        [IO.File]::WriteAllText($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path),
+        [IO.File]::WriteAllText($full,
             $code,
             $encoding)
     }
@@ -127,7 +128,7 @@ function Invoke-PowerShellRun {
     $inline = $Shell -ceq 'PowerShell' -and -not $Terminal -and -not $ScriptPath -and -not $WhatIf -and $code.Length -le $State.Config.'Run.InlineCommandMaxChars' -and $code -match '^\s*# harness-command\r?\n'
     $scriptFile = Join-Path ([IO.Path]::GetTempPath()) ("pwsh-harness-" + [guid]::NewGuid().ToString('N') + '.ps1')
     if ($ScriptPath) {
-        $scriptFile = [IO.Path]::GetFullPath($ScriptPath)
+        $scriptFile = Resolve-HarnessFileSystemPath -Path $ScriptPath -Purpose 'run script'
         $diskCode = [IO.File]::ReadAllText($scriptFile).Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd("`n")
         $approvedCode = $code.Replace("`r`n", "`n").Replace("`r", "`n").TrimEnd("`n")
         if (-not [string]::Equals($diskCode, $approvedCode, [StringComparison]::Ordinal)) {
@@ -148,7 +149,7 @@ function Invoke-PowerShellRun {
         AgentCallId = $AgentCallId; Clock = $script:Harness.Clock
         RunDeadline = $RunDeadline; Watchdog = $null; Failure = $null; ExitCode = $null; ExitedAt = $null; IncompleteOutput = $false; CleanupErrors = [Collections.Generic.List[object]]::new()
         ScriptPath = $ScriptPath; ScriptFile = $scriptFile; Watch = $watch; Budget = $captureBudget
-        MaxCaptureBytes = $MaxCaptureBytes; WhatIf = [bool]$WhatIf; Closed = $false; CommandFinished = $false
+        MaxCaptureBytes = $MaxCaptureBytes; WhatIf = [bool]$WhatIf; Closed = $false; CommandFinished = $false; TemporaryScripts = [Collections.Generic.List[string]]::new()
         RunCancellation = $State.Cancellation; Token = $CancellationToken; Timeout = $runTimeoutSeconds; TimeoutSetting = $ReviewedSettings.TimeoutSetting; Timer = $null
     }
     $State.Busy = $true
@@ -205,6 +206,7 @@ function Invoke-PowerShellRun {
         Remove-PowerShellChildCredential $start $State.Config
         $task.Persistent = [bool]$Terminal
         if ($Terminal -and $Terminal.Task) {
+            $task.TemporaryScripts = $Terminal.Task.TemporaryScripts
             $task.Process = $Terminal.Task.Process
             $task.Stdout = $Terminal.Task.Stdout; $task.Stderr = $Terminal.Task.Stderr
             foreach ($capture in @($task.Stdout, $task.Stderr)) {

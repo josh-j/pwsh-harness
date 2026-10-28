@@ -6,7 +6,7 @@ function Initialize-EngineAgentState {
     $Session.Config.Autonomy = 'Approve'
     $record = [pscustomobject]@{
         Epoch = 0L; Activation = $null; Lease = $null; ConversationId = [string]$Session.SessionId
-        Transcript = $Session.Transcript; Config = $Session.Config; RevocationReason = ''; Loop = $null; Resume = $null
+        Transcript = $Session.Transcript; Config = $Session.Config; RevocationReason = ''; Loop = $null; Resume = $null; HistoryCache = $null
     }
     $Store.AgentStates.Add($Session, $record)
 }
@@ -38,11 +38,12 @@ function Resolve-EngineAgentRoot {
     if (-not [string]::Equals([string]$Session.Context.Path, [string]$Session.Config.ContextPath, [StringComparison]::Ordinal)) {
         throw 'Context paths differ; select one context directory before starting a run.'
     }
-    $item = Get-Item -LiteralPath $Session.Context.Path -Force -ErrorAction Stop
-    if (-not $item.PSIsContainer -or $item.PSProvider.Name -ne 'FileSystem') {
+    # Session paths are already resolved; a later PSDrive remap must not change run authority.
+    $path = [string]$Session.Context.Path
+    if (-not [IO.Directory]::Exists($path)) {
         throw 'Agent context must be a filesystem directory.'
     }
-    Resolve-EnginePhysicalPath $item.FullName
+    Resolve-EnginePhysicalPath $path
 }
 function Update-EngineAgentAuthority {
     [CmdletBinding()]

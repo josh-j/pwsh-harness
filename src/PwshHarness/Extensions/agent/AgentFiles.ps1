@@ -62,7 +62,7 @@ function Resolve-AgentToolPath {
     # -Inventory skips the per-path Git checks for a path taken from a Git listing that excluded ignored files,
     # or from a walk of a root that a full check already found outside any repository.
     [CmdletBinding()]
-    param($State, [string]$Root, [string]$Path, $Context, [switch]$Inventory)
+    param($State, [string]$Root, [string]$Path, $Context, [switch]$Inventory, [switch]$InventoryRoot)
     if ($Path -match '[\p{Cc}\p{Cf}:]|^[\\/]|(^|[\\/])\.\.([\\/]|$)') {
         throw 'Tool path must be a bounded relative literal path without traversal, drives, providers or streams.'
     }
@@ -89,7 +89,8 @@ function Resolve-AgentToolPath {
         }
     }
     $relative = ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Root, $full))
-    $explicit = Test-AgentExplicitPath -State $State -Root $Root -Full $full
+    # A listing root may contain individually included descendants; each listed file still passes policy.
+    $explicit = $InventoryRoot -or (Test-AgentExplicitPath -State $State -Root $Root -Full $full)
     $query = [pscustomobject]@{ Pump = $Context.Pump; CancellationToken = $Context.CancellationToken }
     $repository = $Inventory ? $null : (Invoke-HarnessService -Harness $script:Harness -Name 'workspace.git' -Arguments @($Root, @('rev-parse', '--is-bare-repository'), $query) -Required)
     if (($repository -and $repository.ExitCode -eq 0 -and $repository.Text.Trim() -ceq 'true') -or
@@ -168,7 +169,10 @@ function Get-AgentWorkspaceListing {
     # otherwise every file without following links, capped just above $script:PackWorkspaceMaxFiles. Excluded and
     # .agentsignore paths are left out unless the user included them.
     [CmdletBinding()]
-    param($State, [string]$Root, $Context)
+    param($State, [string]$Root, $Context, [string]$Scope = '')
+    $scopePath = $Scope ? (Resolve-AgentToolPath -State $State -Root $Root -Path $Scope -Context $Context -InventoryRoot) : $Root
+    $Scope = ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Root, $scopePath))
+    $pathspec = $Scope -cne '.' ? @('--', (':(literal)' + $Scope)) : @()
     $hidden = Get-AgentAgentsIgnore $Context $Root
     $permitted = { param($name) $name -and (-not (Get-AgentExclusion -State $State -Relative $name -Ignored $hidden) -or (Test-AgentExplicitPath -State $State -Root $Root -Full ([IO.Path]::GetFullPath($name, $Root)))) }
     # One full policy check of the root (bare repositories, unverifiable Git markers) covers the -Inventory checks below.
@@ -176,8 +180,8 @@ function Get-AgentWorkspaceListing {
     $query = [pscustomobject]@{ Pump = $Context.Pump; CancellationToken = $Context.CancellationToken }
     $repository = Invoke-HarnessService -Harness $script:Harness -Name 'workspace.git' -Arguments @($Root, @('rev-parse', '--is-bare-repository'), $query) -Required
     if ($repository -and $repository.ExitCode -eq 0) {
-        $listed = Invoke-HarnessService -Harness $script:Harness -Name 'workspace.git' -Arguments @($Root, @('ls-files', '-z', '--cached', '--others', '--exclude-standard'), $query) -Required
-        $ignored = Invoke-HarnessService -Harness $script:Harness -Name 'workspace.git' -Arguments @($Root, @('ls-files', '-z', '--cached', '--ignored', '--exclude-standard'), $query) -Required
+        $listed = Invoke-HarnessService -Harness $script:Harness -Name 'workspace.git' -Arguments @($Root, (@('ls-files', '-z', '--cached', '--others', '--exclude-standard') + $pathspec), $query) -Required
+        $ignored = Invoke-HarnessService -Harness $script:Harness -Name 'workspace.git' -Arguments @($Root, (@('ls-files', '-z', '--cached', '--ignored', '--exclude-standard') + $pathspec), $query) -Required
         if (-not $listed -or $listed.ExitCode -ne 0 -or -not $ignored -or $ignored.ExitCode -ne 0) {
             throw 'Cannot list the workspace files.'
         }
@@ -187,9 +191,16 @@ function Get-AgentWorkspaceListing {
     # The walk never enters links; storage reparse points such as OneDrive placeholders are ordinary items.
     $options = [IO.EnumerationOptions]@{ AttributesToSkip = [IO.FileAttributes]0; IgnoreInaccessible = $true }
     $files = [Collections.Generic.List[string]]::new()
-    $pending = [Collections.Generic.Queue[string]]::new(); $pending.Enqueue($Root)
+    $pending = [Collections.Generic.Queue[string]]::new()
+    if ([IO.Directory]::Exists($scopePath)) {
+        $pending.Enqueue($scopePath)
+    }
+    elseif ([IO.File]::Exists($scopePath)) {
+        $files.Add($Scope)
+    }
     while ($pending.Count -and $files.Count -le $script:PackWorkspaceMaxFiles) {
         foreach ($item in [IO.DirectoryInfo]::new($pending.Dequeue()).EnumerateFileSystemInfos('*', $options)) {
+            $Context.CancellationToken.ThrowIfCancellationRequested()
             if (Test-HarnessLinkItem $item) {
                 continue
             }

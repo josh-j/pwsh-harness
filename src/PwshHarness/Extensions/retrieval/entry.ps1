@@ -22,7 +22,12 @@
             if ($orientation) {
                 $message = @($request.Messages | Where-Object { $_.Role -ceq 'user' -and $_.Content.StartsWith('<USER_REQUEST>', [StringComparison]::Ordinal) })[-1]
                 if ($message) {
-                    $message.Content = $message.Content.Replace("<ADDITIONAL_METADATA>`n", "<ADDITIONAL_METADATA>`n$orientation`n")
+                    # Compaction retains enriched task messages. Locate the host's metadata from the
+                    # original prompt, so quoted markup in the task or map cannot move the insertion point.
+                    $prefix = "<USER_REQUEST>`n$($request.Prompt)`n</USER_REQUEST>`n<ADDITIONAL_METADATA>`n"
+                    if ($message.Content.StartsWith($prefix, [StringComparison]::Ordinal) -and -not $message.Content.Substring($prefix.Length).StartsWith($orientation, [StringComparison]::Ordinal)) {
+                        $message.Content = $message.Content.Insert($prefix.Length, "$orientation`n")
+                    }
                 }
             }
         }, 60)

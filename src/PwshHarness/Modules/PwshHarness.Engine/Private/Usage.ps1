@@ -34,9 +34,9 @@ function Get-EngineCalibration {
     if (-not $Store.Calibrations.ContainsKey($key)) {
         $path = Join-Path $Config.DataDirectory 'token-calibration.json'
         $values = @{}
-        if (Test-Path -LiteralPath $path) {
+        if ([IO.File]::Exists($path)) {
             try {
-                $values = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+                $values = [IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable
             }
             catch {
                 Write-EngineFault -Store $Store -Extension '<engine>' -Point 'calibration' -Failure $_

@@ -1,4 +1,5 @@
 # .agentsignore patterns per request, so one search or index pass reads the file once.
+$script:RetrievalAdmission = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
 $script:RetrievalAgentsIgnore = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
 function Get-RetrievalAgentsIgnore {
     [CmdletBinding()]
@@ -15,7 +16,21 @@ function Get-RetrievalAgentsIgnore {
 }
 function Test-RetrievalIncludedPath {
     [CmdletBinding()]
-    param($Request, [string]$Path, [string]$Root)
+    param($Request, [string]$Path, [string]$Root, [switch]$Read)
+    $admission = $null
+    if ($Read -and $script:RetrievalAdmission.TryGetValue($Request, [ref]$admission) -and $admission.Files.ContainsKey($Path)) {
+        if (-not $admission.Decisions.ContainsKey($Path)) {
+            $admission.Clock ??= [Diagnostics.Stopwatch]::StartNew()
+            if ($admission.Clock.ElapsedMilliseconds -gt $admission.Budget) {
+                $Request.State.Context.Index.Status = 'building'
+                return $false
+            }
+            $admission.Decisions[$Path] = Update-RetrievalFileRevision -File $admission.Files[$Path] -Request $Request -Root $Root -IgnoreFiles $admission.IgnoreFiles
+        }
+        if (-not $admission.Decisions[$Path]) {
+            return $false
+        }
+    }
     $context = $Request.State.Context
     $exclusions = @(if ($Request.PSObject.Properties['ExcludeFiles']) {
             $Request.ExcludeFiles
@@ -65,7 +80,7 @@ function Start-RetrievalClock {
 }
 function Invoke-RetrievalGit {
     [CmdletBinding()]
-    param([string]$Root, [string[]]$Arguments, $Request)
+    param([string]$Root, [string[]]$Arguments, $Request, [switch]$Result)
     if (-not $script:GitPath) {
         $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $git) {
@@ -87,19 +102,25 @@ function Invoke-RetrievalGit {
     try {
         $output = $process.StandardOutput.ReadToEndAsync()
         $errorOutput = $process.StandardError.ReadToEndAsync()
+        $readCompletion = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($output, $errorOutput))
         $watch = Start-RetrievalClock $Request inventory
         while ($true) {
             Invoke-HarnessCheckpoint $Request
             if ($watch.ElapsedMilliseconds -ge 2000) {
                 throw [TimeoutException]::new('Repository inventory timed out.')
             }
-            if ($process.WaitForExit(25)) {
+            # Descendants can keep inherited output handles open after Git exits.
+            if ($process.WaitForExit(25) -and $readCompletion.Wait(25)) {
                 break
             }
         }
         $null = $errorOutput.GetAwaiter().GetResult()
+        $captured = $output.GetAwaiter().GetResult()
+        if ($Result) {
+            return @{ ExitCode = $process.ExitCode; Text = $captured }
+        }
         if ($process.ExitCode -eq 0) {
-            $output.GetAwaiter().GetResult()
+            $captured
         }
     }
     finally {
@@ -117,9 +138,52 @@ function Test-RetrievalSafePath {
     # Match the context source's sensitive files and generated/vendor folders, including nested secrets.
     -not $script:RetrievalGeneratedPattern.IsMatch($Path) -and -not $script:RetrievalSecretPattern.IsMatch($Path)
 }
+function Test-RetrievalIgnoredFile {
+    [CmdletBinding()]
+    param([string]$Root, [string]$Name, [hashtable]$IgnoreFiles)
+    $ignored = $false
+    $ancestor = $Root
+    $segments = $name -split '/'
+    for ($level = 0; $level -lt $segments.Count; $level++) {
+        $ignorePath = [IO.Path]::Combine($ancestor, '.gitignore')
+        if (-not $ignoreFiles.ContainsKey($ignorePath)) {
+            $ignoreFiles[$ignorePath] = if ([IO.File]::Exists($ignorePath)) {
+                @((Read-HarnessTextFile $ignorePath 262144).Text -split '\r\n|\n|\r' | Where-Object { $_ -and -not $_.StartsWith('#') })
+            }
+            else {
+                @()
+            }
+        }
+        $localPath = ($segments[$level..($segments.Count - 1)] -join '/')
+        foreach ($pattern in $ignoreFiles[$ignorePath]) {
+            $negative = $pattern.StartsWith('!'); $pattern = $pattern.TrimStart('!').TrimStart('/')
+            $regex = [regex]::Escape($pattern.TrimEnd('/')).Replace('\*\*', '.*').Replace('\*', '[^/]*').Replace('\?', '[^/]')
+            $ignorePrefix = if ($pattern.Contains('/')) {
+                '^'
+            }
+            else {
+                '(^|/)'
+            }
+            if ($localPath -match ($ignorePrefix + $regex + '($|/)')) {
+                $ignored = -not $negative
+            }
+        }
+        $ancestor = [IO.Path]::Combine($ancestor, $segments[$level])
+    }
+    $ignored
+}
 function Get-RetrievalInventory {
     [CmdletBinding()]
-    param([string]$Root, [string]$Prefix = '', $Request, [switch]$Explicit)
+    param([string]$Root, [string]$Prefix = '', $Request, [switch]$Explicit, [string]$Scope = '.', [switch]$IncludeOversized)
+    $scopePath = [IO.Path]::GetFullPath([IO.Path]::Combine($Root, $Scope))
+    $Scope = [IO.Path]::GetRelativePath($Root, $scopePath).Replace('\', '/')
+    if ([IO.Path]::IsPathRooted($Scope) -or $Scope -eq '..' -or $Scope.StartsWith('../', [StringComparison]::Ordinal)) {
+        throw 'Inventory scope is outside the workspace.'
+    }
+    $pathspec = @()
+    if ($Scope -cne '.') {
+        $pathspec = @('--', (':(literal)' + $Scope))
+    }
     $revision = New-HarnessPathTable
     Invoke-HarnessCheckpoint $Request
     if (-not $Explicit) {
@@ -138,10 +202,10 @@ function Get-RetrievalInventory {
         }
     }
     $tracked = if (Invoke-HarnessService -Harness $script:Harness -Name 'workspace.repository-candidate' -Arguments @($Root, $Request) -Required) {
-        Invoke-RetrievalGit -Root $Root -Arguments @('ls-files', '-s', '--cached', '--others', '--exclude-standard', '-z') -Request $Request
+        Invoke-RetrievalGit -Root $Root -Arguments (@('ls-files', '-s', '--cached', '--others', '--exclude-standard', '-z') + $pathspec) -Request $Request
     }
     if ($null -ne $tracked) {
-        $ignored = [Collections.Generic.HashSet[string]]::new([string[]]((Invoke-RetrievalGit -Root $Root -Arguments @('ls-files', '--cached', '--ignored', '--exclude-standard', '-z') -Request $Request) -split "`0"), [StringComparer]::Ordinal)
+        $ignored = [Collections.Generic.HashSet[string]]::new([string[]]((Invoke-RetrievalGit -Root $Root -Arguments (@('ls-files', '--cached', '--ignored', '--exclude-standard', '-z') + $pathspec) -Request $Request) -split "`0"), [StringComparer]::Ordinal)
         $names = [Collections.Generic.List[string]]::new()
         foreach ($record in ($tracked -split "`0")) {
             Invoke-HarnessCheckpoint $Request
@@ -160,10 +224,16 @@ function Get-RetrievalInventory {
             return
         }
         $names = [Collections.Generic.List[string]]::new()
-        $pending = [Collections.Generic.Stack[string]]::new(); $pending.Push($Root)
+        $pending = [Collections.Generic.Stack[string]]::new()
+        if ([IO.Directory]::Exists($scopePath)) {
+            $pending.Push($scopePath)
+        }
+        elseif ([IO.File]::Exists($scopePath)) {
+            $names.Add($Scope)
+        }
         $options = [IO.EnumerationOptions]::new()
         $options.IgnoreInaccessible = $true; $options.AttributesToSkip = [IO.FileAttributes]0
-        # Per-entry work is inlined and the checkpoint runs every 32 entries: this loop visits every file under the root.
+        # Per-entry work is inlined and the checkpoint runs every 32 entries: this loop visits every file under the requested scope.
         $separator = [IO.Path]::DirectorySeparatorChar
         $visited = 0
         while ($pending.Count) {
@@ -217,46 +287,15 @@ function Get-RetrievalInventory {
         if (-not $file.Exists) {
             continue
         }
-        if ($file.Length -gt 262144 -or (Test-HarnessLinkItem $file)) {
+        if ((-not $IncludeOversized -and $file.Length -gt 262144) -or (Test-HarnessLinkItem $file)) {
             continue
         }
-        if ($null -eq $tracked) {
-            $ignored = $false
-            $ancestor = $Root
-            $segments = $name -split '/'
-            for ($level = 0; $level -lt $segments.Count; $level++) {
-                $ignorePath = [IO.Path]::Combine($ancestor, '.gitignore')
-                if (-not $ignoreFiles.ContainsKey($ignorePath)) {
-                    $ignoreFiles[$ignorePath] = if ([IO.File]::Exists($ignorePath)) {
-                        @((Read-HarnessTextFile $ignorePath 262144).Text -split '\r\n|\n|\r' | Where-Object { $_ -and -not $_.StartsWith('#') })
-                    }
-                    else {
-                        @()
-                    }
-                }
-                $localPath = ($segments[$level..($segments.Count - 1)] -join '/')
-                foreach ($pattern in $ignoreFiles[$ignorePath]) {
-                    $negative = $pattern.StartsWith('!'); $pattern = $pattern.TrimStart('!').TrimStart('/')
-                    $regex = [regex]::Escape($pattern.TrimEnd('/')).Replace('\*\*', '.*').Replace('\*', '[^/]*').Replace('\?', '[^/]')
-                    $ignorePrefix = if ($pattern.Contains('/')) {
-                        '^'
-                    }
-                    else {
-                        '(^|/)'
-                    }
-                    if ($localPath -match ($ignorePrefix + $regex + '($|/)')) {
-                        $ignored = -not $negative
-                    }
-                }
-                $ancestor = [IO.Path]::Combine($ancestor, $segments[$level])
-            }
-            if ($ignored) {
-                continue
-            }
+        if ($null -eq $tracked -and (Test-RetrievalIgnoredFile -Root $Root -Name $name -IgnoreFiles $ignoreFiles)) {
+            continue
         }
         # Include stat data as well as blob identity, so uncommitted edits are refreshed too.
         $key = "$($revision[$name]):$($file.LastWriteTimeUtc.Ticks):$($file.Length)"
-        [pscustomobject]@{ Path = $Prefix + $name; FullPath = $full; Revision = $key }
+        [pscustomobject]@{ Path = $Prefix + $name; FullPath = $full; Revision = $key; Root = $Root }
     }
 }
 function Get-RetrievalIndexIdentity {
@@ -330,7 +369,7 @@ function Save-RetrievalIndex {
     try {
         $data = @{ Schema = 1; Root = $Index.Root; Files = $Index.Files; Vectors = $Index.Vectors }
         [IO.File]::WriteAllText($temporary, ($data | ConvertTo-Json -Depth 15 -Compress), [Text.UTF8Encoding]::new($false))
-        [IO.File]::Move($temporary, $Index.Path, $true)
+        Invoke-HarnessFileRetry -Operation { [IO.File]::Move($temporary, $Index.Path, $true) }
         $Index.Dirty = $false
     }
     finally {
@@ -339,9 +378,56 @@ function Save-RetrievalIndex {
         }
     }
 }
+function Update-RetrievalFileRevision {
+    [CmdletBinding()]
+    param($File, $Request, [string]$Root, [hashtable]$IgnoreFiles)
+    try {
+        $sourceRoot = $File.PSObject.Properties['Root'] ? $File.Root : $Root
+        $name = [IO.Path]::GetRelativePath($sourceRoot, $File.FullPath).Replace('\', '/')
+        if (Invoke-HarnessService -Harness $script:Harness -Name 'workspace.repository-candidate' -Arguments @($sourceRoot, $Request) -Required) {
+            $ignored = Invoke-RetrievalGit -Root $sourceRoot -Arguments @('check-ignore', '--no-index', '--', $name) -Request $Request -Result
+            if ($ignored.ExitCode -ne 1) {
+                return $false
+            }
+        }
+        elseif (Test-RetrievalIgnoredFile -Root $sourceRoot -Name $name -IgnoreFiles $IgnoreFiles) {
+            return $false
+        }
+        $item = (Get-HarnessPathSnapshot -Path $File.FullPath -MaximumBytes 262144).Item
+        if ($item -isnot [IO.FileInfo]) {
+            return $false
+        }
+        $File.Revision = ($File.Revision -split ':', 2)[0] + ":$($item.LastWriteTimeUtc.Ticks):$($item.Length)"
+        $true
+    }
+    catch {
+        $Request.CancellationToken.ThrowIfCancellationRequested()
+        $false
+    }
+}
+function Select-RetrievalAreaItem {
+    [CmdletBinding()]
+    param([object[]]$Item, [string]$PathProperty = 'Path', [int]$Limit = [int]::MaxValue, [switch]$Directory)
+    $property = $PathProperty
+    $directoryPath = [bool]$Directory
+    $ranked = $Item | Group-Object -CaseSensitive {
+        $relative = $_ -is [string] ? $_ : $_.$property
+        ($directoryPath -or $relative.Contains('/')) ? ($relative -split '/')[0] : ''
+    } | ForEach-Object {
+        $rank = 0
+        foreach ($value in $_.Group) {
+            [pscustomobject]@{ Rank = $rank++; Value = $value }
+        }
+    }
+    $ranked | Sort-Object Rank, @{ Expression = { $_.Value -is [string] ? $_.Value : $_.Value.$property } } |
+        Select-Object -First $Limit | ForEach-Object { $_.Value }
+}
 function Update-RetrievalIndex {
     [CmdletBinding()]
-    param($Request, [switch]$Complete, [string]$Corpus = 'project', [ValidateRange(1, 5000)][int]$BuildBudgetMilliseconds = 650, [switch]$MemoryOnly, [switch]$MetadataOnly)
+    param($Request, [switch]$Complete, [string]$Corpus = 'project', [ValidateRange(1, 5000)][int]$BuildBudgetMilliseconds = 650, [switch]$MemoryOnly, [switch]$MetadataOnly, [string]$Scope = '.')
+    $null = $script:RetrievalAdmission.Remove($Request)
+    $scoped = $Request.PSObject.Properties['ToolRoot'] -and $Scope -cne '.'
+    $scopePrefix = $Scope.TrimEnd('/') + '/'
     $watch = Start-RetrievalClock $Request build
     $comparison = Get-HarnessPathComparison
     $identity = Get-RetrievalIndexIdentity $Request $Corpus
@@ -354,45 +440,58 @@ function Update-RetrievalIndex {
     }
     $index = $script:Indexes[$key]
     $loadMilliseconds = $watch.Elapsed.TotalMilliseconds
-    $inventory = if ($Corpus -eq 'examples') {
-        @(Get-RetrievalExampleInventory $Request)
+    $resume = $index.PendingInventory
+    if ($Complete -or $Corpus -ne 'project' -or -not $resume -or -not $resume.Scope.Equals($Scope, $comparison)) {
+        $resume = $null
     }
-    elseif ($Request.PSObject.Properties['ToolRoot']) {
-        Get-RetrievalInventory $root -Request $Request -Explicit
+    $index.PendingInventory = $null
+    $inventory = if ($resume) {
+        $resume.Pending
     }
     else {
-        if ($Request.State.Context.Project -and $Request.State.Context.Project.AutoIndexAllowed) {
-            $explicitRoot = @($Request.Config.RagPaths | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Equals($root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $comparison) }).Count -gt 0
-            Get-RetrievalInventory $root -Request $Request -Explicit:$explicitRoot
+        if ($Corpus -eq 'examples') {
+            @(Get-RetrievalExampleInventory $Request)
         }
-        $extra = 0
-        foreach ($folder in $Request.Config.RagPaths) {
-            $extra++
-            if ([IO.Directory]::Exists($folder)) {
-                $fullFolder = [IO.Path]::GetFullPath($folder)
-                if ($fullFolder.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Equals($root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $comparison)) {
-                    if (-not $Request.State.Context.Project -or -not $Request.State.Context.Project.AutoIndexAllowed) {
-                        Get-RetrievalInventory $fullFolder -Request $Request -Explicit
+        elseif ($Request.PSObject.Properties['ToolRoot']) {
+            Get-RetrievalInventory -Root $root -Request $Request -Explicit -Scope $Scope
+        }
+        else {
+            if ($Request.State.Context.Project -and $Request.State.Context.Project.AutoIndexAllowed) {
+                $explicitRoot = @($Request.Config.RagPaths | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Equals($root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $comparison) }).Count -gt 0
+                Get-RetrievalInventory $root -Request $Request -Explicit:$explicitRoot
+            }
+            $extra = 0
+            foreach ($folder in $Request.Config.RagPaths) {
+                $extra++
+                if ([IO.Directory]::Exists($folder)) {
+                    $fullFolder = [IO.Path]::GetFullPath($folder)
+                    if ($fullFolder.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Equals($root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $comparison)) {
+                        if (-not $Request.State.Context.Project -or -not $Request.State.Context.Project.AutoIndexAllowed) {
+                            Get-RetrievalInventory $fullFolder -Request $Request -Explicit
+                        }
                     }
-                }
-                else {
-                    Get-RetrievalInventory $fullFolder "library$extra/" -Request $Request -Explicit
+                    else {
+                        Get-RetrievalInventory $fullFolder "library$extra/" -Request $Request -Explicit
+                    }
                 }
             }
         }
     }
     $phases = [ordered]@{ LoadMilliseconds = $loadMilliseconds; EnumerationMilliseconds = $watch.Elapsed.TotalMilliseconds - $loadMilliseconds; PersistMilliseconds = 0.0; ReadMilliseconds = 0.0; TokenizeMilliseconds = 0.0; PostingsMilliseconds = 0.0; ProcessedFiles = 0; ReusedFiles = 0; TokenizedChunks = 0 }
     $phase = [Diagnostics.Stopwatch]::new()
-    $present = New-HarnessPathTable; $pending = 0
+    $ignoreFiles = New-HarnessPathTable
+    $present = New-HarnessPathTable; $pending = [Collections.Generic.List[object]]::new()
     $cacheRoot = [IO.Path]::GetFullPath($Request.Config.DataDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
     # Interleave areas so a large deep fixture tree cannot starve source directories.
-    $inventory = @($inventory | Sort-Object @{ Expression = { ($_.Path -split '/').Count } }, Path |
-            Group-Object { ($_.Path -split '/')[0] } | ForEach-Object {
-                $rank = 0
-                foreach ($file in $_.Group) {
-                    [pscustomobject]@{ Rank = $rank++; File = $file }
-                }
-            } | Sort-Object Rank, @{ Expression = { $_.File.Path } } | ForEach-Object { $_.File })
+    if (-not $resume) {
+        $inventory = @(Select-RetrievalAreaItem -Item @($inventory | Sort-Object @{ Expression = { ($_.Path -split '/').Count } }, Path))
+    }
+    $allInventory = $resume ? $resume.Inventory : @($inventory)
+    if ($resume) {
+        foreach ($file in $allInventory) {
+            $present[$file.Path] = $true
+        }
+    }
     $phases.EnumerationMilliseconds = $watch.Elapsed.TotalMilliseconds - $loadMilliseconds
     foreach ($file in $inventory) {
         Invoke-HarnessCheckpoint $Request
@@ -403,13 +502,22 @@ function Update-RetrievalIndex {
             continue
         }
         $present[$file.Path] = $true
-        $revision = $file.Revision + '|chunks:2'
+        if ($resume) {
+            if (-not $Complete -and $watch.ElapsedMilliseconds -gt $BuildBudgetMilliseconds) {
+                $pending.Add($file); continue
+            }
+            if (-not (Update-RetrievalFileRevision -File $file -Request $Request -Root $root -IgnoreFiles $ignoreFiles)) {
+                $index.Files.Remove($file.Path); $index.Search = $null; $index.Dirty = $true
+                continue
+            }
+        }
+        $revision = $file.Revision + '|chunks:2' + ([IO.Path]::GetExtension($file.Path) -ieq '.md' ? '|markdown:2' : '')
         if ($index.Files.ContainsKey($file.Path) -and $index.Files[$file.Path].Revision -eq $revision -and
             ($MetadataOnly -or ($index.Files[$file.Path].Frequencies -is [array] -and $index.Files[$file.Path].Frequencies.Count -eq $index.Files[$file.Path].Chunks.Count))) {
             $phases.ReusedFiles++; continue
         }
         if (-not $Complete -and $watch.ElapsedMilliseconds -gt $BuildBudgetMilliseconds) {
-            $pending++; continue
+            $pending.Add($file); continue
         }
         $phase.Restart()
         if ($file.PSObject.Properties['Example']) {
@@ -464,17 +572,36 @@ function Update-RetrievalIndex {
             $null = & $Request.Pump
         }
     }
+    $validation = $resume -and $resume.Validation
+    if ($resume -and -not $pending.Count -and -not $validation) {
+        # Validate the earlier snapshot once, in bounded slices, before reporting it complete.
+        $pending.AddRange([object[]]$allInventory)
+        $validation = $true
+    }
+    if ($Corpus -eq 'project' -and $pending.Count) {
+        $index.PendingInventory = @{ Scope = $Scope; Inventory = $allInventory; Pending = $pending.ToArray(); Validation = $validation }
+    }
     foreach ($path in @($index.Files.psbase.Keys)) {
-        if (-not $present.ContainsKey($path)) {
+        if ((-not $present.ContainsKey($path) -or ($resume -and -not (Test-RetrievalIncludedPath -Request $Request -Path $path -Root $root))) -and (-not $scoped -or $path.Equals($Scope, $comparison) -or $path.StartsWith($scopePrefix, $comparison))) {
             $index.Files.Remove($path); $index.Search = $null; $index.Dirty = $true
+        }
+    }
+    $view = $index
+    if ($scoped) {
+        # Refresh a scope in the shared cache without pruning or ranking unrelated projects.
+        $view = @{} + $index; $view.Files = New-HarnessPathTable; $view.Search = $null
+        foreach ($path in $present.Keys) {
+            if ($index.Files.ContainsKey($path)) {
+                $view.Files[$path] = $index.Files[$path]
+            }
         }
     }
     $phase.Restart()
     if (-not $MetadataOnly) {
-        $null = Initialize-RetrievalSearch $index $Request
+        $null = Initialize-RetrievalSearch $view $Request
     }
     $phases.PostingsMilliseconds = $phase.Elapsed.TotalMilliseconds
-    $index.Ready = $pending -eq 0
+    $view.Ready = $pending.Count -eq 0
     if (-not $MemoryOnly -and -not $MetadataOnly) {
         $phase.Restart()
         Save-RetrievalIndex $index
@@ -482,8 +609,8 @@ function Update-RetrievalIndex {
     }
     $state = [pscustomobject]@{
         SessionId         = $Request.State.SessionId
-        Files = $index.Files.psbase.Count; Chunks = @($index.Files.psbase.Values | ForEach-Object { $_.Chunks }).Count
-        Status            = if ($index.Ready) {
+        Files = $view.Files.psbase.Count; Chunks = @($view.Files.psbase.Values | ForEach-Object { $_.Chunks }).Count
+        Status            = if ($view.Ready) {
             'ready'
         }
         else {
@@ -493,9 +620,20 @@ function Update-RetrievalIndex {
         BuildMilliseconds = $watch.Elapsed.TotalMilliseconds
         Phases            = [pscustomobject]$phases
     }
+    if ($scoped) {
+        $state.Message = "index:$($state.Status) $($state.Files)f/$($state.Chunks)c ($Scope)"
+    }
+    if ($resume -and -not $MetadataOnly -and -not $Request.PSObject.Properties['ToolRoot']) {
+        # Cached candidates from earlier slices still pass live policy before context or embedding use.
+        $files = New-HarnessPathTable
+        foreach ($file in $allInventory) {
+            $files[$file.Path] = $file
+        }
+        $script:RetrievalAdmission.AddOrUpdate($Request, @{ Files = $files; Decisions = (New-HarnessPathTable); IgnoreFiles = (New-HarnessPathTable); Clock = $null; Budget = $BuildBudgetMilliseconds })
+    }
     if ($Corpus -eq 'project') {
         $Request.State.Context | Add-Member NoteProperty Index $state -Force
         $script:Harness.Events.Status($Request.State, 'index', ($state.Message ? $state.Message : "index:$($state.Status) $($state.Files)f/$($state.Chunks)c"))
     }
-    $index
+    $view
 }

@@ -14,7 +14,7 @@
         'Get-HarnessUsageCounter', 'New-HarnessUsage', 'New-HarnessNativeBatch', 'Get-HarnessSha256', 'Get-HarnessPathSnapshot', 'Read-HarnessTextFile',
         'ConvertTo-HarnessSafeText', 'Get-HarnessSecretPattern', 'Get-HarnessSecretSuffixLength', 'Protect-HarnessText', 'Test-HarnessSecretName',
         'Get-HarnessCredentialOrigin', 'New-HarnessToolCall', 'Assert-HarnessToolCall',
-        'New-HarnessToolResult', 'Assert-HarnessToolResult',
+        'New-HarnessToolResult', 'Assert-HarnessToolResult', 'Get-HarnessToolModelData',
         'New-HarnessAgentRun', 'Assert-HarnessAgentRun',
         'New-HarnessAgentRunSummary', 'Assert-HarnessAgentRunSummary',
         'New-HarnessPreparedOperation', 'Assert-HarnessPreparedOperation',

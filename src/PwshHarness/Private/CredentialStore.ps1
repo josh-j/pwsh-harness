@@ -28,7 +28,7 @@ function Test-HarnessCredentialAcl {
     [CmdletBinding()]
     param([string]$Path)
     $identity = Get-HarnessCredentialIdentity
-    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $acl = [IO.FileSystemAclExtensions]::GetAccessControl([IO.FileInfo]::new($Path))
     $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
     $acl.AreAccessRulesProtected -and $acl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($identity) -and
     $rules.Count -eq 1 -and $rules[0].IdentityReference.Equals($identity) -and
@@ -83,8 +83,8 @@ function Initialize-HarnessCredentialDirectory {
 function Assert-HarnessCredentialFileAccess {
     [CmdletBinding()]
     param([string]$Path)
-    $file = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    $attributes = [IO.File]::GetAttributes($Path)
+    if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
         throw 'The credential file must be a regular file, not a link. Remove it and save the credential again.'
     }
     if (Test-HarnessCredentialWindows) {
@@ -132,7 +132,9 @@ function Read-HarnessCredentialEntry {
     $text = $null
     $document = $null
     try {
-        $text = [IO.File]::ReadAllText($Path)
+        $text = Invoke-HarnessFileRetry -Operation { [IO.File]::ReadAllText($Path) } -BeforeRetry {
+            Assert-HarnessCredentialFileAccess $Path
+        }
         $jsonOptions = [Text.Json.JsonDocumentOptions]::new()
         $jsonOptions.MaxDepth = 8
         $document = [Text.Json.JsonDocument]::Parse($text, $jsonOptions)

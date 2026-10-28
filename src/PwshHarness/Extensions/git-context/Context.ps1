@@ -546,9 +546,15 @@ function Initialize-GitContextContextCommand {
             else {
                 $files = @(Resolve-GitContextContextSelection $c.State $c.Arguments)
                 $literalPaths = Get-GitContextContextLiteralPath $c.State
+                $dropped = [Collections.Generic.HashSet[string]]::new([string[]]$files, [StringComparer]::FromComparison((Get-HarnessPathComparison)))
+                for ($index = $c.State.Context.IncludeFiles.Count - 1; $index -ge 0; $index--) {
+                    $include = ConvertTo-HarnessContextPattern -Root $c.State.Context.Project.Root -Pattern $c.State.Context.IncludeFiles[$index]
+                    if ($dropped.Contains($include)) {
+                        $c.State.Context.IncludeFiles.RemoveAt($index)
+                    }
+                }
                 foreach ($file in $files) {
                     $literalPaths[$file] = $true
-                    $null = $c.State.Context.IncludeFiles.Remove($file)
                     if (-not $c.State.Context.ExcludeFiles.Contains($file)) {
                         $c.State.Context.ExcludeFiles.Add($file)
                     }

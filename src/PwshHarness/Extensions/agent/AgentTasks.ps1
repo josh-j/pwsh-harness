@@ -157,12 +157,22 @@ function Invoke-AgentTask {
             throw 'Output cursor is beyond captured output.'
         }
         $excerpt = Get-HarnessTextExcerpt ($stdout.Substring($cursor[0]) + $stderr.Substring($cursor[1])) 8192 -HeadAndTail
-        $record.QuietPolls = -not $finished -and -not $awaiting -and -not $excerpt.Text ? [int]$record['QuietPolls'] + 1 : 0
+        # Omitting Cursor deliberately replays the log; those old bytes are not new process output.
+        $position = "$($stdout.Length):$($stderr.Length)"
+        $record.QuietPolls = -not $finished -and -not $awaiting -and (-not $excerpt.Text -or $position -ceq $record['LastPollCursor']) ? [int]$record['QuietPolls'] + 1 : 0
+        $record.LastPollCursor = $position
         $quiet = $record.QuietPolls ? "(no new output since the last check; running $([int]$record.Task.Watch.Elapsed.TotalSeconds)s. The next status check waits at least $([int][Math]::Min(300, 15 * [Math]::Pow(2, $record.QuietPolls - 1)))s. Continue other work, or stop calling tools: you are notified when it finishes.)" : ''
-        $text = "Task: $($record.Id)`nStatus: $($finished ? 'DONE' : 'RUNNING')`nCursor: $($stdout.Length):$($stderr.Length)`nLog: session transcript`nLog output:`n$($excerpt.Text)$quiet$($awaiting ? "`n$script:PackAwaitingInputNote" : '')"
+        $text = "Task: $($record.Id)`nStatus: $($finished ? 'DONE' : 'RUNNING')`nCursor: $position`nLog: session transcript`nLog output:`n$($excerpt.Text)$quiet$($awaiting ? "`n$script:PackAwaitingInputNote" : '')"
     }
     $copy = New-AgentPresentedContext $Context $Call
-    Complete-AgentToolCall -Context $copy -Call $Call -Data @{ Output = $text }
+    $result = @{ Output = $text }
+    if ($arguments.Action -ceq 'status') {
+        # Waiting time and backoff hints are presentation, not fresh process evidence.
+        $result.context_evidence = Get-HarnessSha256 -Text (@($record.Id, [bool]$finished, [bool]$awaiting, $position, $excerpt.Text) | ConvertTo-Json -Compress)
+        # Equivalent log slices supersede older polls; wait duration does not select different evidence.
+        $result.context_key = 'task-status:' + (Get-HarnessSha256 -Text (@($record.Id, $cursor[0], $cursor[1]) | ConvertTo-Json -Compress))
+    }
+    Complete-AgentToolCall -Context $copy -Call $Call -Data $result
 }
 function Update-AgentTask {
     # Busy only reports whether a background command is still running; it changes nothing.

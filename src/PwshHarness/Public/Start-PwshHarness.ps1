@@ -46,7 +46,7 @@ function Start-PwshHarness {
         Initialize-HarnessConnection -HarnessHost $HarnessHost -Session $session -Config $config -ApiKey $ApiKey -Interactive (Test-HarnessInteractive) -SaveConfig:$SaveConfig -ConfigPath $ConfigPath -ConnectionParameters $connectionParameters -Options $Options
         if (-not $Resume -and $env:PSHARN_RELOAD_HANDOFF -and [IO.File]::Exists($env:PSHARN_RELOAD_HANDOFF)) {
             # A development reload continues the conversation it handed off.
-            $Resume = ([IO.File]::ReadAllText($env:PSHARN_RELOAD_HANDOFF) | ConvertFrom-Json).SessionId
+            $Resume = (Invoke-HarnessFileRetry { [IO.File]::ReadAllText($env:PSHARN_RELOAD_HANDOFF) } | ConvertFrom-Json).SessionId
         }
         if ($Resume) {
             # Resume before selecting a mode: changing the conversation revokes Auto.
@@ -57,7 +57,7 @@ function Start-PwshHarness {
         if (-not $selectedMode -and $Options['Agent.Enabled'] -ne $false) {
             # Interactive sessions start in Auto unless the user disabled the agent or saved Autonomy=Approve.
             $saved = $HarnessHost.ConfigService.GetPath($ConfigPath)
-            $saved = [IO.File]::Exists($saved) ? (Get-Content -LiteralPath $saved -Raw | ConvertFrom-Json -AsHashtable)['Autonomy'] : $null
+            $saved = [IO.File]::Exists($saved) ? ([IO.File]::ReadAllText($saved) | ConvertFrom-Json -AsHashtable)['Autonomy'] : $null
             if ($saved -cne 'Approve') {
                 $selectedMode = 'Auto'; $source = 'Default'
             }

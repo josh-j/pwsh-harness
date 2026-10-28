@@ -126,12 +126,15 @@ function Invoke-GitContextGit {
     }
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $info
+    $started = $false
     try {
-        $null = $process.Start()
+        $started = $process.Start()
         $outputTask = $process.StandardOutput.ReadToEndAsync()
         $errorTask = $process.StandardError.ReadToEndAsync()
+        $readCompletion = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($outputTask, $errorTask))
         $watch = Start-GitContextClock
-        while (-not $process.WaitForExit(25)) {
+        # Descendants can retain inherited pipes after Git exits; EOF shares the query deadline.
+        while (-not $process.WaitForExit(25) -or -not $readCompletion.Wait(25)) {
             Invoke-HarnessCheckpoint $Request
             if ($watch.ElapsedMilliseconds -ge 5000) {
                 throw 'Git context query timed out.'
@@ -153,7 +156,7 @@ function Invoke-GitContextGit {
         }
     }
     finally {
-        if (-not $process.HasExited) {
+        if ($started -and -not $process.HasExited) {
             $process.Kill($true)
         }
         $process.Dispose()

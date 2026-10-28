@@ -67,8 +67,10 @@ function Build-EngineRequestStage {
     }
     $Turn.Request = New-HarnessChatRequest -Messages @($source | ForEach-Object {
             $copy = New-HarnessMessage -Role $_.Role -Content $_.Content
-            if ($_.PSObject.Properties['BudgetGroup']) {
-                $copy | Add-Member NoteProperty BudgetGroup $_.BudgetGroup
+            foreach ($name in @('BudgetGroup', 'AgentFinding')) {
+                if ($_.PSObject.Properties[$name]) {
+                    $copy | Add-Member -MemberType NoteProperty -Name $name -Value $_.$name
+                }
             }
             if ($_.PSObject.Properties['NativeBatch']) {
                 $copy | Add-Member NoteProperty NativeBatch $_.NativeBatch

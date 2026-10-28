@@ -81,11 +81,19 @@ finally { Remove-Item -LiteralPath `$d -Recurse -Force -ErrorAction SilentlyCont
         $process = [Diagnostics.Process]::Start($start)
         try {
             $output = $process.StandardOutput.ReadToEndAsync(); $errorText = $process.StandardError.ReadToEndAsync()
-            if (-not $process.WaitForExit(120000)) {
-                $process.Kill($true)
-                $problems.Add('Loading the changed harness took longer than 120 seconds.')
+            $readCompletion = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($output, $errorText))
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            # A failed worker's descendants may retain its pipes; failure diagnostics share its deadline.
+            while (-not $process.WaitForExit(25) -or ($process.ExitCode -ne 0 -and -not $readCompletion.Wait(25))) {
+                if ($watch.ElapsedMilliseconds -ge 120000) {
+                    if (-not $process.HasExited) {
+                        $process.Kill($true)
+                    }
+                    $problems.Add('Loading the changed harness took longer than 120 seconds.')
+                    break
+                }
             }
-            elseif ($process.ExitCode) {
+            if (-not $problems.Count -and $process.ExitCode) {
                 $text = ($output.GetAwaiter().GetResult() + $errorText.GetAwaiter().GetResult()).Trim()
                 $problems.Add(($text ? $text.Substring(0, [Math]::Min(4000, $text.Length)) : "The changed harness exited with code $($process.ExitCode) while loading."))
             }
@@ -108,12 +116,23 @@ function Read-TuiReloadHandoff {
     if (-not $path -or -not [IO.File]::Exists($path)) {
         return $null
     }
+    $readComplete = $false
     try {
-        [IO.File]::ReadAllText($path) | ConvertFrom-Json -AsHashtable -DateKind String
+        $handoff = Invoke-HarnessFileRetry { [IO.File]::ReadAllText($path) } | ConvertFrom-Json -AsHashtable -DateKind String -ErrorAction Stop
+        $readComplete = $true
     }
     finally {
-        [IO.File]::Delete($path)
+        try {
+            Invoke-HarnessFileRetry { [IO.File]::Delete($path) }
+        }
+        catch {
+            # Failed consumption must stop restoration; cleanup must not replace a read/JSON failure.
+            if ($readComplete) {
+                throw
+            }
+        }
     }
+    $handoff
 }
 function Register-TuiReload {
     # Enables reload for a frontend started by the development launcher.

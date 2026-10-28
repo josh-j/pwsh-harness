@@ -24,7 +24,7 @@ function Get-AgentRewindRecord {
         $journal = $directory ? (Join-Path $directory 'journal.json') : ''
         if ($journal -and [IO.File]::Exists($journal)) {
             # A resumed session keeps its checkpoints; a single-run journal is one checkpoint.
-            foreach ($checkpoint in @(Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json)) {
+            foreach ($checkpoint in @([IO.File]::ReadAllText($journal) | ConvertFrom-Json)) {
                 $record.Checkpoints.Add($checkpoint)
             }
         }
@@ -53,11 +53,25 @@ function Write-AgentRewindFile {
     try {
         Protect-HarnessPrivateItem $stream
         $stream.Write($Bytes, 0, $Bytes.Length); $stream.Flush([bool]$Durable)
+        $stream.Dispose(); $stream = $null
+        Invoke-HarnessFileRetry { [IO.File]::Move($temp, $Path, $true) }
     }
     finally {
-        $stream.Dispose()
+        if ($stream) {
+            try {
+                $stream.Dispose()
+            }
+            catch {
+                Write-Verbose 'Could not close temporary rewind stream; preserving the original write failure.'
+            }
+        }
+        try {
+            Invoke-HarnessFileRetry { [IO.File]::Delete($temp) }
+        }
+        catch {
+            Write-Verbose 'Could not remove temporary rewind file; preserving the original write result.'
+        }
     }
-    Invoke-HarnessFileRetry { [IO.File]::Move($temp, $Path, $true) }
 }
 function Save-AgentRewindBlob {
     [CmdletBinding()]

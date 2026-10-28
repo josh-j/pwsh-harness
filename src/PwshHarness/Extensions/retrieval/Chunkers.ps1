@@ -78,12 +78,41 @@ function Split-RetrievalMarkdown {
         else {
             $lines.Count - 1
         }
-        $title = $lines[$start] -replace '^#+\s*', ''
+        $heading = $lines[$start] -replace '^#+\s*', ''
+        $title = $heading
         $id = "${Path}::heading:$title"
-        if ($duplicates[$title] -gt 1) {
+        if ([Text.Encoding]::UTF8.GetByteCount($title) -gt 384) {
+            $title = (Get-HarnessTextExcerpt -Text $title -MaxBytes 384).Text + '…'
+            $id = "${Path}::heading:" + (Get-HarnessSha256 -Text $heading)
+        }
+        if ($duplicates[$heading] -gt 1) {
             $id += ":line:$($start + 1)"
         }
-        New-HarnessChunk -Id $id -Path $Path -StartLine ($start + 1) -EndLine ($end + 1) `
-            -Kind Markdown -Title $title -Text ($lines[$start..$end] -join "`n") -Fields @{ Name = $title }
+        $section = $lines[$start..$end] -join "`n"
+        if ([Text.Encoding]::UTF8.GetByteCount($section) -le 3072) {
+            New-HarnessChunk -Id $id -Path $Path -StartLine ($start + 1) -EndLine ($end + 1) `
+                -Kind Markdown -Title $title -Text $section -Fields @{ Name = $title }
+            continue
+        }
+        # Large headings must fit the default retrieval allowance, including a single long source line.
+        # Keep every source character and the original line span; only oversized headings gain part IDs.
+        $offset = 0; $line = $start + 1
+        while ($offset -lt $section.Length) {
+            $part = (Get-HarnessTextExcerpt -Text $section.Substring($offset) -MaxBytes 3072).Text
+            if ($offset + $part.Length -lt $section.Length) {
+                $boundary = $part.LastIndexOf("`n")
+                if ($boundary -lt 0) {
+                    $boundary = $part.LastIndexOf(' ')
+                }
+                if ($boundary -ge 0) {
+                    $part = $part.Substring(0, $boundary + 1)
+                }
+            }
+            $breaks = [regex]::Matches($part, "`n").Count
+            New-HarnessChunk -Id "${id}:part:$offset" -Path $Path -StartLine $line -EndLine ($line + $breaks - [int]$part.EndsWith("`n")) `
+                -Kind Markdown -Title $title -Text $part -Fields @{ Name = $title }
+            $line += $breaks
+            $offset += $part.Length
+        }
     }
 }

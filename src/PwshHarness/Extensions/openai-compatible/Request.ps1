@@ -113,6 +113,26 @@ function Add-OpenAIReasoningDetail {
         }
     }
 }
+function Test-OpenAIReasoningScope {
+    [CmdletBinding()]
+    param([string]$Scope, [string]$BaseUrl, [string]$Model)
+    # Keep the existing handoff format, but compare the endpoint actually used on the wire.
+    if ($Scope -ceq ($BaseUrl + '|' + $Model)) {
+        return $true
+    }
+    $suffix = '|' + $Model
+    if (-not $Scope.EndsWith($suffix, [StringComparison]::Ordinal)) {
+        return $false
+    }
+    try {
+        $cached = Get-OpenAIGatewayUri -BaseUrl $Scope.Substring(0, $Scope.Length - $suffix.Length) -Resource '/v1/chat/completions'
+        $current = Get-OpenAIGatewayUri -BaseUrl $BaseUrl -Resource '/v1/chat/completions'
+        return $cached.AbsoluteUri -ceq $current.AbsoluteUri
+    }
+    catch {
+        return $false
+    }
+}
 function New-OpenAIRequestBody {
     [CmdletBinding()]
     param([object]$Context, [switch]$DisableReasoning, [switch]$DisableTools)
@@ -125,8 +145,9 @@ function New-OpenAIRequestBody {
     $cache = $null
     $retained = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $model = $Context.Model ? $Context.Model : $Context.Config.Model
-    $null = $agent -and $Context.State -and $script:ReasoningTurns.TryGetValue($Context.State, [ref]$cache)
-    if ($cache -and $cache.Scope -cne ($Context.Config.BaseUrl + '|' + $model)) {
+    $cacheKey = $Context.PSObject.Properties['ProviderCacheKey'] ? $Context.ProviderCacheKey : $Context.State
+    $null = $agent -and $cacheKey -and $script:ReasoningTurns.TryGetValue($cacheKey, [ref]$cache)
+    if ($cache -and -not (Test-OpenAIReasoningScope -Scope $cache.Scope -BaseUrl $Context.Config.BaseUrl -Model $model)) {
         $cache = $null
     }
     if ($agent) {
@@ -163,7 +184,7 @@ function New-OpenAIRequestBody {
                 $assistant
                 foreach ($result in $batch.Results) {
                     $content = ($null -ne $result.Data -and $result.Data.PSObject.Properties['ModelContent']) ? $result.Data.ModelContent : (ConvertTo-OpenAIWireJson @{
-                            call_id = $result.CallId; tool = $result.Tool; status = $result.Status; data = $result.Data
+                            call_id = $result.CallId; tool = $result.Tool; status = $result.Status; data = (Get-HarnessToolModelData -Data $result.Data)
                             error = $result.Error; truncated = $result.Truncated; transcript_record_id = $result.TranscriptRecordId
                         })
                     @{ role = 'tool'; tool_call_id = $result.CallId; content = $content }

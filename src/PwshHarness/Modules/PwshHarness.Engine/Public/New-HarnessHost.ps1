@@ -15,10 +15,18 @@ function New-HarnessHost {
     if (-not $DataDirectory) {
         $DataDirectory = Join-Path $HOME '.local/share/harness'
     }
+    $ConfigDirectory = Resolve-HarnessFileSystemPath -Path $ConfigDirectory -Purpose 'configuration directory'
+    $DataDirectory = Resolve-HarnessFileSystemPath -Path $DataDirectory -Purpose 'data directory'
     if (-not $ConfigPath) {
         $ConfigPath = Join-Path $ConfigDirectory 'config.json'
     }
+    $ConfigPath = Resolve-HarnessFileSystemPath -Path $ConfigPath -Purpose 'configuration file'
     $context = @{} + $PSBoundParameters
+    foreach ($name in @('ProfileDirectory', 'BuiltinDirectory', 'TrustedReaderDirectory')) {
+        if ($context[$name]) {
+            $context[$name] = Resolve-HarnessFileSystemPath -Path $context[$name] -Purpose $name
+        }
+    }
     $context.ConfigDirectory = $ConfigDirectory
     $context.DataDirectory = $DataDirectory
     $context.ConfigPath = $ConfigPath

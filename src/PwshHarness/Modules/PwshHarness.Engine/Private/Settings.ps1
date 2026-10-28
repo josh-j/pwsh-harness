@@ -52,7 +52,27 @@ function Get-EngineSettingEnvironmentName {
         return $Override
     }
     $normalized = ($Name -creplace '([a-z])([A-Z])', '$1_$2') -replace '[^a-zA-Z0-9_]', '_'
-    $Store.EnvironmentPrefix + $normalized.ToUpper()
+    $Store.EnvironmentPrefix + $normalized.ToUpperInvariant()
+}
+function Resolve-EngineConfigPath {
+    [CmdletBinding()]
+    param($Store, [string]$Path)
+    if (-not $Path -or [string]::Equals($Path, $Store.ConfigPath, (Get-HarnessPathComparison))) {
+        return $Store.ConfigPath
+    }
+    Resolve-HarnessFileSystemPath -Path $Path -Purpose 'configuration file'
+}
+function Read-EngineConfigFile {
+    [CmdletBinding()]
+    param([string]$Path)
+    $file = @{}
+    if ([IO.Path]::Exists($Path)) {
+        $file = [IO.File]::ReadAllText($Path) | ConvertFrom-Json -AsHashtable
+        if ($file -isnot [Collections.IDictionary]) {
+            throw "Configuration file $Path must contain a JSON object."
+        }
+    }
+    $file
 }
 function Resolve-EngineSetting {
     [CmdletBinding()]
@@ -60,16 +80,8 @@ function Resolve-EngineSetting {
     if (-not $Declarations) {
         $Declarations = $Store.Points.Settings
     }
-    if (-not $Path) {
-        $Path = $Store.ConfigPath
-    }
-    $file = @{}
-    if (Test-Path -LiteralPath $Path) {
-        $file = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
-        if ($file -isnot [Collections.IDictionary]) {
-            throw "Configuration file $Path must contain a JSON object."
-        }
-    }
+    $Path = Resolve-EngineConfigPath -Store $Store -Path $Path
+    $file = Read-EngineConfigFile -Path $Path
     $candidateProviders = $null -ne $Providers
     if ($null -eq $Providers) {
         $Providers = $Store.Points.Providers

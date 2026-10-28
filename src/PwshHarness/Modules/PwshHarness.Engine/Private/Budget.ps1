@@ -22,22 +22,53 @@ function Get-EngineBudgetedHistory {
     param($Store, $State, [string]$Prompt)
     $modelProfile = Get-EngineProfile $Store $State.Config
     # Only an active agent run uses its larger input/history allowance; ordinary chat keeps its own.
-    $agent = [bool](Get-EngineAgentState $Store $State).Loop
+    $agentState = Get-EngineAgentState -Store $Store -Session $State
+    $agent = [bool]$agentState.Loop
     $inputBudget = $agent ? $State.Config.'Agent.InputTokenBudget' : $State.Config.InputTokenBudget
     $exchanges = [Collections.Generic.List[object]]::new()
     $current = [Collections.Generic.List[object]]::new()
-    foreach ($record in $State.Transcript) {
-        if ($record.Role -notin @('user', 'assistant')) {
-            continue
+    # Snapshot only inputs used to interpret history. References and scalar values detect resets,
+    # rewinds and in-place edits without reparsing old replay JSON on every turn.
+    $records = @(foreach ($record in $State.Transcript) {
+            if ($record.Role -notin @('user', 'assistant')) {
+                continue
+            }
+            $metadata = $record.PSObject.Properties['Metadata'] ? $record.Metadata : $null
+            $steering = $metadata -and ($metadata -is [Collections.IDictionary] ? $metadata['Steering'] : ($metadata.PSObject.Properties['Steering'] -and $metadata.Steering))
+            $replay = $record.Role -eq 'assistant' -and $metadata ? ($metadata -is [Collections.IDictionary] ? $metadata['Replay'] : ($metadata.PSObject.Properties['Replay'] ? $metadata.Replay : $null)) : $null
+            @{ Source = $record; Role = [string]$record.Role; Text = [string]$record.Text; Steering = [bool]$steering; Replay = [string]$replay }
+        })
+    $policy = $agent ? (@($State.Config.Provider, $State.Config.Model, $State.Config.ModelProfile,
+            $State.Config.'Agent.InputTokenBudget', $State.Config.'Agent.HistoryTokenBudget',
+            $State.Config.ContextWindowTokens, $State.Config.MaxTokens, $State.Config.ContextTokenBudget) | ConvertTo-Json -Compress) : ''
+    $cache = $agent ? $agentState.HistoryCache : $null
+    $start = 0
+    if ($cache -and $cache.Policy -ceq $policy -and $cache.Records.Count -le $records.Count) {
+        $same = $true
+        for ($index = 0; $index -lt $cache.Records.Count; $index++) {
+            $old = $cache.Records[$index]; $new = $records[$index]
+            if (-not [object]::ReferenceEquals($old.Source, $new.Source) -or $old.Role -cne $new.Role -or
+                $old.Text -cne $new.Text -or $old.Steering -ne $new.Steering -or $old.Replay -cne $new.Replay) {
+                $same = $false; break
+            }
         }
-        # A steering note belongs to the exchange of the run it corrected.
-        $metadata = $record.PSObject.Properties['Metadata'] ? $record.Metadata : $null
-        $steering = $metadata -and ($metadata -is [Collections.IDictionary] ? $metadata['Steering'] : ($metadata.PSObject.Properties['Steering'] -and $metadata.Steering))
-        if ($record.Role -eq 'user' -and $current.Count -and -not $steering) {
+        if ($same) {
+            $exchanges.AddRange([object[]]$cache.Exchanges)
+            # The last exchange may still await its assistant after an outage or reload.
+            if ($exchanges.Count) {
+                $current.AddRange([object[]]$exchanges[$exchanges.Count - 1])
+                $exchanges.RemoveAt($exchanges.Count - 1)
+            }
+            $start = $cache.Records.Count
+        }
+    }
+    for ($position = $start; $position -lt $records.Count; $position++) {
+        $record = $records[$position]
+        if ($record.Role -eq 'user' -and $current.Count -and -not $record.Steering) {
             $exchanges.Add($current.ToArray())
             $current.Clear()
         }
-        $replay = $record.Role -eq 'assistant' -and $metadata ? ($metadata -is [Collections.IDictionary] ? $metadata['Replay'] : ($metadata.PSObject.Properties['Replay'] ? $metadata.Replay : $null)) : $null
+        $replay = $record.Replay
         $answer = $record.Text
         if ($replay) {
             try {
@@ -104,6 +135,10 @@ function Get-EngineBudgetedHistory {
     foreach ($compactor in @($Store.Points.HistoryCompactors.Values | Sort-Object Order, Name)) {
         $null = Invoke-EnginePoint -Store $Store -Entry $compactor -Arguments @($history)
     }
+    if ($agent) {
+        # Keep the compacted view, not just a cutoff: restoring original prose would change the prefix again.
+        $agentState.HistoryCache = @{ Policy = $policy; Records = $records; Exchanges = $history.Exchanges.ToArray() }
+    }
     if ($history.Counts.DropOldest) {
         Publish-EngineEvent -Store $Store -EventName HistoryTrimmed -Payload @{
             DroppedExchanges = $history.Counts.DropOldest
@@ -144,7 +179,7 @@ function Get-EngineResultModelText {
     if ($data -is [Collections.IDictionary] -and $null -ne $data['ModelContent']) {
         return [string]$data['ModelContent']
     }
-    [ordered]@{ call_id = $Result.CallId; tool = $Result.Tool; status = $Result.Status; data = $data; error = $Result.Error; truncated = $Result.Truncated } |
+    [ordered]@{ call_id = $Result.CallId; tool = $Result.Tool; status = $Result.Status; data = (Get-HarnessToolModelData -Data $data); error = $Result.Error; truncated = $Result.Truncated } |
         ConvertTo-Json -Depth 30 -Compress
 }
 function Get-EngineAgentFinding {
@@ -174,6 +209,9 @@ function Get-EngineAgentFinding {
             }
             $output = @($data['ModelContent'], $data['Output'], $data['text']) | Where-Object { $null -ne $_ } | Select-Object -First 1
             if ($output) {
+                if ($data['directory_rules']) {
+                    $output = ([string]$output).Replace([string]$data['directory_rules'], '')
+                }
                 $receipt += ' => ' + (& $clip ([string]$output) 240)
             }
         }
@@ -234,9 +272,12 @@ function Remove-EngineSupersededResult {
             }
             if ($reason -and $n -lt $indices.Count - 1 -and -not $data['elided']) {
                 $old = $results[$j]
-                $results[$j] = New-HarnessToolResult -CallId $old.CallId -Tool $old.Tool -Status $old.Status -Error $old.Error -TranscriptRecordId $old.TranscriptRecordId -Data ([ordered]@{
-                        ModelContent = "[Superseded: $reason.]"; context_key = $key; elided = $true
-                    })
+                $replacementData = [ordered]@{ ModelContent = "[Superseded: $reason.]"; context_key = $key; elided = $true }
+                if ($data['directory_rules']) {
+                    $replacementData.directory_rules = $data['directory_rules']
+                    $replacementData.ModelContent += "`n`n" + $data['directory_rules']
+                }
+                $results[$j] = New-HarnessToolResult -CallId $old.CallId -Tool $old.Tool -Status $old.Status -Error $old.Error -TranscriptRecordId $old.TranscriptRecordId -Data $replacementData
                 $changed = $true; $elided++
             }
         }
@@ -315,8 +356,8 @@ function Limit-EngineRequest {
             break
         }
         foreach ($message in @($messages | Where-Object { $_.PSObject.Properties['BudgetGroup'] -and $_.BudgetGroup -ceq $group })) {
-            if ($message.PSObject.Properties['NativeBatch']) {
-                $findings += @(Get-EngineAgentFinding $message)
+            if ($message.PSObject.Properties['NativeBatch'] -or $message.PSObject.Properties['AgentFinding']) {
+                $findings += @($message.PSObject.Properties['AgentFinding'] ? $message.AgentFinding : (Get-EngineAgentFinding $message))
                 $findings = @($findings | Select-Object -Last 16)
                 foreach ($old in $priorSummary) {
                     $null = $messages.Remove($old)
@@ -337,6 +378,14 @@ function Limit-EngineRequest {
                 $checkpoint | Add-Member NoteProperty BudgetGroup 'agent-summary'
                 $index = $messages.IndexOf($message)
                 $messages.RemoveAt($index)
+                # Once-per-run scoped instructions must survive both result elision and batch checkpointing.
+                foreach ($result in @($message.PSObject.Properties['NativeBatch'] ? $message.NativeBatch.Results : @())) {
+                    if ($result.Data -is [Collections.IDictionary] -and $result.Data['directory_rules']) {
+                        $rules = New-HarnessMessage -Role user -Content ([string]$result.Data['directory_rules'])
+                        $rules | Add-Member -MemberType NoteProperty -Name BudgetGroup -Value 'directory-rules'
+                        $messages.Insert($index++, $rules)
+                    }
+                }
                 $messages.Insert($index, $checkpoint)
                 $stubbed++
             }

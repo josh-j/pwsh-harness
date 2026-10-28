@@ -51,6 +51,9 @@ function Invoke-AgentCodeSearch {
     $results = [Collections.Generic.List[object]]::new(); $used = 256; $truncated = $false
     foreach ($candidate in @($script:Harness.Retrievers.Invoke('BM25', @($arguments.query, $limit, $request)))) {
         $chunk = $candidate.Chunk
+        if (-not $ranked -and $candidate.Truncated) {
+            $truncated = $true
+        }
         # Recheck each returned path through the read-tool policy, including exclusions.
         $null = Resolve-AgentToolPath -State $state -Root $root -Path $chunk.Path -Context $Context
         $row = @{ path = $control.ProtectText($state, $chunk.Path); start_line = $chunk.StartLine; end_line = $chunk.EndLine; name = $control.ProtectText($state, $chunk.Title); text = $control.ProtectText($state, $chunk.Text); score = $candidate.Score; retriever = $candidate.Retriever }

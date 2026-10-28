@@ -2,11 +2,50 @@
 . (Join-Path $PSScriptRoot 'Scan.ps1')
 . (Join-Path $PSScriptRoot 'Reference.ps1')
 . (Join-Path $PSScriptRoot 'Approval.ps1')
+function ConvertTo-SelfExtendSourceText {
+    [CmdletBinding()]
+    param($Source)
+    if ($Source -isnot [byte[]]) {
+        return [string]$Source
+    }
+    # Match native PowerShell source decoding while keeping approval and installation bound to the original bytes.
+    $reader = [IO.StreamReader]::new([IO.MemoryStream]::new($Source, $false), [Text.Encoding]::UTF8, $true)
+    try {
+        $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+    }
+}
 function Assert-SelfExtendName {
     [CmdletBinding()]
     param([string]$Name)
     if ($Name -notmatch '^[a-z][a-z0-9-]{0,63}$') {
         throw 'Extension names must be lowercase letters, digits and hyphens, starting with a letter (maximum 64 characters).'
+    }
+    if ($IsWindows -and $Name -match '\A(?:con|prn|aux|nul|com[1-9]|lpt[1-9])\z') {
+        throw 'Extension names cannot use Windows reserved device names.'
+    }
+}
+function Get-SelfExtendFile {
+    [CmdletBinding()]
+    param([string]$Directory, [switch]$Force)
+    $root = [IO.DirectoryInfo]::new($Directory)
+    if ($root.LinkType) {
+        throw 'Authoring does not follow linked extension files or directories.'
+    }
+    $options = [IO.EnumerationOptions]::new()
+    $options.RecurseSubdirectories = $true; $options.IgnoreInaccessible = $false
+    if ($Force) {
+        $options.AttributesToSkip = [IO.FileAttributes]0
+    }
+    foreach ($item in $root.EnumerateFileSystemInfos('*', $options)) {
+        if ($item.LinkType) {
+            throw 'Authoring does not follow linked extension files or directories.'
+        }
+        if ($item -is [IO.FileInfo]) {
+            $item
+        }
     }
 }
 function Get-SelfExtendSource {
@@ -17,17 +56,14 @@ function Get-SelfExtendSource {
     if (@($Store.Host.GetExtensionInfo() | Where-Object { $_.Name -eq $Name -and $_.Source -eq 'builtin' }).Count) {
         throw 'Builtin extensions cannot be edited or removed through authoring.'
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $directory 'extension.psd1'))) {
+    if (-not [IO.File]::Exists([IO.Path]::Combine($directory, 'extension.psd1'))) {
         throw "No installed user extension '$Name'."
     }
     $files = @{}
     $bytes = 0
-    foreach ($file in Get-ChildItem -LiteralPath $directory -Recurse -File) {
+    foreach ($file in Get-SelfExtendFile -Directory $directory) {
         if ($file.Extension -notin @('.ps1', '.psm1', '.psd1')) {
             continue
-        }
-        if ($file.LinkType) {
-            throw 'Authoring does not follow linked source files.'
         }
         $bytes += $file.Length
         if ($bytes -gt 262144) {
@@ -42,13 +78,7 @@ function Get-SelfExtendSnapshot {
     [CmdletBinding()]
     param([string]$Directory)
     $files = @{}; $bytes = 0
-    foreach ($item in @(Get-Item -LiteralPath $Directory -Force) + @(Get-ChildItem -LiteralPath $Directory -Recurse -Force)) {
-        if ($item.LinkType) {
-            throw 'Authoring does not follow linked extension files or directories.'
-        }
-        if ($item.PSIsContainer) {
-            continue
-        }
+    foreach ($item in Get-SelfExtendFile -Directory $Directory -Force) {
         $bytes += $item.Length
         if ($bytes -gt 10485760) {
             throw 'Extension files exceed the 10 MiB staging limit.'
@@ -82,12 +112,7 @@ function Get-SelfExtendPreview {
     [pscustomobject]@{
         Id = $Stage.Id; Name = $Stage.Name; Valid = $Stage.Valid; DryLoaded = $Stage.DryLoaded; Approved = [bool]$Stage.Approval
         Manifest = $Stage.Manifest; Files = @($candidate.Keys | Sort-Object | ForEach-Object {
-                $code = if ($candidate[$_] -is [byte[]]) {
-                    [Text.Encoding]::UTF8.GetString($candidate[$_])
-                }
-                else {
-                    $candidate[$_]
-                }
+                $code = ConvertTo-SelfExtendSourceText -Source $candidate[$_]
                 [pscustomobject]@{ Name = $_; Lines = (Get-SelfExtendLine $code).Count }
             })
         Diagnostics = @($Stage.Diagnostics.ToArray()); Capabilities = @($Stage.Capabilities); CapabilityChanges = $Stage['CapabilityChanges']; Diff = $Stage.Diff
@@ -123,6 +148,7 @@ function New-SelfExtendStage {
         if ($EditName) {
             $stage.Before = Get-SelfExtendSource $Store $EditName
             $stage.ExtraFiles = Get-SelfExtendSnapshot (Join-Path $Store.Extensions $EditName)
+            $stage.BeforeHashes = Get-SelfExtendHash $stage.ExtraFiles
             foreach ($name in @('extension.psd1', 'entry.ps1', 'extension.Tests.ps1', 'authoring-record.json', 'capabilities.json')) {
                 $stage.ExtraFiles.Remove($name)
             }
@@ -158,12 +184,7 @@ function Test-SelfExtendStage {
         if ([IO.Path]::GetExtension($name) -notin @('.ps1', '.psm1', '.psd1')) {
             continue
         }
-        $code = if ($candidateFiles[$name] -is [byte[]]) {
-            [Text.Encoding]::UTF8.GetString($candidateFiles[$name])
-        }
-        else {
-            $candidateFiles[$name]
-        }
+        $code = ConvertTo-SelfExtendSourceText -Source $candidateFiles[$name]
         $tokens = $null; $errors = $null
         $null = [Management.Automation.Language.Parser]::ParseInput($code, [ref]$tokens, [ref]$errors)
         foreach ($errorRecord in $errors) {
@@ -188,7 +209,7 @@ function Test-SelfExtendStage {
         if ($contract.Count) {
             throw 'Invalid output contract.'
         }
-        $data = Import-PowerShellDataFile -LiteralPath (Join-Path $stage.Directory 'source/extension.psd1') -ErrorAction Stop
+        $data = & $Store.DataFileReader (Join-Path $stage.Directory 'source/extension.psd1')
         foreach ($required in @('Name', 'Version', 'HarnessApiVersion', 'EntryPoint', 'Requires', 'Description')) {
             if (-not $data.ContainsKey($required)) {
                 throw "Manifest requires '$required'."
@@ -233,12 +254,7 @@ function Test-SelfExtendStage {
         }
         foreach ($file in $candidateFiles.Keys) {
             if ([IO.Path]::GetExtension($file) -in @('.ps1', '.psm1')) {
-                $code = if ($candidateFiles[$file] -is [byte[]]) {
-                    [Text.Encoding]::UTF8.GetString($candidateFiles[$file])
-                }
-                else {
-                    $candidateFiles[$file]
-                }
+                $code = ConvertTo-SelfExtendSourceText -Source $candidateFiles[$file]
                 Assert-SelfExtendCollision -Store $Store -Stage $stage -Registrations (Get-SelfExtendStaticRegistration $code)
             }
         }
@@ -320,10 +336,10 @@ function Invoke-SelfExtendDryLoad {
             $Store.Host.Clock.Wait(25)
         }
         $output = $stdout.Text.ToString(); $errorText = $stderr.Text.ToString()
-        if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $resultFile)) {
+        if ($process.ExitCode -ne 0 -or -not [IO.File]::Exists($resultFile)) {
             throw "Dry-load failed: $output $errorText"
         }
-        $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
+        $result = [IO.File]::ReadAllText($resultFile) | ConvertFrom-Json
         if (-not $result.Success) {
             throw $result.Message
         }
@@ -416,7 +432,7 @@ function Install-SelfExtendStage {
         }
     }
     $name = $stage.Name; $directory = Join-Path $Store.Extensions $name
-    if (-not $stage.EditName -and ((Test-Path -LiteralPath $directory) -or @($Store.Host.GetExtensionInfo() | Where-Object Name -EQ $name).Count)) {
+    if (-not $stage.EditName -and ([IO.Path]::Exists($directory) -or @($Store.Host.GetExtensionInfo() | Where-Object Name -EQ $name).Count)) {
         throw 'Extension name or directory changed before install; stage it again.'
     }
     $generation = [datetime]::UtcNow.ToString('yyyyMMddTHHmmssfffffffZ')
@@ -427,31 +443,54 @@ function Install-SelfExtendStage {
     $files['authoring-record.json'] = $approval | ConvertTo-Json -Depth 20
     $files['capabilities.json'] = ConvertTo-Json -InputObject @($stage.Capabilities) -Depth 20
     $wasDisabled = $Store.Host.ConfigService.Resolve().Extensions.Disabled -contains $name
+    $wasLoaded = $Store.Host.GetRegistry().Extensions -contains $name
+    $wasKnown = @($Store.Host.GetExtensionInfo() | Where-Object Name -EQ $name).Count -gt 0
     $backup = @{}
-    if (Test-Path -LiteralPath $directory) {
+    if ([IO.Directory]::Exists($directory)) {
         $backup = Get-SelfExtendSnapshot $directory
+        if ($stage.EditName -and (Get-SelfExtendDiff -Before $stage.BeforeHashes -After (Get-SelfExtendHash $backup))) {
+            throw 'Installed source or resources changed since this edit was staged; stage it again.'
+        }
         if (-not $backup.ContainsKey('authoring-record.json')) {
             $previous = @{} + $backup
             $findings = @(foreach ($file in $previous.Keys) {
                     if ([IO.Path]::GetExtension($file) -in @('.ps1', '.psm1')) {
-                        Get-SelfExtendCapability -Code ([Text.Encoding]::UTF8.GetString($previous[$file])) -DataDirectory $Store.DataDirectory -File $file
+                        Get-SelfExtendCapability -Code (ConvertTo-SelfExtendSourceText -Source $previous[$file]) -DataDirectory $Store.DataDirectory -File $file
                     }
                 })
             $previous['capabilities.json'] = ConvertTo-Json -InputObject $findings -Depth 20
             $previous['authoring-record.json'] = @{ Generation = "$generation-previous"; Who = [Environment]::UserName; When = [datetime]::UtcNow.ToString('o'); Capabilities = @($findings.Capability | Sort-Object -Unique); Approvals = @(); PreviouslyInstalled = $true } | ConvertTo-Json -Depth 20
-            Save-SelfExtendFile (Join-Path $Store.Extensions ".history/$name/$($generation)-previous") $previous
+            Save-SelfExtendGeneration -Directory (Join-Path $Store.Extensions ".history/$name/$($generation)-previous") -Files $previous
+        }
+    }
+    # This manifest-free container stays on the same volume and is not an extension discovery candidate.
+    $work = Join-Path $Store.Extensions ('.install-' + [guid]::NewGuid().ToString('N'))
+    $candidate = Join-Path $work 'candidate'; $previous = Join-Path $work 'previous'
+    $moved = $false; $installed = $false; $activation = $false; $keep = $false
+    $expected = Get-SelfExtendHash $files; $prior = Get-SelfExtendHash $backup
+    $check = {
+        param($root, $hashes)
+        if (Get-SelfExtendDiff -Before $hashes -After (Get-SelfExtendHash (Get-SelfExtendSnapshot $root))) {
+            throw 'Extension files changed during installation; stage and approve the source again.'
         }
     }
     try {
-        # Replacement directories avoid retaining removed optional tests.
-        if (Test-Path -LiteralPath $directory) {
-            Remove-Item -LiteralPath $directory -Recurse -Force
+        Save-SelfExtendFile $candidate $files
+        $null = & $check $candidate $expected
+        if ($backup.Count) {
+            $validate = { & $check $directory $prior }
+            $null = & $validate
+            Invoke-HarnessFileRetry -Operation { [IO.Directory]::Move($directory, $previous) } -BeforeRetry $validate
+            $moved = $true
         }
-        Save-SelfExtendFile $directory $files
+        Invoke-HarnessFileRetry -Operation { [IO.Directory]::Move($candidate, $directory) } -BeforeRetry { & $check $candidate $expected }
+        $installed = $true
+        $null = & $check $directory $expected
+        $activation = $true
         if ($wasDisabled) {
             $Store.Host.ExtensionLoader.Enable($name)
         }
-        elseif ($Store.Host.GetRegistry().Extensions -contains $name) {
+        elseif ($wasLoaded) {
             $Store.Host.ExtensionLoader.Reload($name)
         }
         else {
@@ -460,27 +499,86 @@ function Install-SelfExtendStage {
                 throw 'Live install failed.'
             }
         }
-        Save-SelfExtendFile $history $files
+        Save-SelfExtendGeneration -Directory $history -Files $files
         $stage.Valid = $false; $stage.DryLoaded = $false
         "Installed $name generation $generation."
     }
     catch {
-        if (Test-Path -LiteralPath $directory) {
-            Remove-Item -LiteralPath $directory -Recurse -Force
-        }
-        if ($backup) {
-            Save-SelfExtendFile $directory $backup
-            if ($wasDisabled) {
-                $Store.Host.ExtensionLoader.Disable($name)
+        $failure = $_
+        try {
+            if ($installed) {
+                # Retain the rejected tree, including any concurrent edits, as recovery evidence.
+                $keep = $true
+                Invoke-HarnessFileRetry { [IO.Directory]::Move($directory, (Join-Path $work 'failed')) }
             }
-            else {
-                $Store.Host.ExtensionLoader.Reload($name)
+            if ($moved) {
+                Invoke-HarnessFileRetry { [IO.Directory]::Move($previous, $directory) }
+            }
+            if ($activation) {
+                if ($wasDisabled) {
+                    $Store.Host.ExtensionLoader.Disable($name)
+                }
+                elseif ($wasLoaded) {
+                    $Store.Host.ExtensionLoader.Reload($name)
+                }
+                elseif (-not $wasKnown) {
+                    $Store.Host.ExtensionLoader.Forget($name)
+                }
+                else {
+                    $Store.Host.ExtensionLoader.Unload($name)
+                }
             }
         }
-        else {
-            $Store.Host.ExtensionLoader.Unload($name)
+        catch {
+            $keep = $true
+            $failure.Exception.GetBaseException().Data['RollbackError'] = $_.Exception.Message
         }
-        throw
+        if ($keep) {
+            $failure.Exception.GetBaseException().Data['RecoveryDirectory'] = $work
+            Write-Verbose "Extension recovery files retained at $work."
+        }
+        throw $failure
+    }
+    finally {
+        if (-not $keep -and [IO.Directory]::Exists($work)) {
+            try {
+                if ([IO.Directory]::Exists($previous)) {
+                    $null = & $check $previous $prior
+                }
+                Invoke-HarnessFileRetry { [IO.Directory]::Delete($work, $true) }
+            }
+            catch {
+                Write-Verbose "Extension transaction cleanup retained files at $work."
+            }
+        }
+    }
+}
+function Save-SelfExtendGeneration {
+    [CmdletBinding()]
+    param([string]$Directory, [hashtable]$Files)
+    $parent = [IO.Path]::GetDirectoryName($Directory)
+    $null = [IO.Directory]::CreateDirectory($parent)
+    $temporary = [IO.Path]::Combine($parent, '.pending-' + [guid]::NewGuid().ToString('N'))
+    $expected = Get-SelfExtendHash $Files
+    $validate = {
+        if (Get-SelfExtendDiff -Before $expected -After (Get-SelfExtendHash (Get-SelfExtendSnapshot $temporary))) {
+            throw 'Generation files changed before history publication.'
+        }
+    }
+    try {
+        Save-SelfExtendFile -Directory $temporary -Files $Files
+        $null = & $validate
+        Invoke-HarnessFileRetry -Operation { [IO.Directory]::Move($temporary, $Directory) } -BeforeRetry $validate
+    }
+    finally {
+        if ([IO.Directory]::Exists($temporary)) {
+            try {
+                Invoke-HarnessFileRetry { [IO.Directory]::Delete($temporary, $true) }
+            }
+            catch {
+                Write-Verbose "Uncommitted generation cleanup retained files at $temporary."
+            }
+        }
     }
 }
 function Restore-SelfExtendGeneration {
@@ -489,11 +587,19 @@ function Restore-SelfExtendGeneration {
     Assert-SelfExtendName $Name
     $null = Get-SelfExtendSource $Store $Name
     $root = Join-Path $Store.Extensions ".history/$Name"
-    $generations = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction Ignore | Sort-Object Name -Descending)
+    $generations = @(if ([IO.Directory]::Exists($root)) {
+            [IO.DirectoryInfo]::new($root).GetDirectories('*', [IO.EnumerationOptions]::new()) |
+                Where-Object Name -Match '^\d{8}T\d{13,14}Z(?:-previous)?$' |
+                Where-Object {
+                    [IO.File]::Exists([IO.Path]::Combine($_.FullName, 'extension.psd1')) -and
+                    [IO.File]::Exists([IO.Path]::Combine($_.FullName, 'entry.ps1')) -and
+                    [IO.File]::Exists([IO.Path]::Combine($_.FullName, 'authoring-record.json'))
+                } | Sort-Object Name -Descending
+        })
     if (-not $Generation) {
         $record = Join-Path (Join-Path $Store.Extensions $Name) 'authoring-record.json'
-        $current = if (Test-Path -LiteralPath $record) {
-            (Get-Content -LiteralPath $record -Raw | ConvertFrom-Json).Generation
+        $current = if ([IO.File]::Exists($record)) {
+            ([IO.File]::ReadAllText($record) | ConvertFrom-Json).Generation
         }
         else {
             ''
@@ -507,7 +613,7 @@ function Restore-SelfExtendGeneration {
     $files = @{}
     foreach ($file in @('extension.psd1', 'entry.ps1', 'extension.Tests.ps1')) {
         $p = Join-Path (Join-Path $root $Generation) $file
-        if (Test-Path -LiteralPath $p) {
+        if ([IO.File]::Exists($p)) {
             $code = [IO.File]::ReadAllText($p)
             $files[$file] = if ($code -match '^# file: ') {
                 $code
@@ -528,7 +634,7 @@ function Restore-SelfExtendGeneration {
     $after = @{} + $stage.Files
     foreach ($file in $stage.ExtraFiles.Keys) {
         if ([IO.Path]::GetExtension($file) -in @('.ps1', '.psm1', '.psd1')) {
-            $after[$file] = [Text.Encoding]::UTF8.GetString($stage.ExtraFiles[$file])
+            $after[$file] = ConvertTo-SelfExtendSourceText -Source $stage.ExtraFiles[$file]
         }
     }
     $stage.Diff = Get-SelfExtendDiff $before $after
@@ -555,9 +661,9 @@ function Remove-SelfExtendExtension {
 }
 function New-SelfExtendExtensionAuthoringService {
     [CmdletBinding()]
-    param($HarnessHost, [string]$ConfigDirectory, [string]$DataDirectory, [string]$ModulePath)
+    param($HarnessHost, [string]$ConfigDirectory, [string]$DataDirectory, [string]$ModulePath, [Parameter(Mandatory)][scriptblock]$DataFileReader)
     $store = @{ Host = $HarnessHost; Extensions = (Join-Path $ConfigDirectory 'extensions'); DataDirectory = $DataDirectory
-        ModulePath = $ModulePath; Worker = (Join-Path $PSScriptRoot 'DryLoad.ps1'); Stages = @{}
+        ModulePath = $ModulePath; DataFileReader = $DataFileReader; Worker = (Join-Path $PSScriptRoot 'DryLoad.ps1'); Stages = @{}
     }
     $service = [pscustomobject]@{}
     $stage = ${function:New-SelfExtendStage}; $validate = ${function:Test-SelfExtendStage}; $dry = ${function:Invoke-SelfExtendDryLoad}

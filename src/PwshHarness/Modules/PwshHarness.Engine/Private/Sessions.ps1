@@ -55,9 +55,15 @@ function Get-EngineSessionFile {
     [CmdletBinding()]
     param([string]$Path)
     try {
-        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $item = if ($IsWindows) {
+            $directory = [bool]([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::Directory)
+            $directory ? [IO.DirectoryInfo]::new($Path) : [IO.FileInfo]::new($Path)
+        }
+        else {
+            Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        }
     }
-    catch [Management.Automation.ItemNotFoundException] {
+    catch [Management.Automation.ItemNotFoundException], [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
         return
     }
     if (-not (Test-EngineSessionFile $item)) {
@@ -256,14 +262,22 @@ function Read-EngineSession {
     if ($Id) {
         Assert-EngineSessionId $Id
     }
-    if (-not (Test-Path -LiteralPath $Config.SessionDirectory)) {
+    $exists = $IsWindows ? [IO.Directory]::Exists($Config.SessionDirectory) : (Test-Path -LiteralPath $Config.SessionDirectory)
+    if (-not $exists) {
         if ($Id) {
             throw "Session '$Id' does not exist."
         }
         return
     }
     if (-not $Id) {
-        Get-ChildItem -LiteralPath $Config.SessionDirectory -Filter '*.jsonl' |
+        $items = if ($IsWindows) {
+            ([IO.DirectoryInfo]::new($Config.SessionDirectory)).EnumerateFileSystemInfos('*.jsonl') |
+                Where-Object { -not ($_.Attributes -band [IO.FileAttributes]'Hidden,System') }
+        }
+        else {
+            Get-ChildItem -LiteralPath $Config.SessionDirectory -Filter '*.jsonl'
+        }
+        $items |
             Where-Object { (Test-EngineSessionId $_.BaseName) -and (Test-EngineSessionFile $_) } |
             Select-Object BaseName, LastWriteTime, Length
         return

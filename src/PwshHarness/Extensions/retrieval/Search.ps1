@@ -5,13 +5,13 @@ function Find-RetrievalTool {
     $Request.CancellationToken.ThrowIfCancellationRequested()
     $arguments = $Request.SearchArguments
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $scope = [IO.Path]::GetRelativePath($Request.ToolRoot, $Request.SearchScope).Replace('\', '/')
     $paths = if ($arguments.mode -ceq 'exact') {
-        @(Get-RetrievalInventory $Request.ToolRoot -Request $Request -Explicit | ForEach-Object Path)
+        @(Get-RetrievalInventory -Root $Request.ToolRoot -Request $Request -Explicit -Scope $scope -IncludeOversized | ForEach-Object Path)
     }
     else {
-        $index = Update-RetrievalIndex $Request -BuildBudgetMilliseconds 3000 -MemoryOnly; $Request.SearchPartial = -not $index.Ready; @($index.Files.psbase.Keys)
+        $index = Update-RetrievalIndex -Request $Request -BuildBudgetMilliseconds 3000 -MemoryOnly -Scope $scope; $Request.SearchPartial = -not $index.Ready; @($index.Files.psbase.Keys)
     }
-    $scope = [IO.Path]::GetRelativePath($Request.ToolRoot, $Request.SearchScope).Replace('\', '/')
     $prefix = $scope.TrimEnd('/') + '/'; $comparison = Get-HarnessPathComparison
     # Filter with literal paths rather than passing a provider name from model input. Include patterns take the paths'
     # slash form, so a Windows-style src\*.ps1 still matches; -like escapes with a backtick, never a backslash.
@@ -42,7 +42,7 @@ function Find-RetrievalTool {
                 $file = Read-HarnessTextFile (Join-Path $Request.ToolRoot $path) 262144 -NoHardLinks
             }
             catch {
-                $Request.CancellationToken.ThrowIfCancellationRequested(); $Request.Skipped++; continue
+                $Request.CancellationToken.ThrowIfCancellationRequested(); $Request.Skipped++; $Request.SearchPartial = $true; continue
             }
             $lines = $file.Text -split '\r\n|\n|\r'
             for ($i = 0; $i -lt $lines.Count; $i++) {
@@ -54,9 +54,26 @@ function Find-RetrievalTool {
                 }
                 $first = [Math]::Max(0, $i - 1); $last = [Math]::Min($lines.Count - 1, $i + 1)
                 $text = ($first..$last | ForEach-Object { '{0}: {1}' -f ($_ + 1), $lines[$_] }) -join "`n"
+                $truncated = $false
+                if ($Request.PSObject.Properties['ProtectText']) {
+                    # Protect the complete line before clipping: a cut credential fragment cannot be redacted later.
+                    $text = & $Request.ProtectText $text
+                    if ($Budget -gt 512 -and [Text.Encoding]::UTF8.GetByteCount(($text | ConvertTo-Json -Compress)) -gt $Budget - 512) {
+                        $line = & $Request.ProtectText $lines[$i]
+                        $maxBytes = [int][Math]::Floor(($Budget - 512) / 6)
+                        $match = $regex.Match($line); $start = [Math]::Max(0, $match.Index - [Math]::Min(80, [Math]::Floor($maxBytes / 8)))
+                        if ($start -gt 0 -and [char]::IsLowSurrogate($line[$start])) {
+                            $start--
+                        }
+                        # Reserve metadata and worst-case JSON escaping; the tool still enforces its serialized row cap.
+                        $excerpt = Get-HarnessTextExcerpt -Text $line.Substring($start) -MaxBytes $maxBytes
+                        $text = '{0}: {1}{2}{3}' -f ($i + 1), ($start ? '…' : ''), $excerpt.Text, ($excerpt.Truncated ? '…' : '')
+                        $first = $i; $last = $i; $truncated = $true
+                    }
+                }
                 $chunk = New-HarnessChunk -Id ($path + '::match:' + $i) -Path $path -StartLine ($first + 1) -EndLine ($last + 1) -Kind Match -Title $path -Text $text
                 $emitted++
-                @{ Chunk = $chunk; Score = 1; Retriever = ($arguments.regex ? 'Regex' : 'Literal') }
+                @{ Chunk = $chunk; Score = 1; Retriever = ($arguments.regex ? 'Regex' : 'Literal'); Truncated = $truncated }
                 if (-not $arguments.per_line) {
                     break
                 }

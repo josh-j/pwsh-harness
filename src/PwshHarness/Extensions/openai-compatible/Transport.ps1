@@ -62,22 +62,25 @@ function Invoke-OpenAIHttpProvider {
     $agent = [bool]($Context.PSObject.Properties['AgentTools'] -and $Context.AgentTools)
     $managedRetry = $Context.PSObject.Properties['AgentRetryManaged'] -and $Context.AgentRetryManaged
     $reasoningCache = $null
+    $model = $Context.Model ? $Context.Model : $config.Model
+    $cacheKey = $Context.PSObject.Properties['ProviderCacheKey'] -and $Context.ProviderCacheKey ? $Context.ProviderCacheKey : $Context.State
     if ($agent -and $Context.State) {
-        $scope = $config.BaseUrl + '|' + ($Context.Model ? $Context.Model : $config.Model)
-        if (-not $script:ReasoningTurns.TryGetValue($Context.State, [ref]$reasoningCache) -or $reasoningCache.Scope -cne $scope) {
-            $null = $script:ReasoningTurns.Remove($Context.State)
+        $scope = $config.BaseUrl + '|' + $model
+        if (-not $script:ReasoningTurns.TryGetValue($cacheKey, [ref]$reasoningCache) -or -not (Test-OpenAIReasoningScope -Scope $reasoningCache.Scope -BaseUrl $config.BaseUrl -Model $model)) {
+            $null = $script:ReasoningTurns.Remove($cacheKey)
             $reasoningCache = @{ Scope = $scope; Turns = @{} }
-            $script:ReasoningTurns.Add($Context.State, $reasoningCache)
+            $script:ReasoningTurns.Add($cacheKey, $reasoningCache)
         }
     }
-    $requireReasoning = $agent -and $Context.Model -match '(^|/)gemini-3\.8-flash(?:$|-)'
-    $reasoningDisabled = -not $requireReasoning -and $Context.State -and $Context.State.PSObject.Properties['ReasoningEffortUnsupported'] -and
-    $Context.State.ReasoningEffortUnsupported
+    $requireReasoning = $agent -and $model -match '(^|/)gemini-3\.8-flash(?:$|-)'
     $uri = Get-OpenAIGatewayUri $config.BaseUrl '/v1/chat/completions'
-    $toolScope = $uri.AbsoluteUri + '|' + $Context.Model
+    $toolScope = $uri.AbsoluteUri + '|' + $model
+    $reasoningScopes = $Context.State -and $Context.State.PSObject.Properties['ReasoningEffortUnsupportedScopes'] ? $Context.State.ReasoningEffortUnsupportedScopes : $null
+    $reasoningDisabled = -not $requireReasoning -and $reasoningScopes -and $reasoningScopes.Contains($toolScope)
+    $toolScopes = $Context.State -and $Context.State.PSObject.Properties['ToolsApiUnsupportedScopes'] ? $Context.State.ToolsApiUnsupportedScopes : $null
     $toolsDisabled = -not $config.UseToolsApi -or ($Context.State -and
         $Context.State.PSObject.Properties['ToolsApiUnsupportedFor'] -and
-        $Context.State.ToolsApiUnsupportedFor -ceq $toolScope)
+        $Context.State.ToolsApiUnsupportedFor -ceq $toolScope) -or ($toolScopes -and $toolScopes.Contains($toolScope))
     $key = Get-OpenAIApiKey $config -SecureKey $(if (Get-Variable Credentials -Scope Script -ErrorAction Ignore) {
             $script:Credentials.Get($Context.State, $config)
         }) -SavedKeyReader { if (Get-Variable Credentials -Scope Script -ErrorAction Ignore) {
@@ -212,6 +215,11 @@ function Invoke-OpenAIHttpProvider {
                         [string]$message -match '(?i)(unsupported|not supported|not support|disabled|not enabled|unknown|not allowed|unrecognized|unexpected)') {
                         $toolsDisabled = $true
                         if ($Context.State) {
+                            if ($null -eq $toolScopes) {
+                                $toolScopes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                                $Context.State | Add-Member -MemberType NoteProperty -Name ToolsApiUnsupportedScopes -Value $toolScopes
+                            }
+                            $null = $toolScopes.Add($toolScope)
                             $Context.State | Add-Member NoteProperty ToolsApiUnsupportedFor $toolScope -Force
                         }
                         Write-Warning 'Gateway rejected native tools; using the text workflow for this endpoint/model in this session.'
@@ -223,9 +231,14 @@ function Invoke-OpenAIHttpProvider {
                         [string]$message -match 'reasoning_effort') {
                         $reasoningDisabled = $true
                         if ($Context.State) {
+                            if ($null -eq $reasoningScopes) {
+                                $reasoningScopes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                                $Context.State | Add-Member -MemberType NoteProperty -Name ReasoningEffortUnsupportedScopes -Value $reasoningScopes
+                            }
+                            $null = $reasoningScopes.Add($toolScope)
                             $Context.State.ReasoningEffortUnsupported = $true
                             if (-not $Context.State.ReasoningWarningShown) {
-                                Write-Warning 'Gateway rejected reasoning_effort; disabled for this session (OpenAI-compatible endpoint support is unverified).'
+                                Write-Warning 'Gateway rejected reasoning_effort; disabled for this endpoint/model in this session (OpenAI-compatible endpoint support is unverified).'
                                 $Context.State.ReasoningWarningShown = $true
                             }
                         }

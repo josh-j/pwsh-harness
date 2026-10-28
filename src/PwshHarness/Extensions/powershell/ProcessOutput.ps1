@@ -5,7 +5,7 @@ function New-PowerShellRunCapture {
     $buffer = [char[]]::new(65536)
     $cancellation = [Threading.CancellationTokenSource]::new()
     [pscustomobject]@{ Reader = $Reader; Buffer = $buffer; Text = [Text.StringBuilder]::new()
-        Budget = $Budget; Cancellation = $cancellation; Pending = $Reader.ReadAsync([Memory[char]]::new($buffer), $cancellation.Token).AsTask(); Finished = $false; Failure = $null
+        Budget = $Budget; Surrogate = ''; Cancellation = $cancellation; Pending = $Reader.ReadAsync([Memory[char]]::new($buffer), $cancellation.Token).AsTask(); Finished = $false; Failure = $null
     }
 }
 function Update-PowerShellRunCapture {
@@ -18,7 +18,13 @@ function Update-PowerShellRunCapture {
             if ($count -eq 0) {
                 $Capture.Finished = $true; break
             }
-            $chunk = [string]::new($Capture.Buffer, 0, $count)
+            $chunk = $Capture.Surrogate + [string]::new($Capture.Buffer, 0, $count)
+            $Capture.Surrogate = ''
+            # StreamReader can split a scalar at the character-buffer boundary; budget its UTF-8 bytes together.
+            if ([char]::IsHighSurrogate($chunk[-1])) {
+                $Capture.Surrogate = [string]$chunk[-1]
+                $chunk = $chunk.Substring(0, $chunk.Length - 1)
+            }
             if ($Capture.Budget) {
                 $excerpt = Get-HarnessTextExcerpt $chunk ([Math]::Max(0, $Capture.Budget.Limit - $Capture.Budget.Bytes))
                 $Capture.Budget.Bytes += [Text.Encoding]::UTF8.GetByteCount($excerpt.Text)
@@ -171,9 +177,7 @@ function Close-PowerShellRunTask {
     }
     $Task.Closed = $true
     if ($Task.Persistent -and $Task.CommandFinished -and -not $Task.Failure -and -not $Force) {
-        if (-not $Task.ScriptPath -and [IO.File]::Exists($Task.ScriptFile)) {
-            [IO.File]::Delete($Task.ScriptFile)
-        }
+        Remove-PowerShellRunScript $Task
         return
     }
     if ($Task.Process) {
@@ -219,13 +223,23 @@ function Close-PowerShellRunTask {
             $Task.CleanupErrors.Add($_)
         }
     }
-    try {
-        if (-not $Task.ScriptPath -and [IO.File]::Exists($Task.ScriptFile)) {
-            [IO.File]::Delete($Task.ScriptFile)
-        }
+    Remove-PowerShellRunScript $Task
+}
+function Remove-PowerShellRunScript {
+    [CmdletBinding()]
+    param($Task)
+    $Task.TemporaryScripts ??= [Collections.Generic.List[string]]::new()
+    if (-not $Task.ScriptPath -and [IO.File]::Exists($Task.ScriptFile) -and -not $Task.TemporaryScripts.Contains($Task.ScriptFile)) {
+        $Task.TemporaryScripts.Add($Task.ScriptFile)
     }
-    catch {
-        $Task.CleanupErrors.Add($_)
+    foreach ($path in $Task.TemporaryScripts.ToArray()) {
+        try {
+            Invoke-HarnessFileRetry -Operation { [IO.File]::Delete($path) }
+            $null = $Task.TemporaryScripts.Remove($path)
+        }
+        catch {
+            $Task.CleanupErrors.Add($_)
+        }
     }
 }
 function Complete-PowerShellRunTask {

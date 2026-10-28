@@ -4,6 +4,7 @@ function New-PowerShellBenchmarkNativeProcess {
     # Keep the real inert type for typed candidate variables; override every execution/stream member.
     $process = [Diagnostics.Process]::new()
     $guard = $Guard; $invokeNative = $InvokeNative
+    $inputState = @{ Closed = $false; Required = $false; Redirect = @{}; Streams = @{ StandardInput = [IO.StringWriter]::new() } }
     if ($StartInfo) {
         $process.StartInfo = $StartInfo 
     }
@@ -13,14 +14,30 @@ function New-PowerShellBenchmarkNativeProcess {
     $process | Add-Member NoteProperty OutputText '' -Force
     $process | Add-Member NoteProperty OutputCompletion ([Threading.Tasks.TaskCompletionSource[string]]::new()) -Force
     $process | Add-Member NoteProperty ErrorCompletion ([Threading.Tasks.TaskCompletionSource[string]]::new()) -Force
-    $process | Add-Member NoteProperty StandardInput ([IO.StringWriter]::new()) -Force
     $process | Add-Member ScriptMethod Start {
         $leaf = ($this.StartInfo.FileName -split '[\\/]')[-1]
+        # CreateProcess appends .exe only to extensionless bare names; retain the closed modeled set.
+        if ($this.StartInfo.FileName -eq $leaf -and $leaf -in @('sort', 'sc', 'schtasks', 'robocopy')) {
+            $leaf += '.exe'
+        }
         if ($leaf -notin @('sort.exe', 'sc.exe', 'schtasks.exe', 'robocopy.exe') -or
             (-not $guard.Bindings.ContainsKey($leaf) -and $leaf -notin $guard.MockCommands)) {
             throw "GuardRefused: native process requires a simulated API or declared mock: $leaf"
         }
+        foreach ($stream in @('StandardInput', 'StandardOutput', 'StandardError')) {
+            $inputState.Redirect[$stream] = $this.StartInfo."Redirect$stream"
+        }
+        if ($this.StartInfo.UseShellExecute -and ($inputState.Redirect.Values -contains $true)) {
+            throw [InvalidOperationException]::new('UseShellExecute must be false to redirect streams.')
+        }
+        $inputState.Leaf = $leaf
+        $inputState.Arguments = [string]$this.StartInfo.Arguments
+        $inputState.ArgumentList = [string[]]@($this.StartInfo.ArgumentList)
+        $inputState.Required = $inputState.Redirect.StandardInput -and $leaf -eq 'sort.exe'
         $this.BenchmarkStarted = $true
+        if (-not $inputState.Required) {
+            $this.Complete()
+        }
         $true
     }.GetNewClosure() -Force
     $process | Add-Member ScriptMethod Complete {
@@ -30,21 +47,57 @@ function New-PowerShellBenchmarkNativeProcess {
         if (-not $this.BenchmarkStarted) {
             throw 'Process has not started.' 
         }
-        $leaf = ($this.StartInfo.FileName -split '[\\/]')[-1]
-        [string[]]$nativeArguments = if ($this.StartInfo.ArgumentList.Count) {
-            @($this.StartInfo.ArgumentList)
+        if ($inputState.Required -and -not $inputState.Closed) {
+            return
+        }
+        $leaf = $inputState.Leaf
+        [string[]]$nativeArguments = if ($inputState.ArgumentList.Count) {
+            $inputState.ArgumentList
         }
         else {
-            @([regex]::Matches($this.StartInfo.Arguments, '"([^"\r\n]*)"|([^\s"]+)') | ForEach-Object {
-                    if ($_.Groups[1].Success) {
-                        $_.Groups[1].Value 
+            # Windows CRT rules: quoted segments join, and only backslashes before quotes escape.
+            $commandLine = $inputState.Arguments
+            @(for ($i = 0; $i -lt $commandLine.Length; ) {
+                    while ($i -lt $commandLine.Length -and $commandLine[$i] -in @(' ', "`t")) {
+                        $i++
                     }
-                    else {
-                        $_.Groups[2].Value 
+                    if ($i -eq $commandLine.Length) {
+                        break
                     }
+                    $argument = [Text.StringBuilder]::new(); $quoted = $false
+                    while ($i -lt $commandLine.Length) {
+                        if (-not $quoted -and $commandLine[$i] -in @(' ', "`t")) {
+                            break
+                        }
+                        $slashes = 0
+                        while ($i -lt $commandLine.Length -and $commandLine[$i] -eq '\') {
+                            $slashes++; $i++
+                        }
+                        if ($i -lt $commandLine.Length -and $commandLine[$i] -eq '"') {
+                            $null = $argument.Append([char]'\', [int][Math]::Floor($slashes / 2))
+                            if ($slashes % 2) {
+                                $null = $argument.Append('"')
+                            }
+                            elseif ($quoted -and $i + 1 -lt $commandLine.Length -and $commandLine[$i + 1] -eq '"') {
+                                $null = $argument.Append('"'); $i++
+                            }
+                            else {
+                                $quoted = -not $quoted
+                            }
+                        }
+                        else {
+                            $null = $argument.Append([char]'\', $slashes)
+                            if ($i -eq $commandLine.Length -or (-not $quoted -and $commandLine[$i] -in @(' ', "`t"))) {
+                                break
+                            }
+                            $null = $argument.Append($commandLine[$i])
+                        }
+                        $i++
+                    }
+                    $argument.ToString()
                 })
         }
-        $text = $this.StandardInput.ToString()
+        $text = $inputState.Streams.StandardInput.ToString()
         $lines = $text.Length ? @($text.TrimEnd("`r", "`n") -split '\r?\n') : @()
         $command = $guard.Bindings.ContainsKey($leaf) ? $guard.Bindings[$leaf] : $leaf
         $native = & $invokeNative $command $nativeArguments $lines ($leaf -eq 'sort.exe')
@@ -52,6 +105,12 @@ function New-PowerShellBenchmarkNativeProcess {
         $nativeOutput = @($native.Output)
         $this.OutputText = $nativeOutput.Count ? (($nativeOutput -join [Environment]::NewLine) + [Environment]::NewLine) : ''
         $this.HasExited = $true
+        foreach ($reader in @($inputState.Streams.StandardOutput, $inputState.Streams.StandardError)) {
+            $reader.Reader = [IO.StringReader]::new(($reader.IsError ? '' : $this.OutputText))
+            if ($reader.Pending) {
+                $null = $reader.Pending.TrySetResult($reader.Reader.ReadToEnd())
+            }
+        }
         $null = $this.OutputCompletion.TrySetResult($this.OutputText)
         $null = $this.ErrorCompletion.TrySetResult('')
     }.GetNewClosure() -Force
@@ -59,42 +118,60 @@ function New-PowerShellBenchmarkNativeProcess {
         param([int]$Milliseconds = -1)
         $this.Complete()
         if ($Milliseconds -ge 0) {
-            $true 
+            $this.HasExited
+        }
+        else {
+            $null = $this.OutputCompletion.Task.GetAwaiter().GetResult()
         }
     } -Force
-    $process.StandardInput | Add-Member NoteProperty BenchmarkProcess $process
-    $process.StandardInput | Add-Member ScriptMethod Close {
-        $this.PSBase.Close()
-        $this.BenchmarkProcess.Complete()
-    } -Force
-    $process | Add-Member ScriptMethod Dispose { $this.StandardInput.Dispose() } -Force
+    $inputState.Streams.StandardInput | Add-Member NoteProperty BenchmarkProcess $process
+    $closeInput = {
+        $this.PSBase.Dispose()
+        $inputState.Closed = $true
+        if ($this.BenchmarkProcess.BenchmarkStarted) {
+            $this.BenchmarkProcess.Complete()
+        }
+    }.GetNewClosure()
+    foreach ($method in @('Close', 'Dispose')) {
+        $inputState.Streams.StandardInput | Add-Member ScriptMethod $method $closeInput -Force
+    }
+    # Process cleanup discards pending input; only the caller's stdin EOF dispatches the simulation.
+    $process | Add-Member ScriptMethod Dispose { $inputState.Streams.StandardInput.PSBase.Dispose() }.GetNewClosure() -Force
     $process | Add-Member ScriptMethod Close { $this.Dispose() } -Force
     foreach ($stream in @('StandardOutput', 'StandardError')) {
-        $reader = [pscustomobject]@{ Process = $process; IsError = ($stream -eq 'StandardError'); Reader = $null }
+        $reader = [pscustomobject]@{ Process = $process; IsError = ($stream -eq 'StandardError'); Reader = $null; Pending = $null }
         $reader | Add-Member ScriptMethod ReadToEnd {
-            $this.Process.Complete()
-            $this.IsError ? '' : $this.Process.OutputText
+            $this.ReadToEndAsync().GetAwaiter().GetResult()
         }
         $reader | Add-Member ScriptMethod ReadToEndAsync {
             if (-not $this.Process.BenchmarkStarted) {
                 throw 'Process has not started.' 
             }
-            if ($this.IsError) {
-                $this.Process.ErrorCompletion.Task 
+            if ($this.Process.HasExited) {
+                [Threading.Tasks.Task]::FromResult($this.Reader.ReadToEnd())
             }
             else {
-                $this.Process.OutputCompletion.Task 
+                if ($this.Pending) {
+                    throw 'An asynchronous stream read is already pending.'
+                }
+                $this.Pending = [Threading.Tasks.TaskCompletionSource[string]]::new()
+                $this.Pending.Task
             }
         }
         $reader | Add-Member ScriptMethod ReadLine {
             $this.Process.Complete()
-            if (-not $this.Reader) {
-                $value = $this.IsError ? '' : $this.Process.OutputText
-                $this.Reader = [IO.StringReader]::new($value)
-            }
+            $null = $this.Process.OutputCompletion.Task.GetAwaiter().GetResult()
             $this.Reader.ReadLine()
         }
-        $process | Add-Member NoteProperty $stream $reader -Force
+        $inputState.Streams[$stream] = $reader
+    }
+    foreach ($stream in @('StandardInput', 'StandardOutput', 'StandardError')) {
+        $process | Add-Member ScriptProperty $stream {
+            if (-not $this.BenchmarkStarted -or -not $inputState.Redirect[$stream]) {
+                throw [InvalidOperationException]::new('Stream has not been redirected or the process has not started.')
+            }
+            $inputState.Streams[$stream]
+        }.GetNewClosure() -Force
     }
     if ($Start) {
         $null = $process.Start() 

@@ -377,7 +377,7 @@ function Add-EngineAgentProgress {
     if ($null -ne $data['ExitCode'] -and $data['ExitCode'] -eq 0) {
         $progress.Passed++
     }
-    $content = @($data['ModelContent'], $data['text'], $data['Output'], $data['ErrorOutput'], $data['results']) | ConvertTo-Json -Depth 20 -Compress
+    $content = $data['context_evidence'] ? [string]$data['context_evidence'] : (@($data['ModelContent'], $data['text'], $data['Output'], $data['ErrorOutput'], $data['results']) | ConvertTo-Json -Depth 20 -Compress)
     if ($progress.Seen.Count -ge 4096 -or $progress.Seen.Add((Get-HarnessSha256 -Text "$($Outcome.Tool)`n$($data['context_key'])`n$content"))) {
         $progress.Evidence++; $progress.StepEvidence = $true
     }
@@ -431,8 +431,10 @@ function ConvertTo-EngineMessageRecord {
     param([object[]]$Messages)
     foreach ($message in $Messages) {
         $item = [ordered]@{ Role = $message.Role; Content = $message.Content }
-        if ($message.PSObject.Properties['BudgetGroup']) {
-            $item.BudgetGroup = $message.BudgetGroup
+        foreach ($name in @('BudgetGroup', 'AgentFinding')) {
+            if ($message.PSObject.Properties[$name]) {
+                $item[$name] = $message.$name
+            }
         }
         if ($message.PSObject.Properties['NativeBatch'] -and $message.NativeBatch) {
             $batch = $message.NativeBatch
@@ -459,8 +461,10 @@ function ConvertFrom-EngineMessageRecord {
                 })
             $message | Add-Member NoteProperty NativeBatch (New-HarnessNativeBatch -Text ([string]$batch.Text) -Calls $calls -Results $results -ProviderData $batch.ProviderData -TokenOverhead ([int]$batch.TokenOverhead))
         }
-        if ($item.Contains('BudgetGroup')) {
-            $message | Add-Member NoteProperty BudgetGroup ([string]$item.BudgetGroup)
+        foreach ($name in @('BudgetGroup', 'AgentFinding')) {
+            if ($item.Contains($name)) {
+                $message | Add-Member -MemberType NoteProperty -Name $name -Value ([string]$item[$name])
+            }
         }
         $message
     }
@@ -726,7 +730,13 @@ function Invoke-EngineAgentContinuation {
             $turn = $loop.Turn
             Update-EngineAgentTask $Store $loop
             foreach ($notice in $loop.TaskNotices) {
-                $turn.Exchange.Add((New-HarnessMessage user $notice.Data.SystemMessage))
+                $message = New-HarnessMessage -Role user -Content $notice.Data.SystemMessage
+                $finding = Get-EngineAgentFinding -Message ([pscustomobject]@{ NativeBatch = (New-HarnessNativeBatch -Results @($notice)) })
+                $message | Add-Member -MemberType NoteProperty -Name AgentFinding -Value ($finding -join "`n")
+                # A text-only waiting step must not detach the newest tool batch from its protected evidence.
+                $latest = @(@($turn.BaseMessages) + @($turn.Exchange.ToArray()) | Where-Object { $_.PSObject.Properties['NativeBatch'] -and $_.NativeBatch.Calls.Count })[-1]
+                $message | Add-Member -MemberType NoteProperty -Name BudgetGroup -Value ($latest ? $latest.BudgetGroup : "history:agent$($loop.Steps)")
+                $turn.Exchange.Add($message)
             }
             $loop.TaskNotices.Clear()
             while ($loop.Steering.Count) {
@@ -881,6 +891,10 @@ function Send-EngineAgentRequest {
     if ($ReasoningEffort) {
         # Replaces the profile's effort for this request only; providers apply it only to models whose profile has one.
         $turn.Request | Add-Member NoteProperty ReasoningEffort $ReasoningEffort -Force
+    }
+    if ($loop['Delegating']) {
+        # A child shares session authority, but its fresh provider conversation has separate replay state.
+        $turn.Request | Add-Member NoteProperty ProviderCacheKey $turn.ProviderCacheKey
     }
     if ($NoCalls) {
         # The tools stay declared for the history, but the provider is told to answer in text.
@@ -1049,6 +1063,7 @@ function Invoke-EngineAgentDelegate {
         $turn.Config.Model = $turn.Config.'Agent.ExploreModel'
     }
     $turn.RulesText = $parent.Turn.RulesText
+    $turn | Add-Member NoteProperty ProviderCacheKey ([object]::new())
     $turn.BaseMessages = @((New-HarnessMessage -Role (Get-EngineInstructionRole $turn.Config) -Content $Instructions), (New-HarnessMessage user "<USER_REQUEST>`n$($Store.Host.OperationControl.ProtectText($Context.State, $Task))`n</USER_REQUEST>"))
     $turn | Add-Member NoteProperty FinalizeRequest { param($request) $request.AgentTools = $schemas }.GetNewClosure()
     $loop = @{} + $parent

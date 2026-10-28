@@ -81,10 +81,10 @@
     $Harness.Settings.Declare('VerificationTimeoutSeconds', [int], 180, { param($v) $v -gt 0 })
     $Harness.Settings.Declare('Run.InlineCommandMaxChars', [int], 4096, { param($v) $v -ge 0 -and $v -le 8192 })
     $promptRoot = Join-Path (Invoke-HarnessService -Harness $Harness -Name 'host.data-root' -Arguments @() -Required) 'Prompts'
-    $prompt = Get-Content (Join-Path $promptRoot 'system.md') -Raw
+    $prompt = [IO.File]::ReadAllText((Join-Path $promptRoot 'system.md'))
     $script:PackBehaviorPrompts = @{ code = $prompt.Trim() }
     foreach ($mode in @('auto', 'chat')) {
-        $script:PackBehaviorPrompts[$mode] = (Get-Content (Join-Path $promptRoot "$mode.md") -Raw).Trim()
+        $script:PackBehaviorPrompts[$mode] = [IO.File]::ReadAllText((Join-Path $promptRoot "$mode.md")).Trim()
     }
     $Harness.Settings.Declare('SystemPrompt', [string], $prompt.Trim(), $null, 'PWSH_HARNESS_SYSTEM_PROMPT')
     $Harness.Settings.Declare('Fix.Eol', [bool], $true)

@@ -6,6 +6,7 @@ $script:HostCacheClock = 0L
 . (Join-Path $PSScriptRoot 'Private/HostCache.ps1')
 . (Join-Path $PSScriptRoot 'Private/CliConfiguration.ps1')
 . (Join-Path $PSScriptRoot 'Private/CredentialStore.ps1')
+. (Join-Path $PSScriptRoot 'Private/DataFile.ps1')
 $script:Hosts = @{}
 . (Join-Path $PSScriptRoot 'Private/Commands.ps1')
 foreach ($file in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Public') -Filter '*.ps1' | Sort-Object Name) {
@@ -22,5 +23,5 @@ $ExecutionContext.SessionState.Module.OnRemove = {
     $script:Hosts.Clear()
 }
 Set-Alias -Name pwsh-harness -Value Start-PwshHarness
-$manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'PwshHarness.psd1')
+$manifest = Import-HarnessDataFile -Path (Join-Path $PSScriptRoot 'PwshHarness.psd1')
 Export-ModuleMember -Function $manifest.FunctionsToExport -Alias $manifest.AliasesToExport -Variable $manifest.VariablesToExport

@@ -8,6 +8,8 @@ function New-EngineFacade {
     $assertSession = ${function:Assert-EngineSessionOwner}
     $publish = ${function:Publish-EngineEvent}
     $resolve = ${function:Resolve-EngineSetting}
+    $resolveConfigPath = ${function:Resolve-EngineConfigPath}
+    $readConfigFile = ${function:Read-EngineConfigFile}
     $newSetting = ${function:New-EngineSetting}
     $copyConfig = ${function:Copy-EngineConfigValue}
     $candidatePoints = ${function:Get-EnginePointCandidate}
@@ -357,10 +359,7 @@ function New-EngineFacade {
     }.GetNewClosure()
     $service | Add-Member ScriptMethod GetPath {
         param([string]$Path)
-        if ($Path) {
-            return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
-        }
-        $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Store.ConfigPath)
+        & $resolveConfigPath -Store $Store -Path $Path
     }.GetNewClosure()
     $service | Add-Member ScriptMethod ValidateSetting {
         param([string]$Name, $Value, [hashtable]$Current, [string]$Path)
@@ -394,12 +393,7 @@ function New-EngineFacade {
                 }
             }
             $destination = $this.GetPath($Path)
-            $file = if (Test-Path -LiteralPath $destination) {
-                Get-Content -LiteralPath $destination -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
-            }
-            else {
-                @{}
-            }
+            $file = & $readConfigFile -Path $destination
             foreach ($name in @($file.Keys)) {
                 if ($name -eq 'Autonomy' -and $file[$name] -eq 'Auto') {
                     $file.Remove($name); continue

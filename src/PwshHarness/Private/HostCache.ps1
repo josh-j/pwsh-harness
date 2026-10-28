@@ -35,7 +35,8 @@ function Get-HarnessDefaultHarnessHost {
         }
         $ConfigPath = Join-Path (Join-Path $base $directory) 'config.json'
     }
-    $resolved = [IO.Path]::GetFullPath($ConfigPath)
+    $ConfigPath = Resolve-HarnessFileSystemPath -Path $ConfigPath -Purpose 'configuration file'
+    $resolved = $ConfigPath
     if ($IsWindows) {
         $resolved = $resolved.ToUpperInvariant()
     }

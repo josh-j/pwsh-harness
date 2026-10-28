@@ -27,9 +27,16 @@ function Invoke-PowerShellSaveGitQuery {
         $null = $process.Start()
         $output = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(5000)) {
-            $process.Kill($true)
-            throw 'Git EOL query timed out.'
+        $readCompletion = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($output, $stderr))
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        # Git descendants can retain inherited pipes after exit; EOF shares the query deadline.
+        while (-not $process.WaitForExit(25) -or -not $readCompletion.Wait(25)) {
+            if ($watch.ElapsedMilliseconds -ge 5000) {
+                if (-not $process.HasExited) {
+                    $process.Kill($true)
+                }
+                throw 'Git EOL query timed out.'
+            }
         }
         $null = $stderr.GetAwaiter().GetResult()
         if ($process.ExitCode -eq 0) {
@@ -49,7 +56,7 @@ function Get-PowerShellWindowsSaveText {
     $full = [IO.Path]::GetFullPath($Path)
     $directory = [IO.Path]::GetDirectoryName($full)
     $eol = ''
-    if (Test-Path -LiteralPath $directory) {
+    if ([IO.Directory]::Exists($directory)) {
         $attribute = Invoke-PowerShellSaveGitQuery $directory @('check-attr', 'eol', '--', [IO.Path]::GetFileName($full))
         if ($attribute.EndsWith(': lf')) {
             $eol = 'LF'
@@ -67,7 +74,7 @@ function Get-PowerShellWindowsSaveText {
             }
         }
     }
-    if (-not $eol -and (Test-Path -LiteralPath $full)) {
+    if (-not $eol -and [IO.File]::Exists($full)) {
         $existing = [IO.File]::ReadAllText($full)
         if ($existing.Contains("`r`n")) {
             $eol = 'CRLF'

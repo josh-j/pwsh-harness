@@ -206,7 +206,7 @@ function Complete-AgentToolCall {
             $model.continuation += '; last line is partial; if it exceeds Agent.MaxReadBytes, use pwsh to select a smaller portion.'
         }
     }
-    $directoryRules = $status -ceq 'ok' -and $Call.Name -cin @('read', 'edit', 'write') -and $Call.Arguments -is [Collections.IDictionary] ? (Get-AgentDirectoryRule $Context $Call) : ''
+    $directoryRules = $status -ceq 'ok' -and $Call.Name -cin @('read', 'edit', 'write') -and $Call.Arguments -is [Collections.IDictionary] ? (Get-AgentDirectoryRule $Context $Call) : [string]$model['directory_rules']
     $contextKey = ''
     if ($status -cne 'cancelled' -and $Call.Name -cin @('read', 'search', 'pwsh', 'view_file_outline', 'view_code_item', 'find_symbol', 'check_file') -and $Call.Arguments -is [Collections.IDictionary]) {
         # An identical later read, search or command supersedes this result when the engine compacts the run.
@@ -241,7 +241,9 @@ function Complete-AgentToolCall {
         if (-not $Context.PSObject.Properties['PresentedCall']) {
             $Context | Add-Member NoteProperty PresentedCall $Call
         }
-        $model.ModelContent = Format-AgentPresentedResult -Context $Context -Call $Context.PresentedCall -Data $model -ErrorData $errorData
+        # Presentation sees model-facing data; progress and compaction metadata stay on the host result.
+        $presentationData = Get-HarnessToolModelData -Data $model
+        $model.ModelContent = Format-AgentPresentedResult -Context $Context -Call $Context.PresentedCall -Data $presentationData -ErrorData $errorData
         $Call = $Context.PresentedCall
     }
     if ($feedback) {
@@ -253,11 +255,9 @@ function Complete-AgentToolCall {
         }
     }
     if ($directoryRules) {
+        $model.directory_rules = $directoryRules
         if ($model.Contains('ModelContent')) {
             $model.ModelContent += "`n`n" + $directoryRules
-        }
-        else {
-            $model.directory_rules = $directoryRules
         }
     }
     if ($contextKey) {
@@ -277,15 +277,24 @@ function Read-AgentToolData {
     $arguments = $Tool.Call.Arguments
     $text = $script:Harness.OperationControl.ProtectText($Tool.State, $Tool.File.Text)
     $total = @($text -split '\r\n|\n|\r').Count - [int](-not $text -or $text -match '[\r\n]$')
+    $contentOffset = [int]$arguments.content_offset
     $lineOffset = 0
-    if ($arguments.content_offset) {
+    if ($contentOffset) {
         $bytes = [Text.Encoding]::UTF8.GetBytes($text)
-        if ($arguments.content_offset -gt $bytes.Length) {
+        if ($contentOffset -gt $bytes.Length) {
             throw 'ContentOffset is outside the file.'
         }
-        $prefix = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, 0, $arguments.content_offset)
+        $prefix = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, 0, $contentOffset)
         $lineOffset = [regex]::Matches($prefix, '\r\n|\n|\r').Count
-        $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, $arguments.content_offset, $bytes.Length - $arguments.content_offset)
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, $contentOffset, $bytes.Length - $contentOffset)
+        # A cursor between CR and LF has already counted the line break; consume its remaining byte.
+        if ($prefix.EndsWith("`r", [StringComparison]::Ordinal) -and $text.StartsWith("`n", [StringComparison]::Ordinal)) {
+            $text = $text.Substring(1)
+            $contentOffset++
+        }
+        if (-not $text) {
+            $lineOffset = $total
+        }
     }
     $firstLine = [Math]::Max($arguments.start_line, $lineOffset + 1)
     $skip = $firstLine - $lineOffset - 1
@@ -302,7 +311,7 @@ function Read-AgentToolData {
     if ($range.Partial -and $last -gt 0) {
         $next = $starts[$last - 1] + (($excerpt.Text -split "`n")[-1] -replace '^\d+: ', '').Length
     }
-    $Tool.Data = @{ next_content_offset = $arguments.content_offset + [Text.Encoding]::UTF8.GetByteCount($text.Substring(0, $next)); path = $arguments.path; sha256 = $Tool.File.Hash; total_lines = $total; start_line = $firstLine; requested_lines = $arguments.line_count
+    $Tool.Data = @{ next_content_offset = $contentOffset + [Text.Encoding]::UTF8.GetByteCount($text.Substring(0, $next)); path = $arguments.path; sha256 = $Tool.File.Hash; total_lines = $total; start_line = $firstLine; requested_lines = $arguments.line_count
         total_bytes = $Tool.File.Bytes.Length; returned_lines = $range.Lines; text = $excerpt.Text; partial_last_line = $range.Partial; truncated = $excerpt.Truncated -or ($firstLine + $selected.Count -le $total)
     }
 }
@@ -690,7 +699,27 @@ function Invoke-AgentToolApproval {
         $Operation | Add-Member NoteProperty Failed $true -Force
         Set-AgentOperationReview -State $Context.State -Text ('Tool failed: ' + $failure.Exception.GetBaseException().Message) -Operation $Operation
         $partial = @($Context.State.Transcript | Select-Object -Skip $start | Where-Object Role -EQ run | Select-Object -Last 1)
-        Complete-AgentToolCall -Context $tool.Context -Call $tool.Call -Data ($partial.Count ? $partial[0].Metadata : $null) -Failure $failure.Exception
+        $data = $partial.Count ? $partial[0].Metadata : $null
+        $terminal = $tool.Context.PSObject.Properties['AgentCommand'] ? $tool.Context.AgentCommand.Terminal : $null
+        if ($data -and $data.AgentCallId -ceq $tool.Call.Id -and $terminal -and $terminal.Task -and $terminal.Task.AgentCallId -ceq $tool.Call.Id -and $terminal.Task.Closed -and $terminal.Task.CommandFinished) {
+            try {
+                # Explicit getter invocation propagates disposal; PowerShell property access can return null.
+                $alive = -not $terminal.Task.Process.get_HasExited()
+            }
+            catch {
+                # A disposed process has no reusable terminal; retain the original failure.
+                $alive = $false
+            }
+            if ($alive) {
+                $copy = @{}
+                foreach ($field in $data.GetEnumerator()) {
+                    $copy[$field.Key] = $field.Value
+                }
+                $copy.TerminalID = $terminal.Id
+                $data = $copy
+            }
+        }
+        Complete-AgentToolCall -Context $tool.Context -Call $tool.Call -Data $data -Failure $failure.Exception
     }
     finally {
         $Context.State.Busy = $busy
@@ -714,7 +743,7 @@ $script:PackTools.search = @{ Description = "Search permitted workspace files wi
 $script:PackTools.undo = @{ Description = 'Restore files changed by the latest agent runs.'; Schema = @{ runs = @{ Kind = 'Number'; Min = 1; Max = $script:PackRewindCheckpoints; Default = 1 } }; Prepare = ${function:New-AgentUndoChange}; Execute = ${function:Invoke-AgentUndoChange}; Role = 'tool-result' }
 # rename_symbol reaches this reviewed multi-file change through its presented schema only.
 $script:PackTools.rename = @{ Description = 'Rename a workspace PowerShell function, class or enum.'; Schema = @{ name = @{ Kind = 'String'; Min = 1; Max = 200 }; new_name = @{ Kind = 'String'; Min = 1; Max = 200 }; scope = @{ Kind = 'String'; Min = 1; Max = 4096; Default = '.' } }; Prepare = ${function:New-AgentRenameChange}; Execute = ${function:Invoke-AgentToolFileChange}; Role = 'tool-result' }
-$script:PackTools.read.Schema.content_offset = @{ Kind = 'Number'; Min = 0; Max = 1048576; Default = 0; Description = 'Optional UTF-8 byte offset for a truncated view.' }
+$script:PackTools.read.Schema.content_offset = @{ Kind = 'Number'; Min = 0; Max = 16777216; Default = 0; Description = 'Optional UTF-8 byte offset for a truncated view.' }
 $script:PackTools.edit.Schema.allow_multiple = @{ Kind = 'Boolean'; Default = $false; Description = 'Replace all exact matches within the line anchors.' }
 $script:PackTools.edit.Schema.before.Optional = $true
 $script:PackTools.edit.Schema.after.Optional = $true

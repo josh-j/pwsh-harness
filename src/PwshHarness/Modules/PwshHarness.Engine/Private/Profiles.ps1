@@ -3,13 +3,14 @@ function Import-EngineProfile {
     # Input: instance store and a local data directory. Output: populates validated profile records.
     [CmdletBinding()]
     param($Store, [string]$Directory)
-    if (-not $Directory -or -not (Test-Path -LiteralPath $Directory)) {
+    if (-not $Directory -or -not [IO.Directory]::Exists($Directory)) {
         return
     }
     $fields = @('Model', 'ContextWindowTokens', 'MaxOutputTokens', 'Temperature', 'MergeSystemMessages',
         'ReasoningEffort', 'FenceLanguages', 'PromptAddendum', 'Agent.MaxSteps', 'Agent.MaxRunSeconds', 'Agent.MaxToolCalls',
         'Agent.InputTokenBudget', 'Agent.MaxReadBytes', 'Agent.MaxTotalTokens', 'Agent.CompactTokens', 'Presentation')
-    foreach ($file in Get-ChildItem -LiteralPath $Directory -Filter '*.psd1' -File) {
+    $options = [IO.EnumerationOptions]@{ MatchCasing = 'CaseInsensitive'; IgnoreInaccessible = $false }
+    foreach ($file in ([IO.DirectoryInfo]::new($Directory)).EnumerateFiles('*.psd1', $options)) {
         $data = & $Store.ManifestReader $file.FullName
         foreach ($field in $data.Keys) {
             if ($field -notin $fields) {

@@ -22,7 +22,9 @@ function Get-HarnessPathSnapshot {
         }
         try {
             if ($IsWindows) {
-                $item = Get-Item -LiteralPath $p -Force -ErrorAction Stop
+                # This path is already physical; a PowerShell drive can shadow its native drive.
+                $attributes = [IO.File]::GetAttributes($p)
+                $item = ($attributes -band [IO.FileAttributes]::Directory) ? [IO.DirectoryInfo]::new($p) : [IO.FileInfo]::new($p)
             }
             else {
                 # Provider paths normalize Unix backslashes; native stat preserves literal names.

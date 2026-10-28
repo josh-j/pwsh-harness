@@ -5,10 +5,17 @@ function Import-EngineExtension {
     Assert-EngineHostActive $Store
     $manifests = @{}
     foreach ($path in $Paths) {
-        if (-not (Test-Path -LiteralPath $path)) {
+        if (-not $Replacing -and -not (Test-Path -LiteralPath $path)) {
             continue
         }
-        $files = if (Test-Path -LiteralPath (Join-Path $path 'extension.psd1')) {
+        $files = if ($Replacing) {
+            # Reload uses a recorded native directory; Load still accepts caller-selected PSDrive paths.
+            $manifestPath = [IO.Path]::Combine($path, 'extension.psd1')
+            if ([IO.File]::Exists($manifestPath)) {
+                [IO.FileInfo]::new($manifestPath)
+            }
+        }
+        elseif (Test-Path -LiteralPath (Join-Path $path 'extension.psd1')) {
             @(Get-Item -LiteralPath (Join-Path $path 'extension.psd1'))
         }
         else {
@@ -21,6 +28,9 @@ function Import-EngineExtension {
                 $data = & $Store.ManifestReader $file.FullName
                 $manifest = New-HarnessExtensionManifest @data
                 Assert-HarnessExtensionManifest $manifest
+                if ($Replacing -and -not [string]::Equals($manifest.Name, $Replacing, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Reload must preserve extension name '$Replacing'."
+                }
                 if (([version]$manifest.HarnessApiVersion).Major -ne 1) {
                     throw 'Incompatible HarnessApiVersion major.'
                 }
@@ -36,7 +46,7 @@ function Import-EngineExtension {
                 $Store.Known[$manifest.Name] = @{ Directory = $file.DirectoryName; Manifest = $manifest; Source = $(if ($builtin) {
                             'builtin'
                         }
-                        elseif (Test-Path -LiteralPath (Join-Path $file.DirectoryName 'authoring-record.json')) {
+                        elseif ([IO.File]::Exists([IO.Path]::Combine($file.DirectoryName, 'authoring-record.json'))) {
                             'generated'
                         }
                         else {

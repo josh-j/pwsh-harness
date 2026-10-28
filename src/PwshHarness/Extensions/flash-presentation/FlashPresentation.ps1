@@ -129,8 +129,12 @@ function Format-FlashPresentationResult {
         view_file {
             $entire = -not $Data.truncated -and $Data.start_line -eq 1 -and -not $Call.Arguments.ContentOffset
             $footer = $entire ? 'The above content shows the entire, complete file contents of the requested file.' : 'The above content does NOT show the entire file contents; view other lines with another call if the task needs them.'
+            if (-not $entire -and -not $Data.truncated) {
+                $footer = 'Reached end of file. This view does not include earlier content.'
+            }
+            $range = $Data.returned_lines ? "Showing lines $($Data.start_line) to $($Data.start_line + $Data.returned_lines - 1)" : 'No lines returned at this position.'
             $notice = $Data.partial_last_line ? "`nContent was truncated at the byte limit. Continue with ContentOffset=$($Data.next_content_offset)." : ''
-            "File Path: ``$(& $Agent.FileUri $Call.Arguments.AbsolutePath)```nTotal Lines: $($Data.total_lines)`nTotal Bytes: $($Data.total_bytes)`nShowing lines $($Data.start_line) to $($Data.start_line + $Data.returned_lines - 1)`nEach line starts with its number and ': '; leave that prefix out of edit targets.`n$($Data.text)`n$footer$notice"
+            "File Path: ``$(& $Agent.FileUri $Call.Arguments.AbsolutePath)```nTotal Lines: $($Data.total_lines)`nTotal Bytes: $($Data.total_bytes)`n$range`nEach line starts with its number and ': '; leave that prefix out of edit targets.`n$($Data.text)`n$footer$notice"
         }
         replace_file_content {
             "Edited $($Call.Arguments.TargetFile). The diff shows the changed lines with up to 3 unchanged lines around them:`n[diff_block_start]`n$($Data.diff)`n[diff_block_end]`n$($Data.diagnostics)"

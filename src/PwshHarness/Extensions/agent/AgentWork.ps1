@@ -113,8 +113,8 @@ function Invoke-AgentCodeNavigation {
     }
     $rules = Get-AgentDirectoryRule $Context @{ Arguments = @{ path = $relative } }
     $excerpt = Get-HarnessTextExcerpt ($script:Harness.OperationControl.ProtectText($state, $text)) $state.Config.'Agent.MaxReadBytes'
-    $output = $excerpt.Text + ($excerpt.Truncated ? "`n[Output truncated; view exact line ranges with view_file.]" : '') + ($rules ? "`n`n$rules" : '')
-    Complete-AgentToolCall -Context (New-AgentPresentedContext $Context $Call) -Call $Call -Data @{ Output = $output; path = $relative; sha256 = $file.Hash; truncated = $excerpt.Truncated }
+    $output = $excerpt.Text + ($excerpt.Truncated ? "`n[Output truncated; view exact line ranges with view_file.]" : '')
+    Complete-AgentToolCall -Context (New-AgentPresentedContext $Context $Call) -Call $Call -Data @{ Output = $output; path = $relative; sha256 = $file.Hash; truncated = $excerpt.Truncated; directory_rules = $rules }
 }
 function Find-AgentSymbol {
     # Definitions and references of one name across the permitted workspace PowerShell files, within fixed bounds.
@@ -134,15 +134,14 @@ function Find-AgentSymbol {
         $scope = $scope -ceq '.' ? '' : $scope
     }
     $ignoreCase = [StringComparison]::OrdinalIgnoreCase
-    $paths = Get-HarnessPathComparison
     $matchName = { param([string]$Name) [string]::Equals($Name, $query, $ignoreCase) -or $Name.EndsWith(".$query", $ignoreCase) }
     $leaf = $query.Split('.')[-1]
     $definitions = [Collections.Generic.List[string]]::new(); $references = [Collections.Generic.List[object]]::new()
     $files = 0; $bytes = 0L; $skipped = 0; $now = [datetime]::UtcNow
     $maxFile = $state.Config.'Agent.MaxFileBytes'
-    foreach ($name in @(Get-AgentWorkspaceListing -State $state -Root $root -Context $Context)) {
+    foreach ($name in @(Get-AgentWorkspaceListing -State $state -Root $root -Context $Context -Scope $scope)) {
         $Context.CancellationToken.ThrowIfCancellationRequested()
-        if ([IO.Path]::GetExtension($name) -notin @('.ps1', '.psm1') -or ($scope -and -not [string]::Equals($name, $scope, $paths) -and -not $name.StartsWith("$scope/", $paths))) {
+        if ([IO.Path]::GetExtension($name) -notin @('.ps1', '.psm1')) {
             continue
         }
         try {
@@ -367,7 +366,7 @@ function Update-AgentToolFeedback {
         # needs no run check (an approval completing after the deadline still records its result).
         if ($Call.Name -cin @('edit', 'write') -and $Status -ceq 'ok' -and $Call.Arguments -is [Collections.IDictionary] -and $Call.Arguments['path'] -and
             $script:PackToolObservations.TryGetValue($Context.AgentLease, [ref]$observed) -and $observed.ContainsKey('Feedback') -and $observed.Feedback.ContainsKey('FileReads')) {
-            $observed.Feedback.FileReads.Remove([IO.Path]::GetFullPath([string]$Call.Arguments['path'], (Get-HarnessOperationDirectory $Context.State)))
+            $null = $observed.Feedback.FileReads.Remove([IO.Path]::GetFullPath([string]$Call.Arguments['path'], (Get-HarnessOperationDirectory $Context.State)))
         }
         return
     }
@@ -377,20 +376,26 @@ function Update-AgentToolFeedback {
     }
     $feedback = $observed.Feedback
     if (-not $feedback.ContainsKey('FileReads')) {
-        $feedback.FileReads = @{}
+        $feedback.FileReads = [Collections.Generic.Dictionary[string, object]]::new($observed.Hashes.Comparer)
     }
     $notes = [Collections.Generic.List[string]]::new()
     if ($Call.Name -ceq 'read' -and $Status -ceq 'ok' -and $Call.Arguments -is [Collections.IDictionary] -and $Call.Arguments['path']) {
         # Rereading a file that has not changed rarely answers a question the earlier reads did not; testing it does.
         $path = [IO.Path]::GetFullPath([string]$Call.Arguments['path'], (Get-HarnessOperationDirectory $Context.State))
-        $feedback.FileReads[$path] = [int]$feedback.FileReads[$path] + 1
-        if ($feedback.FileReads[$path] -ge 5) {
-            $feedback.FileReads[$path] = 0
+        $fileRead = $feedback.FileReads.ContainsKey($path) ? $feedback.FileReads[$path] : $null
+        if ($fileRead -isnot [Collections.IDictionary] -or $fileRead.Hash -cne $Model['sha256']) {
+            $fileRead = @{ Hash = $Model['sha256']; Reads = 0 }
+            $feedback.FileReads[$path] = $fileRead
+        }
+        $fileRead.Reads++
+        if ($fileRead.Reads -ge 5) {
+            $fileRead.Reads = 0
             $notes.Add("You have read $([IO.Path]::GetFileName($path)) five times since it last changed. Further reading is unlikely to settle what earlier reads did not: name the fact still unknown and test it, for example trace the failing call with Set-PSDebug -Trace 1 or print the values where behavior diverges.")
         }
     }
-    if ($Call.Name -ceq 'pwsh' -and [string]$Call.Arguments.command -match '^\s*&?\s*["'']?(pwsh|powershell)(\.exe)?["'']?\s+(-\w+\s+)*-c(ommand)?\b' -and $feedback.Noted.Add('nested-pwsh')) {
-        $notes.Add('Each command already runs in a new pwsh process, so wrapping it in pwsh -Command only adds quoting and startup time. Run the code directly; dot-source edited scripts in the same command.')
+    if ($Call.Name -ceq 'pwsh' -and (-not $Context.PSObject.Properties['AgentCommand'] -or $Context.AgentCommand.Shell -ceq 'PowerShell') -and
+        [string]$Call.Arguments.command -match '^\s*&?\s*["'']?pwsh(\.exe)?["'']?\s+(-\w+\s+)*-c(ommand)?\b' -and $feedback.Noted.Add('nested-pwsh')) {
+        $notes.Add('This command already runs in PowerShell, so wrapping it in pwsh -Command adds another process and quoting. Run the code directly; dot-source edited scripts in the same command.')
     }
     if ($Key) {
         if ($Call.Name -ceq 'pwsh' -and $null -ne $Model.ExitCode) {
@@ -441,6 +446,10 @@ function Update-AgentToolFeedback {
         if ($Status -ceq 'ok' -and -not ($Call.Name -ceq 'pwsh' -and $null -eq $Model.ExitCode)) {
             $text = @($Model.text, $Model.Output, $Model.ErrorOutput, $Model.results) | ConvertTo-Json -Depth 20 -Compress
             $hash = Get-HarnessSha256 ([Text.Encoding]::UTF8.GetBytes($text))
+            if ($Context.PSObject.Properties['PresentedCall']) {
+                # Presentation and host feedback can vary while the executed evidence stays identical.
+                $Model.context_evidence = $hash
+            }
             if (-not $feedback.ContainsKey('ReadIds')) {
                 $feedback.ReadIds = @{}
             }
@@ -462,7 +471,8 @@ function Get-AgentVerificationReview {
     $observed = $null
     if ($Context.PSObject.Properties['Answer'] -and $script:PackToolObservations.TryGetValue($Context.AgentLease, [ref]$observed) -and
         $observed.ContainsKey('Feedback') -and $observed.Feedback.Failures.Count -and
-        $Context.Answer -notmatch '(?i)\b(fail(?:ed|ure|ures)?|block(?:ed)?|refus(?:ed|al)|cancel(?:led|ed)?|timed? out|not (?:run|verified|completed)|could not (?:run|verify|complete))\b') {
+        $Context.Answer -notmatch '(?i)\b(fail(?:ed|ure|ures)?|block(?:ed)?|refus(?:ed|al)|cancel(?:led|ed)?|timed? out|not (?:run|verified|completed)|could not (?:run|verify|complete))\b' -and
+        $Context.Answer -notmatch '(?i)\b(?:exit(?:ed)?(?:\s+with)?(?:\s+(?:code|status))?|exit_?(?:code|status))\b\s*(?:[:=]\s*)?[+-]?[1-9]\d*\b') {
         $excerpt = Get-HarnessTextExcerpt (($observed.Feedback.Failures.Values | Select-Object -First 8) -join "`n") 2048
         "your answer omits unsuccessful command attempts observed in this run.`n$($excerpt.Text)`nName each blocked, failed or unfinished check and its reason in one short line, not a section. A refused selection ran no tests. Report only observed passing results; do not run broader checks merely to replace a missing result."
     }
@@ -474,7 +484,7 @@ function Test-AgentReviewQuestion {
     $prompt = [string]$Context.State.LastPrompt
     $Context.PSObject.Properties['Answer'] -and
     $prompt -match '(?is)^\s*(?:(?:please|can you|could you)\s+)?(?:(?:find|review|inspect|look for|check for|what|any)\b.*\b(?:bugs?|defects?|issues?)\b|(?:review|inspect)\b.*\b(?:code|changes|diff)\b)' -and
-    $prompt -notmatch '(?i)\b(?:and|then)\s+(?:fix|implement|refactor|repair)\b'
+    $prompt -notmatch '(?i)(?:\b(?:and|then)\s+|[.;,:!?]\s*)(?:fix|implement|refactor|repair)\b(?![-_(])'
 }
 function Get-AgentReviewOutcome {
     # A review-only question needs an explicit result, even when there are no defects to record.
@@ -487,7 +497,7 @@ function Get-AgentReviewOutcome {
     if ($script:PackRunFindings.TryGetValue($Context.AgentLease, [ref]$findings) -and @($findings | Where-Object { $_.Verdict -cne 'refuted' }).Count) {
         return
     }
-    if ($Context.Answer -notmatch '(?i)\b(no (?:confirmed |reproduced |supported )?(?:bugs?|defects?|issues?|findings?)|(?:found|identified) no (?:bugs?|defects?|issues?|findings?)|review (?:is )?incomplete)\b') {
+    if ($Context.Answer -notmatch '(?i)\b(no (?:confirmed |reproduced |supported )?(?:bugs?|defects?|issues?|findings?)|(?:found|identified) (?:no|zero) (?:confirmed |reproduced |supported )?(?:bugs?|defects?|issues?|findings?)|(?:did not|have not|didn[\x27\u2019]t|haven[\x27\u2019]t) (?:find|identify|found|identified) (?:any )?(?:confirmed |reproduced |supported )?(?:bugs?|defects?|issues?|findings?)|review (?:is )?incomplete)\b') {
         'your review answer lists activities without a review outcome. Give concrete findings checked with report_finding, or explicitly say "No confirmed findings" or "Review incomplete". Name the files or areas you actually inspected and the gaps; report checks as passed only when their passing results were observed. Do not claim comprehensive verification from reading diffs or planning tests. Do not invent a defect to fill the report.'
     }
 }

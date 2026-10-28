@@ -74,7 +74,7 @@ function Register-RetrievalCommand {
             }
             $index = New-RetrievalIndex $request
             $index.Files = New-HarnessPathTable; $index.Dirty = $true
-            $key = Get-HarnessSha256 -Text ($index.Root + "`n" + ($request.Config.RagPaths -join "`n"))
+            $key = (Get-RetrievalIndexIdentity $request).Key
             $script:Indexes[$key] = $index
             $null = Update-RetrievalIndex $request -Complete
             if ($request.Config.ExampleRetrieval) {
