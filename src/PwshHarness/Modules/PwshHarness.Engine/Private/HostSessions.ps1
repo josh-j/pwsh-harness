@@ -7,6 +7,8 @@ function Set-EngineSessionSetting {
     $validated = $Store.Host.ConfigService.ValidateSetting($Name, $Value, $Session.Config, $Session.Config.ConfigPath)
     $Session.Config[$Name] = $validated.Value
     if ($Name -eq 'ContextPath') {
+        $null = $Store.NativeContextPaths.Remove($Session.Config)
+        $Store.NativeContextPaths.Add($Session.Config, $validated.Value)
         $Session.Context.Path = $validated.Value
     }
     Update-EngineAgentAuthority $Store $Session
@@ -38,8 +40,9 @@ function New-EngineSession {
         $Config = $Store.Host.ConfigService.Resolve()
     }
     if ($Config.ContainsKey('Autonomy') -and $Config.Autonomy -cne 'Approve') {
-        $Config = @{} + $Config
+        $Config = Copy-EngineSessionConfig -Store $Store -Config $Config
     }
+    $Config.ContextPath = Resolve-EngineConfigContextPath -Store $Store -Config $Config
     $session = [pscustomobject]@{
         HostId                     = $store.HostId
         Config                     = $Config

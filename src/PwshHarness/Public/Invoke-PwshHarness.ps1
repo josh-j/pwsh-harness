@@ -26,7 +26,6 @@ function Invoke-PwshHarness {
             }
         }
         if ($PSBoundParameters.ContainsKey('Path')) {
-            $Path = Resolve-HarnessWorkspacePath $Path
             $Options.ContextPath = $Path
         }
         if (-not $HarnessHost) {
@@ -51,10 +50,7 @@ function Invoke-PwshHarness {
             $Config = $HarnessHost.ConfigService.Resolve($Options, $ConfigPath)
         }
         else {
-            $Config = $Config.Clone()
-            foreach ($name in $Options.Keys) {
-                $Config[$name] = $Options[$name]
-            }
+            $Config = $HarnessHost.ConfigService.Copy($Config, $Options)
         }
         if (-not $Options.ContainsKey('Agent.Enabled')) {
             # Scripting compatibility is invocation-local, not an implicitly saved preference.
@@ -72,8 +68,8 @@ function Invoke-PwshHarness {
             $null = $HarnessHost.AgentControl.SetEnabled($State, $Options['Agent.Enabled'], 'Options')
         }
         $State.Config = $Config
-        if ($Path) {
-            $State.Context.Path = $Path
+        if ($Options.ContainsKey('ContextPath')) {
+            $State.Context.Path = $Config.ContextPath
         }
         foreach ($file in $IncludeFiles) {
             if (-not $State.Context.IncludeFiles.Contains($file)) {

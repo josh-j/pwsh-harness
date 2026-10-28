@@ -160,6 +160,7 @@ function New-EngineAgentControl {
     $snapshot = ${function:Get-EngineAgentSnapshot}
     $stopSuspended = ${function:Stop-EngineSuspendedAgent}
     $transcript = ${function:Add-EngineTranscript}
+    $copySessionConfig = ${function:Copy-EngineSessionConfig}
     $control = [pscustomobject]@{}
     $control | Add-Member ScriptMethod GetState {
         param($Session)
@@ -184,7 +185,7 @@ function New-EngineAgentControl {
             ''
         }
         # Keep legacy config sharing until an explicit mode selection needs session-local authority.
-        $Session.Config = @{} + $Session.Config
+        $Session.Config = & $copySessionConfig -Store $Store -Config $Session.Config
         $record.Config = $Session.Config
         & $clear $Session $record 'UserModeSelection'
         if ($Mode -ceq 'Auto') {
@@ -219,7 +220,7 @@ function New-EngineAgentControl {
             & $clear $Session $record 'AgentSelection'
             & $stopSuspended $Store $Session
         }
-        $Session.Config = @{} + $Session.Config
+        $Session.Config = & $copySessionConfig -Store $Store -Config $Session.Config
         $Session.Config.'Agent.Enabled' = $Enabled
         $record.Config = $Session.Config
         & $snapshot $Store $Session

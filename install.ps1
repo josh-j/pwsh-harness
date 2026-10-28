@@ -147,6 +147,8 @@ try {
     if (Test-Path -LiteralPath $backup) {
         Remove-Item -LiteralPath $backup -Recurse -Force
     }
+    Write-Output "Installed PwshHarness $version at $target"
+    Write-Output 'Open a new PowerShell process before launching; an already loaded module keeps its previous code.'
     Write-Output 'pwsh-harness -BaseUrl https://gw.example -Model gemini-3.8-flash'
     Write-Output 'Set-PwshHarnessConfig -BaseUrl https://gw.example -Model gemini-3.8-flash'
 }

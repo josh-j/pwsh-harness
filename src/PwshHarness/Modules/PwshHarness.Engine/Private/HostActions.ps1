@@ -47,7 +47,7 @@ function Invoke-EngineActionGeneration {
     [CmdletBinding()]
     param($Store, $State, $Context, [string]$Name, $Operation, [bool]$RequiresReview, [string]$Prompt, [Nullable[int]]$TimeoutSeconds)
     Assert-EngineHostActive $Store
-    $options = @{} + $State.Config
+    $options = Copy-EngineSessionConfig -Store $Store -Config $State.Config
     if ($null -ne $TimeoutSeconds) {
         $options.TimeoutSeconds = $Store.Host.ConfigService.ValidateSetting('TimeoutSeconds', [int]$TimeoutSeconds, $options, $options.ConfigPath).Value
     }

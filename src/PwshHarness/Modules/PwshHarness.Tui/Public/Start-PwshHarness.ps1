@@ -23,13 +23,16 @@ function Start-PwshHarness {
         }
         $HarnessHost.ExtensionLoader.Load($config.ExtensionPaths)
         if (-not $Session) {
+            if ($Path) {
+                $config = @{} + $config
+                $config.ContextPath = $Path
+            }
             $session = $HarnessHost.NewSession($config)
         }
-        $session.Persist = -not $NoPersist
-        if ($Path) {
-            $session.Context.Path = $Path
+        elseif ($Path) {
+            $session.Settings.Set('ContextPath', $Path)
         }
-        $session.Context.Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($session.Context.Path)
+        $session.Persist = -not $NoPersist
         foreach ($file in $IncludeFiles) {
             $session.Context.IncludeFiles.Add($file)
         }
@@ -45,13 +48,18 @@ function Start-PwshHarness {
             $null = $HarnessHost.Commands.Invoke("/resume $Resume", $session, $null)
         }
         $view = New-HarnessViewState $session
+        $configNotice = 'Config: ' + ((ConvertTo-HarnessSafeText $session.Config.ConfigPath) -replace '[\r\n]', '')
         $view.Renderer = $Renderer
         Set-TuiViewSnapshot $view ($HarnessHost.GetConversationSnapshot($session)) -Conversation
         Register-TuiReload $HarnessHost $view
         Restore-TuiReload -HarnessHost $HarnessHost -Session $session -View $view -Handoff $handoff
+        $view.SessionView.Records.Add([pscustomobject]@{ Role = 'notice'; Text = $configNotice })
         $terminal = New-TuiTerminal
         $terminal.InlineContinue = [bool]$handoff
         $lineMode = Test-TuiLineMode $terminal $NoTui
+        if ($lineMode) {
+            $terminal.WriteText("$configNotice`n")
+        }
         Invoke-TuiFrontend -HarnessHost $HarnessHost -Session $session -View $view -Terminal $terminal -LineMode $lineMode
         if ($view.ReloadPending) {
             Save-TuiReloadHandoff -HarnessHost $HarnessHost -Session $session -View $view

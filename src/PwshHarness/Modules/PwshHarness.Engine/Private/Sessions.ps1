@@ -47,8 +47,8 @@ function Assert-EngineSessionId {
 function Test-EngineSessionFile {
     [CmdletBinding()]
     param($Item)
-    $Item -is [IO.FileInfo] -and -not $Item.LinkType -and
-    -not ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+    $Item -is [IO.FileInfo] -and $Item.LinkType -ne 'HardLink' -and
+    -not (Test-HarnessLinkItem $Item) -and
     ($IsWindows -or $Item.UnixStat.ItemType -eq 'File')
 }
 function Get-EngineSessionFile {

@@ -44,6 +44,7 @@ function New-EngineHostStore {
         PendingOperations = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
         AgentTools        = $null
     }
+    $store.NativeContextPaths = [Runtime.CompilerServices.ConditionalWeakTable[object, string]]::new()
     foreach ($category in @('Providers', 'RequestMiddleware', 'ResponseProcessors', 'Critics', 'Fixers', 'TokenEstimators', 'RepairPolicies', 'Commands', 'Actions',
             'Services', 'Examples', 'SamplingPolicies', 'QueryExpanders', 'Chunkers', 'Retrievers', 'Embedders', 'HistoryCompactors', 'ContextSources', 'Renderers', 'Highlighters', 'AgentTools', 'RunPolicies', 'Languages', 'Events', 'Settings', 'TargetProfiles', 'EventSchemas')) {
         $store.Points[$category] = @{}
@@ -176,6 +177,9 @@ function New-EngineHostStore {
     $store.Points.Settings['Agent.MaxRunSeconds'].Validator = { param($v) $v -ge 1 -and $v -le 86400 }
     $store.Points.Settings['Agent.MaxTotalTokens'].Validator = { param($v) $v -ge 1 -and $v -le 100000000 }
     $store.BaseSettings = $store.Points.Settings.Clone()
+    if ($store.Parameters.ContainsKey('ContextPath')) {
+        $store.Parameters.ContextPath = Resolve-EngineConfigContextPath -Store $store -Config $store.Parameters
+    }
     $store.Config = Resolve-EngineSetting $store
     $store.Host = New-EngineFacade $store $store
     $store.Host | Add-Member ScriptProperty Clock { $store.Clock }.GetNewClosure()

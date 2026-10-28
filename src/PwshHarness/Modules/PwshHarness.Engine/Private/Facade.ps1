@@ -12,6 +12,7 @@ function New-EngineFacade {
     $readConfigFile = ${function:Read-EngineConfigFile}
     $newSetting = ${function:New-EngineSetting}
     $copyConfig = ${function:Copy-EngineConfigValue}
+    $copySessionConfig = ${function:Copy-EngineSessionConfig}
     $candidatePoints = ${function:Get-EnginePointCandidate}
     $invokePoint = ${function:Invoke-EnginePoint}
     $fault = ${function:Write-EngineFault}
@@ -373,7 +374,10 @@ function New-EngineFacade {
         if ($Name -eq 'Autonomy' -and $Value -eq 'Auto') {
             throw 'Auto requires explicit user activation through the owning host; config validation cannot activate it.'
         }
-        $candidate = @{} + $Current
+        $candidate = & $copySessionConfig -Store $Store -Config $Current
+        if ($Name -eq 'ContextPath') {
+            $null = $Store.NativeContextPaths.Remove($candidate)
+        }
         $candidate[$Name] = $Value
         if ($Name -ne 'Autonomy') {
             $candidate.Autonomy = 'Approve'
@@ -382,6 +386,11 @@ function New-EngineFacade {
         @{ Name = $Name; Value = $resolved[$Name] }
     }.GetNewClosure()
     if ($isHost) {
+        $service | Add-Member ScriptMethod Copy {
+            param([hashtable]$Current, [hashtable]$Parameters = @{})
+            & $assertActive $Store
+            & $copySessionConfig -Store $Store -Config $Current -Parameters $Parameters
+        }.GetNewClosure()
         $service | Add-Member ScriptMethod Save {
             param([hashtable]$Values, [string]$Path)
             foreach ($name in $Values.Keys) {

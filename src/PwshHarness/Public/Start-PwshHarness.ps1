@@ -34,8 +34,8 @@ function Start-PwshHarness {
     $session = $null
     try {
         if ($PSBoundParameters.ContainsKey('Path')) {
-            $Path = Resolve-HarnessWorkspacePath $Path
             $Options.ContextPath = $Path
+            $arguments.Remove('Path')
         }
         if ($ownsHost) {
             $HarnessHost = New-HarnessHost -ConfigPath $ConfigPath -Options $Options

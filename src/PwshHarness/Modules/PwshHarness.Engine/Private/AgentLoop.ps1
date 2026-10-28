@@ -1056,7 +1056,7 @@ function Invoke-EngineAgentDelegate {
     $turn = New-EngineTurn -Store $Store -Prompt $Task -State $Context.State -OnToken $null -CancellationToken $parent.Turn.Token -OnIdle $parent.Turn.OnIdle
     # Sub-agent text is evidence for the parent model, not output for the user.
     $turn.Callback = { param($fragment, $session) }
-    $turn.Config = @{} + $parent.Turn.Config
+    $turn.Config = Copy-EngineSessionConfig -Store $Store -Config $parent.Turn.Config
     $turn.Config.SystemPrompt = $Instructions
     if ($turn.Config.'Agent.ExploreModel') {
         # The same provider and profile with a model the user chose for sub-agents.
@@ -1193,7 +1193,7 @@ function Send-EngineAgent {
     $record.Resume = $null
     try {
         $turn = New-EngineTurn -Store $Store -Prompt $Prompt -State $State -OnToken $OnToken -CancellationToken $State.Cancellation.Token -OnIdle $OnIdle
-        $turn.Config = @{} + $State.Config
+        $turn.Config = Copy-EngineSessionConfig -Store $Store -Config $State.Config
         $turn.Config.InputTokenBudget = $turn.Config.'Agent.InputTokenBudget'
         $turn.Config.IncludeProfileAddendum = $false
         $instructions = $Store.AgentTools.Instructions

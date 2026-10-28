@@ -54,6 +54,34 @@ function Get-EngineSettingEnvironmentName {
     $normalized = ($Name -creplace '([a-z])([A-Z])', '$1_$2') -replace '[^a-zA-Z0-9_]', '_'
     $Store.EnvironmentPrefix + $normalized.ToUpperInvariant()
 }
+function Resolve-EngineConfigContextPath {
+    [CmdletBinding()]
+    param($Store, [hashtable]$Config)
+    $native = $null
+    if (-not $Store.NativeContextPaths.TryGetValue($Config, [ref]$native) -or $Config.ContextPath -cne $native) {
+        $native = Resolve-HarnessFileSystemPath -Path $Config.ContextPath -Purpose workspace
+        $null = $Store.NativeContextPaths.Remove($Config)
+        $Store.NativeContextPaths.Add($Config, $native)
+    }
+    $native
+}
+function Copy-EngineSessionConfig {
+    [CmdletBinding()]
+    param($Store, [hashtable]$Config, [hashtable]$Parameters = @{})
+    $copy = @{} + $Config
+    $native = $null
+    if ($Store.NativeContextPaths.TryGetValue($Config, [ref]$native) -and $Config.ContextPath -ceq $native) {
+        $Store.NativeContextPaths.Add($copy, $native)
+    }
+    foreach ($name in $Parameters.Keys) {
+        $copy[$name] = $Parameters[$name]
+    }
+    if ($Parameters.ContainsKey('ContextPath')) {
+        $null = $Store.NativeContextPaths.Remove($copy)
+        $copy.ContextPath = Resolve-EngineConfigContextPath -Store $Store -Config $copy
+    }
+    $copy
+}
 function Resolve-EngineConfigPath {
     [CmdletBinding()]
     param($Store, [string]$Path)
@@ -94,11 +122,13 @@ function Resolve-EngineSetting {
     foreach ($name in $Declarations.Keys) {
         $spec = $Declarations[$name]
         $value = $spec.Default
+        $contextSource = $null
         if ($value -ceq '' -and $fallback.ContainsKey($name)) {
             $value = $fallback[$name]
         }
         if ($file.ContainsKey($name)) {
             $value = $file[$name]
+            $contextSource = $file
         }
         $envName = Get-EngineSettingEnvironmentName -Store $Store -Name $name -Override (($name -ceq 'BaseUrl' -and -not $spec.Env -and $connection) ? $connection.Defaults.BaseUrlEnvironment : $spec.Env)
         $environment = [Environment]::GetEnvironmentVariable($envName)
@@ -109,12 +139,15 @@ function Resolve-EngineSetting {
             else {
                 $environment
             }
+            $contextSource = @{ ContextPath = $value }
         }
         if ($Store.Parameters.ContainsKey($name)) {
             $value = $Store.Parameters[$name]
+            $contextSource = $Store.Parameters
         }
         if ($Parameters.ContainsKey($name)) {
             $value = $Parameters[$name]
+            $contextSource = $Parameters
         }
         if ($spec.Type -eq [bool] -and $value -is [string]) {
             $value = [bool]::Parse($value)
@@ -159,6 +192,9 @@ function Resolve-EngineSetting {
                 throw "Setting '$name' failed validation."
             }
         }
+        if ($name -ceq 'ContextPath' -and $contextSource) {
+            $value = Resolve-EngineConfigContextPath -Store $Store -Config $contextSource
+        }
         $values[$name] = Copy-EngineConfigValue $value
     }
     if ($values.Autonomy -ceq 'Auto') {
@@ -201,5 +237,6 @@ function Resolve-EngineSetting {
         $values.Presentation = $modelProfile.Model -and $values.Model -match ('(^|/)' + [regex]::Escape($modelProfile.Model) + '(?:$|-)') ? $modelProfile.Presentation : ''
     }
     $values.ConfigPath = $Path
+    $Store.NativeContextPaths.Add($values, $values.ContextPath)
     $values
 }

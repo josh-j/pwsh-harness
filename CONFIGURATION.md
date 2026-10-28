@@ -54,6 +54,14 @@ with `/config set Agent.CodeSearchExact false`. Ranked and hybrid search remain 
 requires explicit embedding model/pricing and a spending bound. Batch independent
 searches and reads to reduce model round trips.
 
+## Installation and paths
+
+Reinstalling replaces the installed release even when its version is still `1.0.0`; obsolete module files are removed. The installer prints the destination; interactive startup displays the active configuration file path. Open a new PowerShell process afterwards: a running process keeps its already loaded code. Reinstalling leaves your separate configuration and sessions intact.
+
+Context, patches and approved commands use `-Path`, configured `ContextPath`, or the current folder when neither is set. The module installation folder is independent of this project folder. `/config get ContextPath` shows the effective project setting. `Get-Module PwshHarness | Select-Object Path` shows the module loaded in this process.
+
+The installed `pwsh-harness` alias uses per-user configuration and sessions. Launching `pwsh-harness.ps1` or `.cmd` uses the module beside that launcher, regardless of the installed copy; it uses `state/` when that folder has `config.json` or no per-user configuration exists, otherwise it uses per-user configuration. `/config get ConfigPath` and `/logs` show the active configuration and journal paths. Updating only the installed module does not update a separate portable folder.
+
 ## How a value is chosen
 
 Highest precedence first: explicit parameters and `-Options` (and `/config set`
