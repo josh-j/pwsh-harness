@@ -137,7 +137,7 @@ function Invoke-OpenAIHttpProvider {
                 $attemptBodies.Add($wireBody)
                 $observations.Add(@{ OutputBytes = 0L; OutputChunks = 0; Usage = $null; GenerationIds = $generationIds; ReservedTokens = ($Context.PSObject.Properties['LastReservation'] ? $Context.LastReservation : 0) })
                 if ($progress) {
-                    $progress.Clock.Restart(); $progress.Last = 0.0; $progress.First = $true
+                    $progress.Clock.Restart(); $progress.Last = 0.0; $progress.First = $true; $progress.Thinking = $false
                 }
                 $response = Wait-OpenAITask -Task ($client.SendAsync($request,
                         [Net.Http.HttpCompletionOption]::ResponseHeadersRead,
@@ -380,6 +380,7 @@ function Invoke-OpenAIHttpProvider {
                             if ($progress -and ($eventName.Text -or $eventName.FinishReason -or $toolProgress -or $reasoningProgress -or $eventName.Raw.choices.delta.reasoning)) {
                                 $progress.Last = $progress.Clock.Elapsed.TotalSeconds
                                 $progress.First = $false
+                                $progress.Thinking = -not ($eventName.Text -or $eventName.FinishReason -or $toolProgress)
                             }
                             if ($agent -and ($toolProgress -or $reasoningProgress -or $eventName.Raw.choices.delta.reasoning)) {
                                 Set-OpenAIStreamActivity -Context $Context -Activity $activity -ToolCalls $toolCalls -Tool ([bool]$toolProgress)
@@ -400,6 +401,12 @@ function Invoke-OpenAIHttpProvider {
                         if ($null -eq $line) {
                             break
                         }
+                    }
+                    elseif ($progress -and $progress.Thinking -and $line.StartsWith(':')) {
+                        # Gemini sends a function call whole once its arguments are generated, and can think without
+                        # summaries: after reasoning, gateway keepalives show the generation is still open. The request
+                        # deadline still bounds it; keepalives before any model output or after text do not count.
+                        $progress.Last = $progress.Clock.Elapsed.TotalSeconds
                     }
                     elseif ($line.StartsWith('data:')) {
                         $value = $line.Substring(5)

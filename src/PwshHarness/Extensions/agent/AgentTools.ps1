@@ -324,17 +324,20 @@ function New-AgentToolFileChange {
         throw (New-AgentRefusal -Code CredentialRefused -Message 'Tool target contains a known credential; mutation refused.' -Next 'Reissue without the credential value; never copy secrets into files or commands.')
     }
     $expected = $arguments.expected_sha256
+    $observed = $Tool.Observations -and $Tool.Observations.ContainsKey($Tool.Path) -and $Tool.Observations[$Tool.Path].Step -lt $Tool.Context.AgentStep ? $Tool.Observations[$Tool.Path].Hash : $null
     if ($Tool.Spec.Edit -and -not $arguments.ContainsKey('expected_sha256')) {
-        if (-not $Tool.Observations -or -not $Tool.Observations.ContainsKey($Tool.Path) -or $Tool.Observations[$Tool.Path].Step -ge $Tool.Context.AgentStep) {
+        if (-not $observed) {
             throw 'Use read and wait for its result in the current agent run before omitting expected_sha256.'
         }
-        $expected = $Tool.Observations[$Tool.Path].Hash
+        $expected = $observed
     }
     if ($file.Exists -and -not $expected) {
         throw (New-AgentRefusal -Code StaleTarget -Message 'Create-only target already exists.' -Next 'Read the file and pass its sha256 to replace it.')
     }
     if ($file.Exists -ne [bool]$expected -or ($expected -and $expected -cne $file.Hash)) {
-        throw (New-AgentRefusal -Code StaleTarget -Message 'Tool target hash is stale.' -Next 'Read the file again and retry with its current sha256.')
+        # A run that already holds the current bytes needs no re-read: models often invent the hash.
+        $next = $observed -and $observed -ceq $file.Hash ? 'This run already read or wrote the current bytes; retry without expected_sha256.' : 'Read the file again and retry with its current sha256.'
+        throw (New-AgentRefusal -Code StaleTarget -Message 'Tool target hash is stale.' -Next $next)
     }
     # Reads show lines without their endings: written text, the text an edit finds and its replacement all take the
     # file's own line ending.

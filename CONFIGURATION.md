@@ -244,7 +244,8 @@ bounds transport retries for other requests.
   with `Agent.MaxReadBytes`, the size of search results.
 - **Timeouts.** `Agent.RequestTimeoutSeconds` (default 600) limits a whole
   agent request; `Agent.StreamIdleSeconds` (default 60) aborts a stream that
-  goes silent and lets the retry logic take over; `TimeoutSeconds` (default 120)
+  goes silent and lets the retry logic take over (after reasoning, gateway
+  keepalives count, because Gemini sends a function call whole); `TimeoutSeconds` (default 120)
   limits non-agent requests and the wait for the first byte of an agent stream.
   `Agent.CommandTimeoutSeconds` (default 300) limits agent commands and
   `RunTimeoutSeconds` (default 60) limits commands run from chat turns.
