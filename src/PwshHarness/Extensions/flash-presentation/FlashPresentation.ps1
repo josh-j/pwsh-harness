@@ -41,9 +41,9 @@ function Test-FlashPresentationCall {
     [CmdletBinding()]
     param([string]$Name, $Seen)
     if ($Name -ceq 'replace_file_content') {
-        $single = @('StartLine', 'EndLine', 'TargetContent', 'ReplacementContent', 'AllowMultiple')
+        $single = @('StartLine', 'EndLine', 'TargetContent', 'ReplacementContent')
         if ($Seen.Contains('ReplacementChunks')) {
-            if (@($single | Where-Object { $Seen.Contains($_) }).Count) {
+            if (@(($single + 'AllowMultiple') | Where-Object { $Seen.Contains($_) }).Count) {
                 throw 'Use ReplacementChunks or a single replacement, not both.'
             }
         }
@@ -89,7 +89,7 @@ function ConvertTo-FlashPresentationCall {
                     })
             }
             else {
-                $edit += @{ before = $arguments.TargetContent; after = $arguments.ReplacementContent; start_line = $arguments.StartLine; end_line = $arguments.EndLine; allow_multiple = $arguments.AllowMultiple }
+                $edit += @{ before = $arguments.TargetContent; after = $arguments.ReplacementContent; start_line = $arguments.StartLine; end_line = $arguments.EndLine; allow_multiple = ($arguments.ContainsKey('AllowMultiple') ? $arguments.AllowMultiple : $false) }
             }
             if ($arguments.ContainsKey('ExpectedSha256')) {
                 $edit.expected_sha256 = $arguments.ExpectedSha256
