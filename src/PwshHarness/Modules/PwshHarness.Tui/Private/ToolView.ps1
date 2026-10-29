@@ -53,11 +53,16 @@ function New-TuiToolViewRecord {
     if ($summary) {
         $label += '  ' + (Get-TuiSingleLine -Text ($summary -split '\r\n|\n|\r')[0] -Width 8192 -Ascii $true)
     }
+    # A finished edit shows its diff, so changes stand out from reads; a rules file keeps its own summary below.
+    $diff = $status -eq 'ok' -and [IO.Path]::GetFileName([string]$argument) -cnotin @('AGENTS.md', 'AGENTS.local.md') ? [string](Get-TuiDisplayValue $data diff) : ''
     $body = if ($status -eq 'waiting') {
         (@($(if (Get-TuiDisplayValue -Value $Preview -Name Truncated -Default $false) {
                     '[preview truncated; F12 full log]'
                 }),
             (Get-TuiDisplayValue $Preview Command), (Get-TuiDisplayValue $Preview Diff)) | Where-Object { $_ }) -join "`n"
+    }
+    elseif ($diff) {
+        $diff
     }
     else {
         [string](Get-TuiDisplayValue $data Output) + [string](Get-TuiDisplayValue $data ErrorOutput)
@@ -92,7 +97,7 @@ function New-TuiToolViewRecord {
         $body = $body.Substring($start, $length)
     }
     $label = ConvertTo-HarnessSafeText $label -EscapeControls
-    [pscustomobject]@{ Role = 'tool-' + $status; Text = $label + ($body ? "`n$body" : ''); Label = $label; Call = $Call }
+    [pscustomobject]@{ Role = 'tool-' + $status; Text = $label + ($body ? "`n$body" : ''); Label = $label; Call = $Call; Diff = [bool]$diff }
 }
 function New-TuiOperationViewRecord {
     [CmdletBinding()]
@@ -283,7 +288,7 @@ function Update-TuiToolView {
         if ($entry) {
             $record = New-TuiToolViewRecord $entry.Call $Payload.Result -Preview (Get-TuiDisplayValue $entry Preview)
             $entry.Record.Role = $record.Role; $entry.Record.Text = $record.Text
-            $entry.Record.Label = $record.Label
+            $entry.Record.Label = $record.Label; $entry.Record | Add-Member NoteProperty Diff $record.Diff -Force
             if ((Get-TuiDisplayValue $Payload.Result.Data TaskState) -ne 'running') {
                 $null = $session.ToolCalls.Remove($Payload.Result.CallId)
             }
@@ -323,17 +328,22 @@ function Get-TuiToolRow {
     while ($body.Count -and -not $body[-1]) {
         $body = @($body | Select-Object -SkipLast 1)
     }
-    $preview = $Expanded ? $body : ($status -eq 'waiting' ? @($body | Select-Object -First $Limit) : @($body | Select-Object -Last $Limit))
+    $isDiff = $status -eq 'waiting' -or (Get-TuiDisplayValue -Value $Record -Name Diff -Default $false)
+    if ($isDiff -and $status -ne 'waiting' -and -not $Expanded) {
+        # The compact view of a finished edit is its changed lines, first to last; Ctrl+O shows the context too.
+        $body = @($body | Where-Object { $_ -match '^[+-]' })
+    }
+    $head = $isDiff
+    $preview = $Expanded ? $body : ($head ? @($body | Select-Object -First $Limit) : @($body | Select-Object -Last $Limit))
     $more = $body.Count - $preview.Count
-    if ($more -gt 0 -and $status -ne 'waiting') {
+    if ($more -gt 0 -and -not $head) {
         New-TuiFrameRow (($Ascii ? '...' : '…') + " $more earlier lines | Ctrl+O / F12") -Color BrightBlack
     }
-    $isDiff = $status -eq 'waiting' -or (Get-TuiDisplayValue -Value $Record -Name Diff -Default $false)
     foreach ($line in $preview) {
         $color = $status -eq 'error' -or ($isDiff -and $line.StartsWith('-')) ? 'Red' : ($line.StartsWith('Risk: ') -or $line.StartsWith('Rules updated: ') ? 'Yellow' : ($isDiff -and $line.StartsWith('+') ? 'Green' : 'BrightBlack'))
         New-TuiFrameRow (Get-TuiSingleLine -Text ('  ' + $line) -Width $Width -Ascii $Ascii) -Color $color
     }
-    if ($more -gt 0 -and $status -eq 'waiting') {
+    if ($more -gt 0 -and $head) {
         New-TuiFrameRow (($Ascii ? '...' : '…') + " $more more | Ctrl+O / F12") -Color BrightBlack
     }
 }

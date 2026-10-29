@@ -41,10 +41,8 @@ function Invoke-AgentCommand {
         throw 'Command is outside its declared bounds.'
     }
     $cwd = ConvertFrom-AgentPresentedUri $arguments.Cwd
-    if (-not [IO.Path]::IsPathRooted($cwd)) {
-        throw 'An absolute workspace Cwd is required.'
-    }
-    $cwd = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($cwd))
+    # A missing or workspace-relative Cwd means the workspace or a folder in it, as the absolute path would.
+    $cwd = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath(($cwd ? $cwd : '.'), $store.Root))
     if (-not [string]::Equals($cwd, $store.Root, (Get-HarnessPathComparison))) {
         $null = Resolve-AgentPresentedPath $Context $cwd
     }

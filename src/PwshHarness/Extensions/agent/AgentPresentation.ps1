@@ -251,22 +251,23 @@ function Resolve-AgentPresentedPath {
     if ($Path.StartsWith('skill:', [StringComparison]::Ordinal)) {
         return $Path
     }
+    $root = Get-HarnessOperationDirectory $Context.State
+    if (-not [IO.Path]::IsPathRooted($Path)) {
+        # Models often send a workspace-relative path; it names the same file, under the same confinement, as the absolute one.
+        $Path = [IO.Path]::Combine($root, $Path)
+    }
     # Compared as full paths, so a Windows path echoed with other slashes or letter case still names its skill.
     $catalog = Get-AgentSkillCatalog $Context.State $Context.Pump
-    $full = [IO.Path]::IsPathRooted($Path) ? [IO.Path]::GetFullPath($Path) : $Path
+    $full = [IO.Path]::GetFullPath($Path)
     foreach ($skill in $catalog.Skills.Values) {
         if ([string]::Equals($full, [IO.Path]::GetFullPath((Join-Path $skill.Root $skill.Relative)), (Get-HarnessPathComparison))) {
             return 'skill:' + $skill.Name
         }
     }
-    if (-not [IO.Path]::IsPathRooted($Path)) {
-        throw 'An absolute workspace path is required.'
-    }
     $scratch = Get-AgentRunScratch $Context.State
     if ($scratch -and ([IO.Path]::GetFullPath($Path) + [IO.Path]::DirectorySeparatorChar).StartsWith($scratch + [IO.Path]::DirectorySeparatorChar, (Get-HarnessPathComparison))) {
         throw 'The scratch directory is outside the workspace; create, read and run scratch files with run_command.'
     }
-    $root = Get-HarnessOperationDirectory $Context.State
     $relative = [IO.Path]::GetRelativePath($root, $Path)
     if ($relative -ceq '.') {
         # The workspace itself, often echoed with a trailing separator, is a search scope or command folder.

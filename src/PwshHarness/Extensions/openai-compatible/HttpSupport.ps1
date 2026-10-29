@@ -140,6 +140,75 @@ function Get-OpenAIRetryDelay {
     }
     [Math]::Min($Config.RetryMaxSeconds, $Config.RetryBaseSeconds * [Math]::Pow(2, $Attempt))
 }
+# Per gateway origin: the token count its last response said it would still accept, and when that window refills.
+$script:RateWindows = [Collections.Concurrent.ConcurrentDictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+function ConvertFrom-OpenAIResetDuration {
+    # Reset headers come as seconds ("42"), a duration ("1m30s", "250ms") or a Unix time.
+    [CmdletBinding()]
+    param([string]$Text)
+    $number = 0.0
+    if ([double]::TryParse($Text, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$number)) {
+        return $number -gt 1e9 ? $number - [DateTimeOffset]::new($script:Clock.Now()).ToUnixTimeMilliseconds() / 1000 : $number
+    }
+    $match = [regex]::Match($Text, '^(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m(?!s))?(?:(\d+(?:\.\d+)?)s)?(?:(\d+(?:\.\d+)?)ms)?$')
+    if (-not $Text -or -not $match.Success) {
+        return $null
+    }
+    $seconds = 0.0
+    foreach ($part in @(@(1, 3600), @(2, 60), @(3, 1), @(4, 0.001))) {
+        if ($match.Groups[$part[0]].Success) {
+            $seconds += [double]::Parse($match.Groups[$part[0]].Value, [Globalization.CultureInfo]::InvariantCulture) * $part[1]
+        }
+    }
+    $seconds
+}
+function Update-OpenAIRateWindow {
+    # Gateways that meter tokens per minute say on every response how many they will still accept and when the window
+    # refills (x-ratelimit-remaining-tokens[-minute], x-ratelimit-reset-tokens[-minute]); a response without them clears it.
+    [CmdletBinding()]
+    param([string]$Origin, $Response)
+    $headers = $Response.Headers
+    $read = {
+        param([string[]]$Names)
+        foreach ($name in $Names) {
+            $values = $null
+            if ($headers.TryGetValues($name, [ref]$values)) {
+                return [string]@($values)[0]
+            }
+        }
+    }
+    $remaining = 0L
+    $reset = ConvertFrom-OpenAIResetDuration (& $read @('x-ratelimit-reset-tokens-minute', 'x-ratelimit-reset-tokens'))
+    $window = $null
+    if ([long]::TryParse((& $read @('x-ratelimit-remaining-tokens-minute', 'x-ratelimit-remaining-tokens')), [ref]$remaining) -and $null -ne $reset -and $reset -gt 0) {
+        $script:RateWindows[$Origin] = @{ Remaining = $remaining; ResetAt = ([DateTimeOffset]$script:Clock.Now()).AddSeconds($reset) }
+    }
+    else {
+        $null = $script:RateWindows.TryRemove($Origin, [ref]$window)
+    }
+}
+function Get-OpenAIRateWait {
+    # Seconds to wait before sending a request of this size, so the gateway's token window refills instead of answering 429.
+    # A window longer than two minutes is not a per-minute limit: its 429 and Retry-After decide.
+    [CmdletBinding()]
+    param([string]$Origin, [long]$Tokens)
+    $window = $null
+    if (-not $script:RateWindows.TryGetValue($Origin, [ref]$window)) {
+        return 0.0
+    }
+    $seconds = ($window.ResetAt - [DateTimeOffset]$script:Clock.Now()).TotalSeconds
+    if ($seconds -le 0 -or $seconds -gt 120) {
+        $null = $script:RateWindows.TryRemove($Origin, [ref]$window)
+        return 0.0
+    }
+    if ($window.Remaining -ge $Tokens) {
+        # Requests sent before the next response arrives draw on the same window.
+        $window.Remaining -= $Tokens
+        return 0.0
+    }
+    $null = $script:RateWindows.TryRemove($Origin, [ref]$window)
+    $seconds
+}
 function Wait-OpenAIBackoff {
     [CmdletBinding()]
     param([double]$Seconds, [System.Threading.CancellationToken]$CancellationToken, [object]$Context)

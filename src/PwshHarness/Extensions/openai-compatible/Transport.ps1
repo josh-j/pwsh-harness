@@ -132,6 +132,21 @@ function Invoke-OpenAIHttpProvider {
                     $wireBody = New-OpenAIRequestBody $Context -DisableReasoning:$reasoningDisabled -DisableTools:$toolsDisabled
                 }
                 $request.Content = [Net.Http.StringContent]::new($wireBody, [Text.Encoding]::UTF8, 'application/json')
+                $estimate = $Context.PSObject.Properties['EstimateWireTokens'] ? $Context.EstimateWireTokens : { param([string]$Text) [Math]::Ceiling($Text.Length / 4) }
+                $rateWait = Get-OpenAIRateWait -Origin $uri.Authority -Tokens ([long](& $estimate $wireBody))
+                if ($rateWait -gt 0) {
+                    $activity.Text = 'rate limit: gateway token window refills in {0:0}s' -f $rateWait; $activity.At = [Environment]::TickCount64
+                    if ($Context.State -and (Get-Variable Events -Scope Script -ErrorAction Ignore)) {
+                        try {
+                            $script:Events.Status($Context.State, 'activity', $activity.Text)
+                        }
+                        catch {
+                            Write-Verbose "Rate limit status was not shown: $($_.Exception.Message)"
+                        }
+                    }
+                    Wait-OpenAIBackoff -Seconds $rateWait -CancellationToken $attemptToken -Context $Context
+                    Set-OpenAIStreamActivity -Context $Context -Activity $activity -Clear
+                }
                 $usage = $null
                 $generationIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
                 $attemptBodies.Add($wireBody)
@@ -144,6 +159,7 @@ function Invoke-OpenAIHttpProvider {
                         $attemptToken)) -CancellationToken $attemptToken -Context $Context -Progress $progress
                 $statusCode = [int]$response.StatusCode
                 $observations[-1].HttpStatusCode = $statusCode
+                Update-OpenAIRateWindow -Origin $uri.Authority -Response $response
                 $observations[-1].HeadersMs = $progress ? $progress.Clock.ElapsedMilliseconds : $null
                 if (-not $response.IsSuccessStatusCode) {
                     $body = Read-OpenAIErrorBody -Response $response -Context $Context -CancellationToken $attemptToken -Redact $redact -Progress $progress
