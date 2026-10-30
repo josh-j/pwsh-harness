@@ -269,7 +269,7 @@ function New-OpenAIRequestBody {
             include_usage = $true
         }
     }
-    if ($body.model -match '(^|/)gemini-3[.-]') {
+    if ($body.model -match '(^|/)gemini-(3[.-]|4-)') {
         $body.Remove('temperature')
     }
     if (-not $DisableReasoning -and $modelProfile -and $null -ne $modelProfile.ReasoningEffort) {

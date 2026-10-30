@@ -72,7 +72,7 @@ function Invoke-OpenAIHttpProvider {
             $script:ReasoningTurns.Add($cacheKey, $reasoningCache)
         }
     }
-    $requireReasoning = $agent -and $model -match '(^|/)gemini-3\.8-flash(?:$|-)'
+    $requireReasoning = $agent -and $model -match '(^|/)gemini-(?:3\.8-flash|4-argon)(?:$|-)'
     $uri = Get-OpenAIGatewayUri $config.BaseUrl '/v1/chat/completions'
     $toolScope = $uri.AbsoluteUri + '|' + $model
     $reasoningScopes = $Context.State -and $Context.State.PSObject.Properties['ReasoningEffortUnsupportedScopes'] ? $Context.State.ReasoningEffortUnsupportedScopes : $null

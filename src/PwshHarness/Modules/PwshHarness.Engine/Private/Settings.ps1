@@ -214,6 +214,15 @@ function Resolve-EngineSetting {
             }
         }
     }
+    # Unless a profile is chosen explicitly, the profile describing the configured model replaces the default one.
+    $profileEnv = $Declarations.ContainsKey('ModelProfile') ? (Get-EngineSettingEnvironmentName -Store $Store -Name ModelProfile -Override $Declarations.ModelProfile.Env) : ''
+    if ($values.Model -and -not ($file.ContainsKey('ModelProfile') -or $Store.Parameters.ContainsKey('ModelProfile') -or
+            $Parameters.ContainsKey('ModelProfile') -or ($profileEnv -and [Environment]::GetEnvironmentVariable($profileEnv)))) {
+        $matched = @($Store.Profiles.Values | Where-Object { $_.Model -and $values.Model -match ('(^|/)' + [regex]::Escape($_.Model) + '(?:$|-)') } | Sort-Object Name)
+        if ($matched) {
+            $values.ModelProfile = $matched[0].Name
+        }
+    }
     if ($values.ModelProfile) {
         $modelProfile = Get-EngineProfile $Store $values
         foreach ($name in @('Model', 'Temperature', 'MaxTokens', 'Agent.MaxSteps', 'Agent.MaxRunSeconds', 'Agent.MaxToolCalls',
