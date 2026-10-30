@@ -292,12 +292,13 @@ function Complete-PowerShellRunTask {
         $result.ErrorOutput = $errorText + $notice
     }
     $outcome = "Exit code: $($Task.ExitCode)"
+    # Record the same base cause the tool result reports; .NET method calls wrap it in MethodInvocationException.
     if ($Task.Failure) {
-        $result | Add-Member NoteProperty Failure ($script:Harness.OperationControl.ProtectText($Task.State, (ConvertTo-HarnessSafeText $Task.Failure.Exception.Message), $true))
+        $result | Add-Member NoteProperty Failure ($script:Harness.OperationControl.ProtectText($Task.State, (ConvertTo-HarnessSafeText $Task.Failure.Exception.GetBaseException().Message), $true))
         $outcome = $result.Failure
     }
     if ($Task.CleanupErrors.Count) {
-        $result | Add-Member NoteProperty CleanupFailure ($script:Harness.OperationControl.ProtectText($Task.State, (ConvertTo-HarnessSafeText (($Task.CleanupErrors | ForEach-Object { $_.Exception.Message }) -join "`n")), $true))
+        $result | Add-Member NoteProperty CleanupFailure ($script:Harness.OperationControl.ProtectText($Task.State, (ConvertTo-HarnessSafeText (($Task.CleanupErrors | ForEach-Object { $_.Exception.GetBaseException().Message }) -join "`n")), $true))
         $outcome += "`nCleanup failed: $($result.CleanupFailure)"
     }
     try {
