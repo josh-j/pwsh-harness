@@ -622,6 +622,10 @@ function Invoke-AgentToolProcess {
         $options = @{ Shell = $descriptor.Shell; Terminal = $descriptor.Terminal; AllowInput = $true; WaitSeconds = $descriptor.WaitSeconds; DeferredTask = $holder; RunDeadline = $Tool.Run.DeadlineUtc }
     }
     $data = Invoke-HarnessService -Harness $script:Harness -Name 'command.run' -Arguments @($Tool, $Context, $check, $settings, $options) -Required
+    if ($Tool['Writes']) {
+        # A command that writes files is a change for run policies, as an edit is; the model never sees the mark.
+        $data | Add-Member NoteProperty context_change $true -Force
+    }
     if ($options.Count) {
         if ($descriptor.Terminal) {
             $data | Add-Member NoteProperty TerminalID $descriptor.Terminal.Id
@@ -788,7 +792,7 @@ function Get-AgentCompletionReview {
     $parts += @(Get-AgentVerificationReview $Context)
     $open = @(Get-AgentOpenPlanStep $Context)
     if ($open.Count) {
-        $parts += "your plan still has unfinished steps.`n$($open -join "`n")`nFinish them, or call update_plan to mark what is done and say in your answer what remains."
+        $parts += "your plan still has unfinished steps.`n$($open -join "`n")`nDo the ones not yet done now. Closing the plan needs no update_plan call of its own: in your answer, name any step you could not do and why."
     }
     if ($parts) {
         "<EPHEMERAL_MESSAGE>`nBefore finishing: $($parts -join "`nAlso, ") Then give your final answer.`n</EPHEMERAL_MESSAGE>"

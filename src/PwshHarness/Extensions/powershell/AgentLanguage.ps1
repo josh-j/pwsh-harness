@@ -484,6 +484,30 @@ function Get-PowerShellNestedPwshExpansion {
     }
     @($lost | Select-Object -Unique)
 }
+function Test-PowerShellFileWrite {
+    # Whether a command visibly writes files: file cmdlets, redirection to a file, [IO.File] writes or a changing git
+    # subcommand. Run policies count such a command as a change; scripts it calls are not inspected.
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string]$Source)
+    $ast = [Management.Automation.Language.Parser]::ParseInput($Source, [ref]$null, [ref]$null)
+    $writes = $ast.Find({ param($node)
+            if ($node -is [Management.Automation.Language.FileRedirectionAst]) {
+                return $node.Location.Extent.Text -notmatch '(?i)^(\$null|/dev/null|NUL)$'
+            }
+            if ($node -is [Management.Automation.Language.InvokeMemberExpressionAst]) {
+                return $node.Extent.Text -match '(?i)^\[(System\.)?IO\.(File|Directory)\]::(Write|Append|Create|Delete|Move|Copy|Replace)'
+            }
+            if ($node -isnot [Management.Automation.Language.CommandAst]) {
+                return $false
+            }
+            $name = [IO.Path]::GetFileNameWithoutExtension([string]$node.GetCommandName())
+            $name -match '(?i)^((Set|Add|Clear)-Content|Out-File|(New|Remove|Copy|Move|Rename|Set)-Item|Export-(Csv|Clixml)|Tee-Object|(Expand|Compress)-Archive|sc|ac|ni|rm|ri|del|erase|rd|rmdir|cp|cpi|copy|mv|mi|move|ren|rni|mkdir|md|touch|patch|tee)$' -or
+            ($name -ceq 'git' -and $node.CommandElements.Count -gt 1 -and $node.CommandElements[1].Extent.Text -match '^(apply|checkout|restore|switch|mv|rm|commit|reset|stash|am|cherry-pick|merge|rebase|revert|pull)$') -or
+            ($name -ceq 'sed' -and @($node.CommandElements.Extent.Text) -match '^-i')
+        }, $true)
+    [bool]$writes
+}
 function New-PowerShellToolCommand {
     [CmdletBinding()]
     param($Tool)
@@ -503,6 +527,7 @@ function New-PowerShellToolCommand {
         throw "Execution refused: this command already runs in PowerShell, which expands $($lost -join ', ') inside the double-quoted pwsh -Command string before the child pwsh starts, so the child sees them empty. Run the code directly without the nested pwsh, or for a separate process write a script file in the scratch directory and use pwsh -File."
     }
     $Tool.Command = @{ Source = $source; SourceHash = (Get-HarnessSha256 ([Text.Encoding]::UTF8.GetBytes($source))); EntryPath = '' }
+    $Tool.Writes = $parsed -and (Test-PowerShellFileWrite -Source $source)
     # Only real risks mark a command (!): style and lint findings such as an unchecked native exit status are not
     # risks here, because the agent sees every exit code.
     $Tool.Risks = $special ? @('Command or task input runs with your account permissions; host approval and deadlines remain in force.') : @($script:Harness.TestCode((New-HarnessCodeBlock -Code $source), $Tool.State.Config).Diagnostics | Where-Object Source -CEQ 'Risk' | ForEach-Object Message)

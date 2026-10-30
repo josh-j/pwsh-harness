@@ -26,6 +26,10 @@ function Get-RunPolicyCheckInMessage {
     }
     $View.Memory.CheckIns = $level
     $ask = $level -eq 1 ? 'Stop and report to the user now: what you found so far and what you would check next.' : 'Answer the user now with your findings; do not make more tool calls first.'
+    if ($level -eq 1 -and $View.Headless -and $kind -ceq 'fix' -and -not $View.Progress.Changes) {
+        # Asked to report, unattended fixes ended on a proposal with nothing changed (command-errors, 2026-10-30).
+        $ask = 'No file has changed yet and the user cannot answer. Make the change now with what you know and let a check correct it; answer without a change only if you cannot tell what to change.'
+    }
     # The spend is what the provider reported; reservations only gate admission. A provider that reports no usage
     # falls back to the admission estimate.
     $reported = [long]$View.Usage.InputTokens + [long]$View.Usage.OutputTokens
@@ -53,13 +57,20 @@ function Get-RunPolicyTaskKind {
     [OutputType([string])]
     param([Parameter(Mandatory)]$View)
     $prompt = [string]$View.State.LastPrompt
-    # "Do not change any files" names a change verb but forbids changes.
-    $readOnly = $prompt -match "(?i)\b(?:do not|don't|never|without)\s+(?:chang|modif|edit|touch|writ)"
+    # "Do not change any files" names a change verb but forbids changes; "do not change the input" constrains a change.
+    $readOnly = $prompt -match "(?i)\b(?:do not|don't|never|without)\s+(?:chang|modif|edit|touch|writ)\w*\s+(?:any\s+|the\s+)?(?:files?|code|source|anything|repo|repository|working tree)\b"
+    # A task statement often describes the defect and then states the behavior in imperative sentences ("Stop on
+    # unhandled errors", "Mark the view dirty"); those weaker verbs count only at a sentence start, in a prompt with
+    # no question mark or review word.
+    $imperative = '(?im)(?:^|[.!:;]\s+)(?:please\s+)?(?:stop|return|preserve|keep|mark|merge|parse|read|handle|support|ensure|allow|prevent|avoid|enable|disable|set|move|split|extend|improve|restore|reject|refuse|accept|use|respect|treat|prefer|apply|expose|exclude|skip|ignore|validate|raise|throw|emit|limit|clear|reset|redraw|show|hide)\b'
     if (-not $readOnly -and $prompt -match '(?i)\b(?:fix|implement|add|change|update|refactor|rename|remove|delete|create|write|make|build|repair|convert|migrate|replace)\b') {
         'fix'
     }
     elseif ($prompt -match '(?i)\b(?:bugs?|defects?|issues?|review|inspect)\b') {
         'review'
+    }
+    elseif (-not $readOnly -and $prompt -cnotmatch '\?' -and $prompt -match $imperative) {
+        'fix'
     }
     else {
         'question'
