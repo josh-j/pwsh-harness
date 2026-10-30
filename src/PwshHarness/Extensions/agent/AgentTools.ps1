@@ -33,7 +33,7 @@ function ConvertFrom-AgentToolArgument {
         $arguments = @{}
         foreach ($field in $document.RootElement.EnumerateObject()) {
             if ($field.Name -cnotin @($schema.Keys) -or $arguments.ContainsKey($field.Name)) {
-                throw 'Unknown or duplicate tool argument.'
+                throw (Get-AgentArgumentError -Tool $Name -Field $field.Name -Accepted @($schema.Keys))
             }
             $rule = $schema[$field.Name]
             $value = $field.Value

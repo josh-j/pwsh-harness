@@ -315,20 +315,25 @@ function Invoke-PowerShellFormatterProcessor {
 function Start-PowerShellAnalyzerWarmup {
     # PSScriptAnalyzer caches command lookups for the whole process, so analyzing in a runspace of its own warms them
     # without making a check or a format queue behind it: a full-file warm-up in the shared runspace made the next
-    # edit's formatter give up after five seconds. One warm-up runs at a time and its findings are discarded.
+    # edit's formatter give up after five seconds. Files read while a warm-up runs wait in its queue, which the
+    # running warm-up drains: dropping them left each later edit of them over budget (Luna runs, 2026-10-30). One
+    # warm-up runs at a time and its findings are discarded.
     [CmdletBinding()]
     [OutputType([bool])]
     param([string]$Code, $Config, $Analyzer)
     $w = $script:PackAnalyzerWarmup
-    if ($w -and -not $w.Pending.IsCompleted) {
-        return $false
-    }
     if (-not $w) {
-        $w = [pscustomobject]@{ Runspace = [runspacefactory]::CreateRunspace(); Pipeline = [powershell]::Create(); Pending = $null }
+        $w = [pscustomobject]@{ Runspace = [runspacefactory]::CreateRunspace(); Pipeline = [powershell]::Create(); Pending = $null; Queue = [Collections.Concurrent.ConcurrentQueue[string]]::new() }
         $w.Runspace.Open(); $w.Pipeline.Runspace = $w.Runspace
         $script:PackAnalyzerWarmup = $w
     }
-    else {
+    if ($w.Queue.Count -lt 16) {
+        $w.Queue.Enqueue($Code)
+    }
+    if ($w.Pending -and -not $w.Pending.IsCompleted) {
+        return $false
+    }
+    if ($w.Pending) {
         try {
             $null = $w.Pipeline.EndInvoke($w.Pending)
         }
@@ -336,15 +341,16 @@ function Start-PowerShellAnalyzerWarmup {
             Write-Verbose "Discarded a failed analyzer warm-up: $($_.Exception.Message)"
         }
     }
-    $parameters = @{ ScriptDefinition = $Code; ErrorAction = 'SilentlyContinue' }
+    $parameters = @{ ErrorAction = 'SilentlyContinue' }
     $settings = (Resolve-PowerShellAnalyzerSetting $Config).Settings
     if ($null -ne $settings) {
         $parameters.Settings = $settings
     }
     $p = $w.Pipeline; $p.Commands.Clear(); $p.Streams.ClearStreams()
-    # One statement: disposing a running multi-statement pipeline crashed the process from a thread-pool thread.
-    # Import-Module returns at once after the first warm-up has loaded the module.
-    $null = $p.AddScript('param($Path, $Parameters) Microsoft.PowerShell.Core\Import-Module -Name $Path -Scope Local -ErrorAction Stop; PSScriptAnalyzer\Invoke-ScriptAnalyzer @Parameters').AddArgument($Analyzer.Path).AddArgument($parameters)
+    # One script: disposing a running multi-statement pipeline crashed the process from a thread-pool thread.
+    # Import-Module returns at once after the first warm-up has loaded the module. A file queued just as the loop
+    # ends waits for the next read.
+    $null = $p.AddScript('param($Path, $Parameters, $Queue) Microsoft.PowerShell.Core\Import-Module -Name $Path -Scope Local -ErrorAction Stop; $code = $null; while ($Queue.TryDequeue([ref]$code)) { $Parameters.ScriptDefinition = $code; $null = PSScriptAnalyzer\Invoke-ScriptAnalyzer @Parameters }').AddArgument($Analyzer.Path).AddArgument($parameters).AddArgument($w.Queue)
     $w.Pending = $p.BeginInvoke()
     $true
 }

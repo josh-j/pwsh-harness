@@ -94,6 +94,14 @@ function Test-AgentPresentedName {
     param([string]$Name)
     -not $script:PackTools.ContainsKey($Name) -and ($Name -cin @($script:PackWorkSchemas.Name) -or [bool](Find-AgentPresentation -Name $Name))
 }
+function Get-AgentArgumentError {
+    # Names the rejected argument (only when it is a plain identifier: it is model output) and the
+    # accepted ones, so the model can correct the call in one step instead of guessing again.
+    [CmdletBinding()]
+    param([string]$Tool, [string]$Field, [string[]]$Accepted)
+    $named = $Field -cmatch '^[A-Za-z_][A-Za-z0-9_]{0,63}$' ? " '$Field'" : ''
+    "Unknown or duplicate tool argument$named; $Tool accepts $(@($Accepted | Sort-Object) -join ', ')."
+}
 function ConvertFrom-AgentPresentedArgument {
     [CmdletBinding()]
     param([string]$Name, [string]$Json, [string]$Id)
@@ -110,11 +118,17 @@ function ConvertFrom-AgentPresentedArgument {
             throw 'Tool arguments must be an object.'
         }
         $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        # Models emit null for an optional argument they are not using; that means absent.
+        $absent = [Collections.Generic.List[string]]::new()
         foreach ($field in $document.RootElement.EnumerateObject()) {
             if (-not $seen.Add($field.Name) -or ($field.Name -cnotin @($schema.properties.Keys) -and $field.Name -cnotin $retired)) {
-                throw 'Unknown or duplicate tool argument.'
+                throw (Get-AgentArgumentError -Tool $Name -Field $field.Name -Accepted @($schema.properties.Keys))
             }
             if ($field.Name -cin $retired) {
+                continue
+            }
+            if ($field.Value.ValueKind -eq 'Null' -and $field.Name -cnotin @($schema.required)) {
+                $absent.Add($field.Name)
                 continue
             }
             $rule = $schema.properties[$field.Name]
@@ -147,6 +161,9 @@ function ConvertFrom-AgentPresentedArgument {
                 & $owner.ValidateField $Name $field $script:PackPresentationHost
             }
         }
+        foreach ($field in $absent) {
+            $null = $seen.Remove($field)
+        }
         if ($owner.ValidateCall) {
             & $owner.ValidateCall $Name $seen
         }
@@ -156,7 +173,7 @@ function ConvertFrom-AgentPresentedArgument {
             }
         }
         $arguments = $Json | ConvertFrom-Json -AsHashtable
-        foreach ($field in $retired) {
+        foreach ($field in @($retired) + $absent) {
             $arguments.Remove($field)
         }
         if ($Json.Contains('\u0000') -or @($arguments.Values | Where-Object { $_ -is [string] -and $_.Contains([char]0) }).Count) {
