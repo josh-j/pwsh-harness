@@ -50,7 +50,7 @@ function Get-PowerShellAnalyzer {
     [CmdletBinding()]
     param($Config, $Context)
     if ($null -eq $script:PackAnalyzer) {
-        $script:PackAnalyzer = [pscustomobject]@{ Source = 'unavailable'; Path = ''; Version = ''; Module = $null; Runspace = $null; Pipeline = $null; Stop = $null; Pending = $null; FailedAsync = $false; Error = $null }
+        $script:PackAnalyzer = [pscustomobject]@{ Source = 'unavailable'; Path = ''; Version = ''; Module = $null; Runspace = $null; Pipeline = $null; Stop = $null; Pending = $null; Warm = $null; FailedAsync = $false; Error = $null }
         try {
             $candidate = Find-PowerShellAnalyzer $Config
             if ($candidate) {
@@ -78,7 +78,7 @@ function Get-PowerShellAnalyzer {
 }
 function Invoke-PowerShellAnalyzerPipeline {
     [CmdletBinding()]
-    param($Analyzer, [ValidateSet('Import-Module', 'Invoke-ScriptAnalyzer', 'Invoke-Formatter')][string]$Command, [hashtable]$Parameters, $Context, [int]$TimeoutMilliseconds = 5000)
+    param($Analyzer, [ValidateSet('Import-Module', 'Invoke-ScriptAnalyzer', 'Invoke-Formatter')][string]$Command, [hashtable]$Parameters, $Context, [int]$TimeoutMilliseconds = 5000, [switch]$NoWait)
     $p = $Analyzer.Pipeline
     if ($p.InvocationStateInfo.State -in @('Running', 'Stopping') -and $Context) {
         # Queue behind earlier work, such as the stop after a timeout, instead of failing this check.
@@ -106,12 +106,28 @@ function Invoke-PowerShellAnalyzerPipeline {
             $Analyzer.Stop = $null; $Analyzer.Pending = $null
         }
     }
+    if ($Analyzer.Warm) {
+        # A warm-up's findings are discarded; only its command lookups are kept.
+        try {
+            $null = $p.EndInvoke($Analyzer.Warm)
+        }
+        catch {
+            Write-Verbose "Discarded a failed analyzer warm-up: $($_.Exception.Message)"
+        }
+        finally {
+            $Analyzer.FailedAsync = $p.InvocationStateInfo.State -eq 'Failed'; $Analyzer.Warm = $null
+        }
+    }
     if ($Analyzer.FailedAsync) {
         $p.Dispose(); $p = [PowerShell]::Create(); $p.Runspace = $Analyzer.Runspace
         $Analyzer.Pipeline = $p; $Analyzer.FailedAsync = $false
     }
     $p.Commands.Clear(); $p.Streams.ClearStreams()
     $null = $p.AddCommand(($Command -eq 'Import-Module' ? 'Microsoft.PowerShell.Core\Import-Module' : "PSScriptAnalyzer\$Command")).AddParameters($Parameters)
+    if ($NoWait) {
+        $Analyzer.Warm = $p.BeginInvoke()
+        return
+    }
     if ($Context) {
         $pending = $p.BeginInvoke(); $watch = $script:Harness.Clock.Elapsed()
         try {
@@ -250,7 +266,7 @@ function Resolve-PowerShellAnalyzerSetting {
 }
 function Invoke-PowerShellAnalyzer {
     [CmdletBinding()]
-    param([string]$Code, $Config, [string[]]$AnalyzerRules, [switch]$Format, $Context, [int[]]$Range, [int]$TimeoutMilliseconds = 5000)
+    param([string]$Code, $Config, [string[]]$AnalyzerRules, [switch]$Format, $Context, [int[]]$Range, [int]$TimeoutMilliseconds = 5000, [switch]$NoWait)
     $s = Resolve-PowerShellAnalyzerSetting $Config
     if (-not ($Format ? $s.Format : $s.Enabled)) {
         return
@@ -271,8 +287,8 @@ function Invoke-PowerShellAnalyzer {
         if ($AnalyzerRules.Count) {
             $p.IncludeRule = $AnalyzerRules
         }
-        $result = Invoke-PowerShellAnalyzerPipeline -Analyzer $a -Command ($Format ? 'Invoke-Formatter' : 'Invoke-ScriptAnalyzer') -Parameters $p -Context $Context -TimeoutMilliseconds $TimeoutMilliseconds
-        if ($Format) {
+        $result = Invoke-PowerShellAnalyzerPipeline -Analyzer $a -Command ($Format ? 'Invoke-Formatter' : 'Invoke-ScriptAnalyzer') -Parameters $p -Context $Context -TimeoutMilliseconds $TimeoutMilliseconds -NoWait:$NoWait
+        if ($Format -or $NoWait) {
             return $result
         }
         # A record's Line and Column are script properties from the analyzer runspace's type data, so they read as

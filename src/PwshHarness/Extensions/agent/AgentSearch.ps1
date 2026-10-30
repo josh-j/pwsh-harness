@@ -30,6 +30,10 @@ function Invoke-AgentCodeSearch {
     }
     $root = Get-HarnessOperationDirectory $Context.State
     $scope = $arguments.scope -ceq '.' ? $root : (Resolve-AgentToolPath -State $Context.State -Root $root -Path $arguments.scope -Context $Context)
+    if (-not [IO.Path]::Exists($scope)) {
+        # A missing scope would read as an exhaustive search with no matches.
+        throw "Search scope '$($arguments.scope)' does not exist. Scope takes one file or folder; use includes for several patterns such as dir/*.ps1;tests/*.ps1."
+    }
     $control = $script:Harness.OperationControl; $state = $Context.State
     foreach ($value in $arguments.Values) {
         if ($value -is [string] -and $value -cne $control.ProtectText($state, $value)) {
@@ -42,9 +46,11 @@ function Invoke-AgentCodeSearch {
         $budget = @{ Limit = [decimal]$config.'Agent.SearchEmbeddingMaxCost'; Price = [decimal]$config.EmbeddingInputPricePerMillion; EstimatedCost = [decimal]0; Requests = 0 }
         $script:PackSearchBudgets.Add($key, $budget)
     }
+    # One full policy check of the root (bare repositories, unverifiable Git markers) covers the -Inventory checks of listed paths.
+    $null = Resolve-AgentToolPath -State $state -Root $root -Path '.pwsh-harness-listing-probe' -Context $Context
     $resolver = ${function:Resolve-AgentToolPath}
     $request = [pscustomobject]@{ State = $state; Config = $config; Query = $arguments.query; ToolRoot = $root; SearchScope = $scope; SearchArguments = $arguments
-        SearchPartial = $false; SearchError = $null; EmbeddingError = $null; Skipped = 0; AllowPath = { param($path) $null = & $resolver $state $root $path $Context }.GetNewClosure(); Agent = $true; Hybrid = ($ranked -and $config.'Agent.CodeSearchHybrid'); EmbeddingBudget = $budget; ProtectText = { param($text) $control.ProtectText($state, $text) }.GetNewClosure()
+        SearchPartial = $false; SearchError = $null; EmbeddingError = $null; Skipped = 0; AllowPath = { param($path, [bool]$Listed) $null = & $resolver $state $root $path $Context -Inventory:$Listed }.GetNewClosure(); Agent = $true; Hybrid = ($ranked -and $config.'Agent.CodeSearchHybrid'); EmbeddingBudget = $budget; ProtectText = { param($text) $control.ProtectText($state, $text) }.GetNewClosure()
         Pump = $Context.Pump; CancellationToken = $Context.CancellationToken
     }
     $limit = [Math]::Min($config.'Agent.MaxReadBytes', $config.'Agent.MaxCaptureBytes')
@@ -55,7 +61,7 @@ function Invoke-AgentCodeSearch {
             $truncated = $true
         }
         # Recheck each returned path through the read-tool policy, including exclusions.
-        $null = Resolve-AgentToolPath -State $state -Root $root -Path $chunk.Path -Context $Context
+        $null = Resolve-AgentToolPath -State $state -Root $root -Path $chunk.Path -Context $Context -Inventory:([bool]$candidate.Listed)
         $row = @{ path = $control.ProtectText($state, $chunk.Path); start_line = $chunk.StartLine; end_line = $chunk.EndLine; name = $control.ProtectText($state, $chunk.Title); text = $control.ProtectText($state, $chunk.Text); score = $candidate.Score; retriever = $candidate.Retriever }
         $bytes = [Text.Encoding]::UTF8.GetByteCount(($row | ConvertTo-Json -Depth 6 -Compress)) + 1
         if ($results.Count -ge 50 -or $used + $bytes -gt $limit) {
@@ -67,5 +73,5 @@ function Invoke-AgentCodeSearch {
     if ($request.SearchError) {
         throw $request.SearchError
     }
-    Complete-AgentToolCall -Context $Context -Call $Call -Data @{ results = $results.ToArray(); truncated = $truncated; index_partial = $request.SearchPartial; embedding_estimated_cost = $budget.EstimatedCost; embedding_requests = $budget.Requests; embedding_error = $request.EmbeddingError; skipped = $request.Skipped }
+    Complete-AgentToolCall -Context $Context -Call $Call -Data @{ results = $results.ToArray(); truncated = $truncated; index_partial = $request.SearchPartial; stopped_at = $request.PSObject.Properties['SearchStop'] ? $request.SearchStop : $null; embedding_estimated_cost = $budget.EstimatedCost; embedding_requests = $budget.Requests; embedding_error = $request.EmbeddingError; skipped = $request.Skipped }
 }

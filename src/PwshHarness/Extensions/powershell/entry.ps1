@@ -30,7 +30,7 @@
     Register-PowerShellHistoryCompactor
     Register-PowerShellOperation
     $services = @{
-        'source.format' = ${function:Format-PowerShellToolSource}; 'source.diagnostics' = ${function:Add-PowerShellToolDiagnostic}; 'source.review' = ${function:Get-PowerShellSourceReview}; 'source.outline' = ${function:Get-PowerShellSourceOutline}; 'source.symbols' = ${function:Get-PowerShellSourceSymbol}; 'source.rename' = ${function:Get-PowerShellSourceRename}
+        'source.format' = ${function:Format-PowerShellToolSource}; 'source.diagnostics' = ${function:Add-PowerShellToolDiagnostic}; 'source.review' = ${function:Get-PowerShellSourceReview}; 'source.outline' = ${function:Get-PowerShellSourceOutline}; 'source.warm' = ${function:Start-PowerShellToolAnalyzerWarmup}; 'source.symbols' = ${function:Get-PowerShellSourceSymbol}; 'source.rename' = ${function:Get-PowerShellSourceRename}
         'command.prepare' = ${function:New-PowerShellToolCommand}; 'command.parameters' = ${function:Get-PowerShellCommandParameter}; 'operation.approve' = ${function:Invoke-PowerShellApproveCommand}
         'command.run'         = {
             param($Tool, $Context, $check, $settings, $options)

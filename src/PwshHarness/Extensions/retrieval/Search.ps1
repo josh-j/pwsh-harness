@@ -6,8 +6,10 @@ function Find-RetrievalTool {
     $arguments = $Request.SearchArguments
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $scope = [IO.Path]::GetRelativePath($Request.ToolRoot, $Request.SearchScope).Replace('\', '/')
+    $listed = $false
     $paths = if ($arguments.mode -ceq 'exact') {
-        @(Get-RetrievalInventory -Root $Request.ToolRoot -Request $Request -Explicit -Scope $scope -IncludeOversized | ForEach-Object Path)
+        $inventory = @(Get-RetrievalInventory -Root $Request.ToolRoot -Request $Request -Explicit -Scope $scope -IncludeOversized)
+        $listed = $inventory.Count -and $inventory[0].Listed; $inventory | ForEach-Object Path
     }
     else {
         $index = Update-RetrievalIndex -Request $Request -BuildBudgetMilliseconds 3000 -MemoryOnly -Scope $scope; $Request.SearchPartial = -not $index.Ready; @($index.Files.psbase.Keys)
@@ -26,28 +28,34 @@ function Find-RetrievalTool {
         }
         $pattern = $arguments.regex ? $Query : [regex]::Escape($Query)
         $regex = [regex]::new($pattern, $options, [TimeSpan]::FromMilliseconds(50))
+        $maxBytes = [Math]::Max(262144, ($Request.PSObject.Properties['Config'] ? [int]$Request.Config.'Agent.MaxFileBytes' : 0))
         $emitted = 0
         foreach ($path in $allowed) {
             if ($watch.ElapsedMilliseconds -gt 5000 -or $emitted -ge 51) {
-                $Request.SearchPartial = $true; break
+                $Request.SearchPartial = $true; $Request | Add-Member NoteProperty SearchStop ($emitted -ge 51 ? 'result limit' : 'time limit') -Force; break
             }
             Invoke-HarnessCheckpoint $Request
             try {
-                & $Request.AllowPath $path
+                # Paths from a Git listing that excluded ignored files skip the per-path Git checks.
+                & $Request.AllowPath $path $listed
             }
             catch {
                 $Request.CancellationToken.ThrowIfCancellationRequested(); $Request.Skipped++; continue
             }
             try {
-                $file = Read-HarnessTextFile (Join-Path $Request.ToolRoot $path) 262144 -NoHardLinks
+                $file = Read-HarnessTextFile (Join-Path $Request.ToolRoot $path) $maxBytes -NoHardLinks
             }
             catch {
                 $Request.CancellationToken.ThrowIfCancellationRequested(); $Request.Skipped++; $Request.SearchPartial = $true; continue
             }
+            # A literal never spans lines, so a file without a match needs no line split.
+            if (-not $arguments.regex -and -not $regex.IsMatch($file.Text)) {
+                continue
+            }
             $lines = $file.Text -split '\r\n|\n|\r'
             for ($i = 0; $i -lt $lines.Count; $i++) {
                 if ($watch.ElapsedMilliseconds -gt 5000 -or $emitted -ge 51) {
-                    $Request.SearchPartial = $true; break
+                    $Request.SearchPartial = $true; $Request | Add-Member NoteProperty SearchStop ($emitted -ge 51 ? 'result limit' : 'time limit') -Force; break
                 }
                 if (-not $regex.IsMatch($lines[$i])) {
                     continue
@@ -73,7 +81,7 @@ function Find-RetrievalTool {
                 }
                 $chunk = New-HarnessChunk -Id ($path + '::match:' + $i) -Path $path -StartLine ($first + 1) -EndLine ($last + 1) -Kind Match -Title $path -Text $text
                 $emitted++
-                @{ Chunk = $chunk; Score = 1; Retriever = ($arguments.regex ? 'Regex' : 'Literal'); Truncated = $truncated }
+                @{ Chunk = $chunk; Score = 1; Retriever = ($arguments.regex ? 'Regex' : 'Literal'); Truncated = $truncated; Listed = $listed }
                 if (-not $arguments.per_line) {
                     break
                 }

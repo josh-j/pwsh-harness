@@ -104,6 +104,26 @@ function Get-PowerShellToolAnalyzerDiagnostic {
         New-HarnessDiagnostic -Source Analyzer -Category Analyzer -Severity Info -Code AnalyzerSkipped -Message ('Changed-source analysis unavailable: ' + $_.Exception.Message)
     }
 }
+function Start-PowerShellToolAnalyzerWarmup {
+    # PSScriptAnalyzer looks up each command name once per process, 0.1-0.2 s for a name outside the loaded modules,
+    # so the first check of a file overran an edit's five-second budget. Analyzing a file when the agent reads it
+    # spends that time while the model writes the edit; the findings are discarded.
+    [CmdletBinding()]
+    param($Tool, [string]$Text)
+    if ([IO.Path]::GetExtension($Tool.Path) -notin @('.ps1', '.psm1') -or -not $Text -or -not (Resolve-PowerShellAnalyzerSetting $Tool.State.Config).Enabled) {
+        return
+    }
+    try {
+        $a = Get-PowerShellAnalyzer $Tool.State.Config $Tool.Context
+        if ($a.Module -and -not $a.Stop -and $a.Pipeline.InvocationStateInfo.State -notin @('Running', 'Stopping')) {
+            Invoke-PowerShellAnalyzer $Text $Tool.State.Config -Context $Tool.Context -NoWait
+        }
+    }
+    catch {
+        $Tool.Context.CancellationToken.ThrowIfCancellationRequested()
+        Write-Verbose "Analyzer warm-up skipped: $($_.Exception.Message)"
+    }
+}
 function Get-PowerShellHereStringDiagnostic {
     # A here-string runs to the first terminator at the start of a line. A line inside it that looks like the terminator
     # means the string swallowed the code after it, usually because the line before ends with an escaping backtick.

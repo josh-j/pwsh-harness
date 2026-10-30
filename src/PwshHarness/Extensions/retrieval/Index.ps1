@@ -295,7 +295,7 @@ function Get-RetrievalInventory {
         }
         # Include stat data as well as blob identity, so uncommitted edits are refreshed too.
         $key = "$($revision[$name]):$($file.LastWriteTimeUtc.Ticks):$($file.Length)"
-        [pscustomobject]@{ Path = $Prefix + $name; FullPath = $full; Revision = $key; Root = $Root }
+        [pscustomobject]@{ Path = $Prefix + $name; FullPath = $full; Revision = $key; Root = $Root; Listed = $null -ne $tracked }
     }
 }
 function Get-RetrievalIndexIdentity {

@@ -314,6 +314,8 @@ function Read-AgentToolData {
     $Tool.Data = @{ next_content_offset = $contentOffset + [Text.Encoding]::UTF8.GetByteCount($text.Substring(0, $next)); path = $arguments.path; sha256 = $Tool.File.Hash; total_lines = $total; start_line = $firstLine; requested_lines = $arguments.line_count
         total_bytes = $Tool.File.Bytes.Length; returned_lines = $range.Lines; text = $excerpt.Text; partial_last_line = $range.Partial; truncated = $excerpt.Truncated -or ($firstLine + $selected.Count -le $total)
     }
+    # The file's language may prepare its checks now, so a later edit's checks fit their budget.
+    $null = Invoke-HarnessService -Harness $script:Harness -Name 'source.warm' -Arguments @($Tool, $Tool.File.Text)
 }
 function New-AgentToolFileChange {
     [CmdletBinding()]
