@@ -53,7 +53,9 @@ function Get-RunPolicyTaskKind {
     [OutputType([string])]
     param([Parameter(Mandatory)]$View)
     $prompt = [string]$View.State.LastPrompt
-    if ($prompt -match '(?i)\b(?:fix|implement|add|change|update|refactor|rename|remove|delete|create|write|make|build|repair|convert|migrate|replace)\b') {
+    # "Do not change any files" names a change verb but forbids changes.
+    $readOnly = $prompt -match "(?i)\b(?:do not|don't|never|without)\s+(?:chang|modif|edit|touch|writ)"
+    if (-not $readOnly -and $prompt -match '(?i)\b(?:fix|implement|add|change|update|refactor|rename|remove|delete|create|write|make|build|repair|convert|migrate|replace)\b') {
         'fix'
     }
     elseif ($prompt -match '(?i)\b(?:bugs?|defects?|issues?|review|inspect)\b') {
@@ -96,6 +98,18 @@ function Get-RunPolicyKeepGoingMessage {
     $View.Memory.KeepGoing = $true
     @{ Kind = 'KeepGoing'; Text = 'You did not call any tools. You should continue calling tools until you have completed your task. If the task is complete, provide the final answer. Remember that the user cannot answer any questions.' }
 }
+function Get-RunPolicyUnchangedMessage {
+    # An unattended change request that answers without changing a file is asked once to make the change: a live run
+    # ended on "next I would add it" with nothing done, and no one could reply to the proposal.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)]$View)
+    if (-not $View.Headless -or $View.Memory.Unchanged -or $View.Progress.Changes -or [string]::IsNullOrWhiteSpace($View.Answer) -or (Get-RunPolicyTaskKind $View) -cne 'fix') {
+        return
+    }
+    $View.Memory.Unchanged = $true
+    @{ Kind = 'Unchanged'; Text = "<EPHEMERAL_MESSAGE>`nThe user asked for a change and cannot answer questions, but this run has not changed any file. Make the change now and verify it. If no change is needed, or a command already made it, say so in your final answer.`n</EPHEMERAL_MESSAGE>" }
+}
 function Invoke-RunPolicySteering {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Moment, [Parameter(Mandatory)]$View)
@@ -106,5 +120,6 @@ function Invoke-RunPolicySteering {
     }
     elseif ($Moment -ceq 'Completing') {
         Get-RunPolicyKeepGoingMessage $View
+        Get-RunPolicyUnchangedMessage $View
     }
 }

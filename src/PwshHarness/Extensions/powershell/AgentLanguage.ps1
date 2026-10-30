@@ -107,7 +107,7 @@ function Get-PowerShellToolAnalyzerDiagnostic {
 function Start-PowerShellToolAnalyzerWarmup {
     # PSScriptAnalyzer looks up each command name once per process, 0.1-0.2 s for a name outside the loaded modules,
     # so the first check of a file overran an edit's five-second budget. Analyzing a file when the agent reads it
-    # spends that time while the model writes the edit; the findings are discarded.
+    # spends that time while the model writes the edit, in a runspace no check waits for.
     [CmdletBinding()]
     param($Tool, [string]$Text)
     if ([IO.Path]::GetExtension($Tool.Path) -notin @('.ps1', '.psm1') -or -not $Text -or -not (Resolve-PowerShellAnalyzerSetting $Tool.State.Config).Enabled) {
@@ -115,8 +115,8 @@ function Start-PowerShellToolAnalyzerWarmup {
     }
     try {
         $a = Get-PowerShellAnalyzer $Tool.State.Config $Tool.Context
-        if ($a.Module -and -not $a.Stop -and $a.Pipeline.InvocationStateInfo.State -notin @('Running', 'Stopping')) {
-            Invoke-PowerShellAnalyzer $Text $Tool.State.Config -Context $Tool.Context -NoWait
+        if ($a.Module) {
+            $null = Start-PowerShellAnalyzerWarmup $Text $Tool.State.Config $a
         }
     }
     catch {

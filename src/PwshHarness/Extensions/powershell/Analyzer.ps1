@@ -1,5 +1,6 @@
 #Requires -Version 7.6
 $script:PackAnalyzer = $null
+$script:PackAnalyzerWarmup = $null
 $script:PackAnalyzerSettings = @{}
 . (Join-Path $PSScriptRoot 'EditorDiscovery.ps1')
 function Read-PowerShellAnalyzerManifest {
@@ -50,7 +51,7 @@ function Get-PowerShellAnalyzer {
     [CmdletBinding()]
     param($Config, $Context)
     if ($null -eq $script:PackAnalyzer) {
-        $script:PackAnalyzer = [pscustomobject]@{ Source = 'unavailable'; Path = ''; Version = ''; Module = $null; Runspace = $null; Pipeline = $null; Stop = $null; Pending = $null; Warm = $null; FailedAsync = $false; Error = $null }
+        $script:PackAnalyzer = [pscustomobject]@{ Source = 'unavailable'; Path = ''; Version = ''; Module = $null; Runspace = $null; Pipeline = $null; Stop = $null; Pending = $null; FailedAsync = $false; Error = $null }
         try {
             $candidate = Find-PowerShellAnalyzer $Config
             if ($candidate) {
@@ -78,7 +79,7 @@ function Get-PowerShellAnalyzer {
 }
 function Invoke-PowerShellAnalyzerPipeline {
     [CmdletBinding()]
-    param($Analyzer, [ValidateSet('Import-Module', 'Invoke-ScriptAnalyzer', 'Invoke-Formatter')][string]$Command, [hashtable]$Parameters, $Context, [int]$TimeoutMilliseconds = 5000, [switch]$NoWait)
+    param($Analyzer, [ValidateSet('Import-Module', 'Invoke-ScriptAnalyzer', 'Invoke-Formatter')][string]$Command, [hashtable]$Parameters, $Context, [int]$TimeoutMilliseconds = 5000)
     $p = $Analyzer.Pipeline
     if ($p.InvocationStateInfo.State -in @('Running', 'Stopping') -and $Context) {
         # Queue behind earlier work, such as the stop after a timeout, instead of failing this check.
@@ -106,28 +107,12 @@ function Invoke-PowerShellAnalyzerPipeline {
             $Analyzer.Stop = $null; $Analyzer.Pending = $null
         }
     }
-    if ($Analyzer.Warm) {
-        # A warm-up's findings are discarded; only its command lookups are kept.
-        try {
-            $null = $p.EndInvoke($Analyzer.Warm)
-        }
-        catch {
-            Write-Verbose "Discarded a failed analyzer warm-up: $($_.Exception.Message)"
-        }
-        finally {
-            $Analyzer.FailedAsync = $p.InvocationStateInfo.State -eq 'Failed'; $Analyzer.Warm = $null
-        }
-    }
     if ($Analyzer.FailedAsync) {
         $p.Dispose(); $p = [PowerShell]::Create(); $p.Runspace = $Analyzer.Runspace
         $Analyzer.Pipeline = $p; $Analyzer.FailedAsync = $false
     }
     $p.Commands.Clear(); $p.Streams.ClearStreams()
     $null = $p.AddCommand(($Command -eq 'Import-Module' ? 'Microsoft.PowerShell.Core\Import-Module' : "PSScriptAnalyzer\$Command")).AddParameters($Parameters)
-    if ($NoWait) {
-        $Analyzer.Warm = $p.BeginInvoke()
-        return
-    }
     if ($Context) {
         $pending = $p.BeginInvoke(); $watch = $script:Harness.Clock.Elapsed()
         try {
@@ -266,7 +251,7 @@ function Resolve-PowerShellAnalyzerSetting {
 }
 function Invoke-PowerShellAnalyzer {
     [CmdletBinding()]
-    param([string]$Code, $Config, [string[]]$AnalyzerRules, [switch]$Format, $Context, [int[]]$Range, [int]$TimeoutMilliseconds = 5000, [switch]$NoWait)
+    param([string]$Code, $Config, [string[]]$AnalyzerRules, [switch]$Format, $Context, [int[]]$Range, [int]$TimeoutMilliseconds = 5000)
     $s = Resolve-PowerShellAnalyzerSetting $Config
     if (-not ($Format ? $s.Format : $s.Enabled)) {
         return
@@ -287,8 +272,8 @@ function Invoke-PowerShellAnalyzer {
         if ($AnalyzerRules.Count) {
             $p.IncludeRule = $AnalyzerRules
         }
-        $result = Invoke-PowerShellAnalyzerPipeline -Analyzer $a -Command ($Format ? 'Invoke-Formatter' : 'Invoke-ScriptAnalyzer') -Parameters $p -Context $Context -TimeoutMilliseconds $TimeoutMilliseconds -NoWait:$NoWait
-        if ($Format -or $NoWait) {
+        $result = Invoke-PowerShellAnalyzerPipeline -Analyzer $a -Command ($Format ? 'Invoke-Formatter' : 'Invoke-ScriptAnalyzer') -Parameters $p -Context $Context -TimeoutMilliseconds $TimeoutMilliseconds
+        if ($Format) {
             return $result
         }
         # A record's Line and Column are script properties from the analyzer runspace's type data, so they read as
@@ -327,9 +312,53 @@ function Invoke-PowerShellFormatterProcessor {
         }
     }
 }
+function Start-PowerShellAnalyzerWarmup {
+    # PSScriptAnalyzer caches command lookups for the whole process, so analyzing in a runspace of its own warms them
+    # without making a check or a format queue behind it: a full-file warm-up in the shared runspace made the next
+    # edit's formatter give up after five seconds. One warm-up runs at a time and its findings are discarded.
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string]$Code, $Config, $Analyzer)
+    $w = $script:PackAnalyzerWarmup
+    if ($w -and -not $w.Pending.IsCompleted) {
+        return $false
+    }
+    if (-not $w) {
+        $w = [pscustomobject]@{ Runspace = [runspacefactory]::CreateRunspace(); Pipeline = [powershell]::Create(); Pending = $null }
+        $w.Runspace.Open(); $w.Pipeline.Runspace = $w.Runspace
+        $script:PackAnalyzerWarmup = $w
+    }
+    else {
+        try {
+            $null = $w.Pipeline.EndInvoke($w.Pending)
+        }
+        catch {
+            Write-Verbose "Discarded a failed analyzer warm-up: $($_.Exception.Message)"
+        }
+    }
+    $parameters = @{ ScriptDefinition = $Code; ErrorAction = 'SilentlyContinue' }
+    $settings = (Resolve-PowerShellAnalyzerSetting $Config).Settings
+    if ($null -ne $settings) {
+        $parameters.Settings = $settings
+    }
+    $p = $w.Pipeline; $p.Commands.Clear(); $p.Streams.ClearStreams()
+    # One statement: disposing a running multi-statement pipeline crashed the process from a thread-pool thread.
+    # Import-Module returns at once after the first warm-up has loaded the module.
+    $null = $p.AddScript('param($Path, $Parameters) Microsoft.PowerShell.Core\Import-Module -Name $Path -Scope Local -ErrorAction Stop; PSScriptAnalyzer\Invoke-ScriptAnalyzer @Parameters').AddArgument($Analyzer.Path).AddArgument($parameters)
+    $w.Pending = $p.BeginInvoke()
+    $true
+}
 function Clear-PowerShellAnalyzer {
     [CmdletBinding()]
     param()
+    $warmup = $script:PackAnalyzerWarmup
+    if ($warmup -and -not $warmup.Pending.IsCompleted) {
+        # Stop before disposing: a pipeline disposed while it runs can fault on a thread-pool thread.
+        $warmup.Pipeline.Stop()
+    }
+    $null = $warmup?.Pipeline?.Dispose()
+    $null = $warmup?.Runspace?.Dispose()
+    $script:PackAnalyzerWarmup = $null
     $null = ${script:PackAnalyzer}?.Pipeline?.Dispose()
     $null = ${script:PackAnalyzer}?.Runspace?.Dispose()
     $script:PackAnalyzer = $null; $script:PackAnalyzerSettings.Clear()
