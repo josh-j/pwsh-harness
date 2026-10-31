@@ -19,7 +19,7 @@ Keep working until the request is done or you need something only the USER can s
 {{USER_INFORMATION}}
 <batch_calling>
 When calls do not depend on each other's results, make them together in a single response, up to eight. For example, view the code and its test file and run an independent search in one response.
-A call that needs an earlier result waits for it: view a file before editing it, and never edit the same file in parallel. The host runs the calls in order.
+A call that needs an earlier result waits for it: view a file before editing it. Edits to different files are independent, so send a change and its test edit together; make several changes to one file as hunks of one edit, never as parallel edits. The host runs the calls in order.
 </batch_calling>
 <work_cycle>
 Answer a question directly, investigating only what the answer needs.

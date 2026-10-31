@@ -50,6 +50,24 @@ function Get-RunPolicyBatchMessage {
     $View.Memory.BatchNudged = $true
     @{ Kind = 'Batch'; Text = "<EPHEMERAL_MESSAGE>`nThe last $($View.SingleCalls) steps each made one tool call. Make independent calls together in one step (for example several reads, or git status with git log); each step resends the whole conversation.`n</EPHEMERAL_MESSAGE>" }
 }
+function Get-RunPolicyEditBatchMessage {
+    # Edits to different files are independent, yet Luna runs sent 1.1 edits per editing step while Codex patched a
+    # change and its test together (2026-10-31); the batching reminder exempts edits, so lone edits get this note.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)]$View)
+    $memory = $View.Memory
+    if ($memory.EditsNoted -or $memory.EditStep -eq $View.Step) {
+        return
+    }
+    $memory.EditStep = $View.Step
+    $memory.LoneEdits = ($View.LastCalls -join ',') -cin @('edit', 'write') ? [int]$memory.LoneEdits + 1 : 0
+    if ($memory.LoneEdits -lt 2) {
+        return
+    }
+    $memory.EditsNoted = $true
+    @{ Kind = 'EditBatch'; Text = "<EPHEMERAL_MESSAGE>`nThe last two steps each made one edit, and each step resends the whole conversation. When you know several changes, send them in one step: edits to different files together, and several changes to one file as hunks of one edit.`n</EPHEMERAL_MESSAGE>" }
+}
 function Get-RunPolicyLonePlanMessage {
     # A step that only updates the plan costs a whole request; Luna runs spent about one step in nine that way.
     [CmdletBinding()]
@@ -138,6 +156,7 @@ function Invoke-RunPolicySteering {
     if ($Moment -ceq 'BeforeRequest') {
         Get-RunPolicyCheckInMessage $View
         Get-RunPolicyBatchMessage $View
+        Get-RunPolicyEditBatchMessage $View
         Get-RunPolicyLonePlanMessage $View
         Get-RunPolicyStallMessage $View
     }
