@@ -59,8 +59,11 @@ function ConvertFrom-AgentToolArgument {
             if ($value.ValueKind -eq 'Number' -and (-not $value.TryGetInt32([ref]$decoded) -or $decoded -lt $rule.Min -or $decoded -gt $rule.Max)) {
                 throw 'Invalid tool line bound.'
             }
-            if (($decoded -is [string] -and $decoded.Contains([char]0)) -or ($rule.Pattern -and $decoded -cnotmatch $rule.Pattern)) {
-                throw 'Invalid tool string or SHA-256.'
+            if ($decoded -is [string] -and $decoded.Contains([char]0)) {
+                throw 'Invalid tool string.'
+            }
+            if ($rule.Pattern -and $decoded -cnotmatch $rule.Pattern) {
+                throw "$($field.Name) has $($decoded.Length) characters; it must be the 64 lowercase hexadecimal characters of sha256 from the file's latest read. Omit it when this run read the file in an earlier step."
             }
             $arguments[$field.Name] = $decoded
         }
@@ -321,8 +324,9 @@ function Read-AgentToolData {
     # The file's language may prepare its checks now, so a later edit's checks fit their budget.
     $null = Invoke-HarnessService -Harness $script:Harness -Name 'source.warm' -Arguments @($Tool, $Tool.File.Text)
 }
-function Get-AgentEditEscapeHint {
-    # Models often escape backslashes twice in JSON; a before text that matches once they are halved says so.
+function Get-AgentEditMissHint {
+    # Says why a before text missed: backslashes escaped twice in JSON, a match outside the given lines, or the first
+    # line that differs from the file, so a retry fixes that line instead of resending the same text.
     [CmdletBinding()]
     param([string]$Text, [string]$Before)
     for ($candidate = $Before; $candidate.Contains('\\'); ) {
@@ -331,7 +335,25 @@ function Get-AgentEditEscapeHint {
             return ' It matches once each doubled backslash is single: the arguments escaped backslashes twice. Send before and after with the backslashes the file has (one backslash is \\ in JSON).'
         }
     }
-    ''
+    $newline = '\r\n|\n|\r'
+    $at = $Text.IndexOf($Before, [StringComparison]::Ordinal)
+    if ($at -ge 0) {
+        return " It matches at line $(1 + [regex]::Matches($Text.Substring(0, $at), $newline).Count), outside the given lines."
+    }
+    # The longest prefix the file contains ends where the before text first differs.
+    $low = 0; $high = $Before.Length
+    while ($low -lt $high) {
+        $middle = $high - [Math]::Floor(($high - $low) / 2)
+        $found = $Text.Contains($Before.Substring(0, $middle), [StringComparison]::Ordinal)
+        $low = $found ? $middle : $low; $high = $found ? $high : $middle - 1
+    }
+    $line = [regex]::Matches($Before.Substring(0, $low), $newline).Count
+    if (-not $line) {
+        return ''
+    }
+    $fileLine = 1 + [regex]::Matches($Text.Substring(0, $Text.IndexOf($Before.Substring(0, $low), [StringComparison]::Ordinal) + $low), $newline).Count
+    $sent = @($Before -split $newline)
+    " Before line $($line + 1) of $($sent.Count) differs from file line ${fileLine}; the file has: $(@($Text -split $newline)[$fileLine - 1]) -- the before text has: $($sent[$line])"
 }
 function New-AgentToolFileChange {
     [CmdletBinding()]
@@ -391,7 +413,7 @@ function New-AgentToolFileChange {
                     $count++
                 }
                 if ($count -ne 1) {
-                    throw "Edit hunk $number does not match exactly once in lines $($hunk.start_line)-$($hunk.end_line), and its before text appears $count times after the previous hunk. Copy it exactly from read, without line-number prefixes.$(Get-AgentEditEscapeHint $file.Text $hunk.before)"
+                    throw "Edit hunk $number does not match exactly once in lines $($hunk.start_line)-$($hunk.end_line), and its before text appears $count times after the previous hunk. Copy it exactly from read, without line-number prefixes.$($count ? '' : (Get-AgentEditMissHint $file.Text $hunk.before))"
                 }
             }
             $null = $builder.Append($file.Text, $cursor, $offset - $cursor).Append($hunk.after)
@@ -416,7 +438,7 @@ function New-AgentToolFileChange {
         $region = $file.Text.Substring($start, $end - $start)
         $match = $region.IndexOf($before, [StringComparison]::Ordinal)
         if ($match -lt 0) {
-            throw ('Edit target not found. Copy the exact text and whitespace from read, without the line-number prefix.' + (Get-AgentEditEscapeHint $file.Text $before))
+            throw ('Edit target not found. Copy the exact text and whitespace from read, without the line-number prefix.' + (Get-AgentEditMissHint $file.Text $before))
         }
         $count = 0
         for ($index = $match; $index -ge 0; $index = $region.IndexOf($before, $index + 1, [StringComparison]::Ordinal)) {
