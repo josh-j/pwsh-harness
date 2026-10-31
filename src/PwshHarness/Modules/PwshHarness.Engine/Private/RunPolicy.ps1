@@ -35,6 +35,8 @@ function Invoke-EngineRunPolicy {
         Step              = $Loop.Steps
         ToolCalls         = $Loop.ToolCalls
         SingleCalls       = $Loop.SingleCalls
+        # Tool names of the latest step's calls, in order.
+        LastCalls         = [string[]]@($Loop['LastCalls'])
         StepsRemaining    = $settings.'Agent.MaxSteps' - $Loop.Steps
         SecondsRemaining  = ($Loop.Run.DeadlineUtc - $Store.Clock.Now()).TotalSeconds
         Headless          = [bool]$settings.'Agent.Headless'

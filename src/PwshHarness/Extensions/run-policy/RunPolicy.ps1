@@ -50,6 +50,17 @@ function Get-RunPolicyBatchMessage {
     $View.Memory.BatchNudged = $true
     @{ Kind = 'Batch'; Text = "<EPHEMERAL_MESSAGE>`nThe last $($View.SingleCalls) steps each made one tool call. Make independent calls together in one step (for example several reads, or git status with git log); each step resends the whole conversation.`n</EPHEMERAL_MESSAGE>" }
 }
+function Get-RunPolicyLonePlanMessage {
+    # A step that only updates the plan costs a whole request; Luna runs spent about one step in nine that way.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)]$View)
+    if ($View.Memory.LonePlanNoted -or ($View.LastCalls -join ',') -cne 'update_plan') {
+        return
+    }
+    $View.Memory.LonePlanNoted = $true
+    @{ Kind = 'LonePlan'; Text = "<EPHEMERAL_MESSAGE>`nThat step only updated the plan, and each step resends the whole conversation. Send update_plan in the same step as your next tool call, and let your final answer close the plan rather than a separate update.`n</EPHEMERAL_MESSAGE>" }
+}
 function Get-RunPolicyTaskKind {
     # The run's task, coarsely, from the user's prompt: review (find or review defects without fixing them), fix
     # (change something) or question. It tunes thresholds only; it never changes what the run may do.
@@ -127,6 +138,7 @@ function Invoke-RunPolicySteering {
     if ($Moment -ceq 'BeforeRequest') {
         Get-RunPolicyCheckInMessage $View
         Get-RunPolicyBatchMessage $View
+        Get-RunPolicyLonePlanMessage $View
         Get-RunPolicyStallMessage $View
     }
     elseif ($Moment -ceq 'Completing') {

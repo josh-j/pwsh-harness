@@ -841,6 +841,7 @@ function Invoke-EngineAgentContinuation {
             }
             $loop.Calls = $validated
             $loop.SingleCalls = $validated.Count -eq 1 ? $loop.SingleCalls + 1 : 0
+            $loop.LastCalls = [string[]]@($validated | ForEach-Object Name)
             try {
                 Add-EngineTranscript -State $State -Role 'agent-calls' -Text $turn.Response.Text -Metadata @{ RunId = $loop.Run.Id; Calls = $validated }
                 foreach ($errorResult in $loop.CallErrors.Values) {
@@ -1204,7 +1205,7 @@ function Send-EngineAgent {
         $loop = @{
             Tools = (Get-EngineAgentToolSnapshot $Store); Schemas = $null; Clock = $Store.Clock
             Lease = $ticket.Lease; Run = $ticket.Run; Turn = $turn; Settings = $record.Lease.Settings
-            Config = ($State.Config | ConvertTo-Json -Depth 30 -Compress); Steps = 0; ToolCalls = 0; SingleCalls = 0; Policies = (Get-EngineRunPolicySnapshot $Store); PolicyState = @{}
+            Config = ($State.Config | ConvertTo-Json -Depth 30 -Compress); Steps = 0; ToolCalls = 0; SingleCalls = 0; LastCalls = [string[]]@(); Policies = (Get-EngineRunPolicySnapshot $Store); PolicyState = @{}
             ChargedTokens = 0L; Reservation = 0L; StopReason = ''; Calls = @(); Index = 0; Advancing = $true
             FailureDetail = ''; StreamRetries = 0; ToolRepairs = 0; CallErrors = @{}; Friction = (New-EngineAgentFriction)
             Progress = @{ Evidence = 0; Changes = 0; Passed = 0; StallSteps = 0; LastChanged = $false; LastStep = ''; StepEvidence = $false; StepChanged = $false; StepFailed = $false; Seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
