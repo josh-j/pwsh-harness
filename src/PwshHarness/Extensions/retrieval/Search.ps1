@@ -5,7 +5,9 @@ function Find-RetrievalTool {
     $Request.CancellationToken.ThrowIfCancellationRequested()
     $arguments = $Request.SearchArguments
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $scope = [IO.Path]::GetRelativePath($Request.ToolRoot, $Request.SearchScope).Replace('\', '/')
+    $scopes = @($Request.SearchScope | ForEach-Object { [IO.Path]::GetRelativePath($Request.ToolRoot, $_).Replace('\', '/') })
+    # Several scopes share one inventory of the whole context, filtered by each.
+    $scope = $scopes.Count -eq 1 ? $scopes[0] : '.'
     $listed = $false
     $paths = if ($arguments.mode -ceq 'exact') {
         $inventory = @(Get-RetrievalInventory -Root $Request.ToolRoot -Request $Request -Explicit -Scope $scope -IncludeOversized)
@@ -14,12 +16,12 @@ function Find-RetrievalTool {
     else {
         $index = Update-RetrievalIndex -Request $Request -BuildBudgetMilliseconds 3000 -MemoryOnly -Scope $scope; $Request.SearchPartial = -not $index.Ready; @($index.Files.psbase.Keys)
     }
-    $prefix = $scope.TrimEnd('/') + '/'; $comparison = Get-HarnessPathComparison
+    $comparison = Get-HarnessPathComparison
     # Filter with literal paths rather than passing a provider name from model input. Include patterns take the paths'
     # slash form, so a Windows-style src\*.ps1 still matches; -like escapes with a backtick, never a backslash.
     $allowed = @($paths | Sort-Object -CaseSensitive | Where-Object {
             $path = $_
-            (Test-RetrievalIncludedPath -Request $Request -Path $path -Root $Request.ToolRoot) -and ($scope -ceq '.' -or $path.Equals($scope, $comparison) -or $path.StartsWith($prefix, $comparison)) -and @($arguments.includes -split ';' | Where-Object { $_ -and $path -like $_.Replace('\', '/') }).Count
+            (Test-RetrievalIncludedPath -Request $Request -Path $path -Root $Request.ToolRoot) -and ($scopes -ccontains '.' -or @($scopes | Where-Object { $path.Equals($_, $comparison) -or $path.StartsWith($_.TrimEnd('/') + '/', $comparison) }).Count) -and @($arguments.includes -split ';' | Where-Object { $_ -and $path -like $_.Replace('\', '/') }).Count
         })
     if ($arguments.mode -ceq 'exact') {
         $options = [Text.RegularExpressions.RegexOptions]::CultureInvariant

@@ -6,7 +6,7 @@ function Get-AgentSearchSchema {
     if ($Config.'Agent.CodeSearchExact' -or $Config.'Agent.CodeSearchRanked' -or $Config.'Agent.CodeSearchHybrid') {
         # The canonical schema is installed once; the dispatcher checks the enabled mode.
         @{ Name = 'search'; Description = $script:PackTools.search.Description; Parameters = @{ type = 'object'; additionalProperties = $false; required = @('query'); properties = @{
-                    query = @{ type = 'string'; description = 'Literal text; a .NET regular expression when regex is true; keywords in ranked mode.' }; scope = @{ type = 'string'; description = 'One context-relative file or directory; defaults to the whole context. Use includes for several patterns.' }
+                    query = @{ type = 'string'; description = 'Literal text; a .NET regular expression when regex is true; keywords in ranked mode.' }; scope = @{ type = 'string'; description = 'A context-relative file or directory, or several separated by ;; defaults to the whole context. Use includes for name patterns.' }
                     mode = @{ type = 'string'; enum = @('exact', 'ranked'); description = 'exact (default) or ranked.' }; regex = @{ type = 'boolean'; description = 'Treat query as a regular expression.' }; ignore_case = @{ type = 'boolean'; description = 'Match case-insensitively.' }
                     includes = @{ type = 'string'; description = 'Semicolon-separated path wildcards such as *.ps1;*.psm1; defaults to *.' }; per_line = @{ type = 'boolean'; description = 'Return every matching line (default) or only the first match per file.' }
                 }
@@ -29,11 +29,18 @@ function Invoke-AgentCodeSearch {
         throw 'Hybrid search requires an explicit embedding model and positive input price.'
     }
     $root = Get-HarnessOperationDirectory $Context.State
-    # A joined list such as 'tests;src/x' would otherwise fail as a missing folder without naming includes.
-    $scope = $arguments.scope -ceq '.' ? $root : ($arguments.scope.Contains(';') ? '' : (Resolve-AgentToolPath -State $Context.State -Root $root -Path $arguments.scope -Context $Context))
-    if (-not $scope -or -not [IO.Path]::Exists($scope)) {
-        # A missing scope would read as an exhaustive search with no matches.
-        throw "Search scope '$($arguments.scope)' does not exist. Scope takes one file or folder; use includes for several patterns such as dir/*.ps1;tests/*.ps1."
+    # Models join several files or folders with ';' as they do includes; search them together, each one checked.
+    $parts = @($arguments.scope -split ';' | ForEach-Object Trim | Where-Object { $_ })
+    $scope = @(foreach ($part in $parts) {
+            $full = $part -ceq '.' ? $root : (Resolve-AgentToolPath -State $Context.State -Root $root -Path $part -Context $Context)
+            if (-not [IO.Path]::Exists($full)) {
+                # A missing scope would read as an exhaustive search with no matches.
+                throw "Search scope '$part' does not exist. Scope takes files or folders separated by ';'; use includes for name patterns such as dir/*.ps1;tests/*.ps1."
+            }
+            $full
+        })
+    if (-not $scope.Count) {
+        throw 'Search scope names no file or folder.'
     }
     $control = $script:Harness.OperationControl; $state = $Context.State
     foreach ($value in $arguments.Values) {

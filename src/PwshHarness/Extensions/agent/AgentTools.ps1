@@ -32,6 +32,10 @@ function ConvertFrom-AgentToolArgument {
         }
         $arguments = @{}
         foreach ($field in $document.RootElement.EnumerateObject()) {
+            if ($field.Name -cnotin @($schema.Keys) -and $script:PackTools[$Name].Ignored -and $field.Name -imatch $script:PackTools[$Name].Ignored) {
+                # A limit the harness owns, such as the command timeout or output retention: accepted and ignored.
+                continue
+            }
             if ($field.Name -cnotin @($schema.Keys) -or $arguments.ContainsKey($field.Name)) {
                 throw (Get-AgentArgumentError -Tool $Name -Field $field.Name -Accepted @($schema.Keys))
             }
@@ -317,6 +321,18 @@ function Read-AgentToolData {
     # The file's language may prepare its checks now, so a later edit's checks fit their budget.
     $null = Invoke-HarnessService -Harness $script:Harness -Name 'source.warm' -Arguments @($Tool, $Tool.File.Text)
 }
+function Get-AgentEditEscapeHint {
+    # Models often escape backslashes twice in JSON; a before text that matches once they are halved says so.
+    [CmdletBinding()]
+    param([string]$Text, [string]$Before)
+    for ($candidate = $Before; $candidate.Contains('\\'); ) {
+        $candidate = $candidate.Replace('\\', '\')
+        if ($Text.Contains($candidate, [StringComparison]::Ordinal)) {
+            return ' It matches once each doubled backslash is single: the arguments escaped backslashes twice. Send before and after with the backslashes the file has (one backslash is \\ in JSON).'
+        }
+    }
+    ''
+}
 function New-AgentToolFileChange {
     [CmdletBinding()]
     param($Tool)
@@ -370,7 +386,7 @@ function New-AgentToolFileChange {
                     $count++
                 }
                 if ($count -ne 1) {
-                    throw "Edit hunk $number does not match exactly once in lines $($hunk.start_line)-$($hunk.end_line), and its before text appears $count times after the previous hunk. Copy it exactly from read, without line-number prefixes."
+                    throw "Edit hunk $number does not match exactly once in lines $($hunk.start_line)-$($hunk.end_line), and its before text appears $count times after the previous hunk. Copy it exactly from read, without line-number prefixes.$(Get-AgentEditEscapeHint $file.Text $hunk.before)"
                 }
             }
             $null = $builder.Append($file.Text, $cursor, $offset - $cursor).Append($hunk.after)
@@ -393,7 +409,7 @@ function New-AgentToolFileChange {
         $region = $file.Text.Substring($start, $end - $start)
         $match = $region.IndexOf($before, [StringComparison]::Ordinal)
         if ($match -lt 0) {
-            throw 'Edit target not found. Copy the exact text and whitespace from read, without the line-number prefix.'
+            throw ('Edit target not found. Copy the exact text and whitespace from read, without the line-number prefix.' + (Get-AgentEditEscapeHint $file.Text $before))
         }
         $count = 0
         for ($index = $match; $index -ge 0; $index = $region.IndexOf($before, $index + 1, [StringComparison]::Ordinal)) {
@@ -746,7 +762,7 @@ $script:PackTools = @{
     read  = @{ Description = "Read UTF-8 text with numbered lines and whole-file sha256; remove the N: prefix before editing.`nDefault 800 lines, bounded by Agent.MaxReadBytes. Read small files whole. Truncation names the next start_line; skill:<name> loads listed guidance."; Schema = @{ path = (@{} + $pathRule); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'First line, inclusive; defaults to 1.' }); line_count = @{ Kind = 'Number'; Min = 1; Max = 2000; Default = 800; Description = 'Requested line count, 1-2000; defaults to 800.' } }; Prepare = ${function:Read-AgentToolData}; Role = 'tool-read' }
     write = @{ Description = "Create a UTF-8 file with a null hash, or replace an entire existing file with its matching hash. Parents must exist.`nPrefer edit for partial changes. Returns hashes, bytes and available diagnostics."; Schema = @{ path = $pathRule; text = $string; expected_sha256 = (@{} + $hash + @{ Nullable = $true; Description = 'Existing file hash, or null for create-only. Required for write.' }) }; Prepare = ${function:New-AgentToolFileChange}; Execute = ${function:Invoke-AgentToolFileChange}; Role = 'tool-result' }
     edit  = @{ Description = "Edit one file with one ordinal before match (optionally anchored), or 1-64 ordered nonoverlapping original-line hunks; each target must match once. One atomic change. Read first.`nOmitted expected_sha256 uses this run's observed hash; changed or unread files fail. Wait for each result before changing this file again. Returns hunks, hash and diagnostics."; Schema = @{ path = $pathRule; before = @{ Kind = 'String'; Min = 1; Description = 'Exact nonempty source text, unique within the optional line anchors.' }; after = $string; expected_sha256 = (@{} + $hash + @{ Optional = $true; Description = 'Optional after read in this run; explicit null is invalid. Stale files fail.' }); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'Optional inclusive first line of the matching region.' }); end_line = (@{} + $lineRule + @{ Default = [int]::MaxValue; Description = 'Optional inclusive last line of the matching region.' }) }; Prepare = ${function:New-AgentToolFileChange}; Execute = ${function:Invoke-AgentToolFileChange}; Edit = $true; Role = 'tool-result' }
-    pwsh  = @{ Description = "Run PowerShell in the context directory to search, build, test and inspect files. Each call starts a new pwsh process; run code directly, not through pwsh -Command. Unhandled cmdlet errors stop execution; handle expected failures explicitly. Check exit codes and stderr.`nRecursive search: Get-ChildItem -Recurse -File -Filter *.ps1 | Select-String -Pattern ...; ** is not recursive. Large output retains the head and tail; narrow commands to focus it."; Schema = @{ command = @{ Kind = 'String'; Min = 1; Max = 65536; Nonblank = $true; Description = 'Exact PowerShell source. Prefer bounded text output and focused checks.' } }; Prepare = ${function:New-AgentToolCommand}; Execute = ${function:Invoke-AgentToolProcess}; Role = 'tool-result' }
+    pwsh  = @{ Description = "Run PowerShell in the context directory to search, build, test and inspect files. Each call starts a new pwsh process; run code directly, not through pwsh -Command. Unhandled cmdlet errors stop execution; handle expected failures explicitly. Check exit codes and stderr.`nRecursive search: Get-ChildItem -Recurse -File -Filter *.ps1 | Select-String -Pattern ...; ** is not recursive. Large output retains the head and tail; narrow commands to focus it. The harness sets time and output limits, so limit arguments such as timeout_ms are ignored."; Ignored = '^(?:max|limit|timeout)[A-Za-z_]{0,40}$'; Schema = @{ command = @{ Kind = 'String'; Min = 1; Max = 65536; Nonblank = $true; Description = 'Exact PowerShell source. Prefer bounded text output and focused checks.' } }; Prepare = ${function:New-AgentToolCommand}; Execute = ${function:Invoke-AgentToolProcess}; Role = 'tool-result' }
 }
 $script:PackTools.search = @{ Description = "Search permitted workspace files with bounded numbered matches; prefer it to shell searches.`nExact/regex mode is on unless the user disables it; ranked mode must be enabled by the user."; Schema = @{ query = @{ Kind = 'String'; Min = 1; Max = 4096; Nonblank = $true }; scope = @{ Kind = 'String'; Min = 1; Max = 4096; Default = '.' }; mode = @{ Kind = 'String'; Pattern = '\A(exact|ranked)\z'; Default = 'exact' }; regex = @{ Kind = 'Boolean'; Default = $false }; ignore_case = @{ Kind = 'Boolean'; Default = $false }; includes = @{ Kind = 'String'; Max = 1024; Default = '*' }; per_line = @{ Kind = 'Boolean'; Default = $true } }; Role = 'tool-read' }
 # /undo reuses the reviewed file-change flow; it is never advertised to models.
