@@ -471,7 +471,7 @@ function Get-AgentVerificationReview {
     $observed = $null
     if ($Context.PSObject.Properties['Answer'] -and $script:PackToolObservations.TryGetValue($Context.AgentLease, [ref]$observed) -and
         $observed.ContainsKey('Feedback') -and $observed.Feedback.Failures.Count -and
-        $Context.Answer -notmatch '(?i)\b(fail(?:ed|ure|ures)?|block(?:ed)?|refus(?:ed|al)|cancel(?:led|ed)?|timed? out|not (?:run|verified|completed)|could not (?:run|verify|complete))\b' -and
+        $Context.Answer -notmatch '(?i)\b(fail(?:ed|ure|ures)?|block(?:ed)?|refus(?:ed|al)|reject(?:ed|ion)?|cancel(?:led|ed)?|timed? out|unsuccessful|not (?:run|verified|completed)|(?:could|did) not (?:run|verify|complete|finish|execute)|(?:ran|run|selected|executed) (?:no|zero|0) tests|no tests (?:ran|run|were run))\b' -and
         $Context.Answer -notmatch '(?i)\b(?:exit(?:ed)?(?:\s+with)?(?:\s+(?:code|status))?|exit_?(?:code|status))\b\s*(?:[:=]\s*)?[+-]?[1-9]\d*\b') {
         $excerpt = Get-HarnessTextExcerpt (($observed.Feedback.Failures.Values | Select-Object -First 8) -join "`n") 2048
         "your answer omits unsuccessful command attempts observed in this run.`n$($excerpt.Text)`nName each blocked, failed or unfinished check and its reason in one short line, not a section. A refused selection ran no tests. Report only observed passing results; do not run broader checks merely to replace a missing result."
