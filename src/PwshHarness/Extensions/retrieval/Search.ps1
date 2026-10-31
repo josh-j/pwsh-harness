@@ -29,7 +29,13 @@ function Find-RetrievalTool {
             $options = $options -bor [Text.RegularExpressions.RegexOptions]::IgnoreCase
         }
         $pattern = $arguments.regex ? $Query : [regex]::Escape($Query)
-        $regex = [regex]::new($pattern, $options, [TimeSpan]::FromMilliseconds(50))
+        try {
+            $regex = [regex]::new($pattern, $options, [TimeSpan]::FromMilliseconds(50))
+        }
+        catch [ArgumentException] {
+            # Models mix literal call text such as Add($Name into alternations; say how to repair it.
+            throw "$($_.Exception.Message) Escape literal ( ) [ ] { } . * + ? | with a backslash, or set regex to false to search the text literally."
+        }
         $maxBytes = [Math]::Max(262144, ($Request.PSObject.Properties['Config'] ? [int]$Request.Config.'Agent.MaxFileBytes' : 0))
         $emitted = 0
         foreach ($path in $allowed) {
