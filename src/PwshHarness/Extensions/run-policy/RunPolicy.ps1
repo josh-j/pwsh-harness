@@ -66,7 +66,7 @@ function Get-RunPolicyEditBatchMessage {
         return
     }
     $memory.EditsNoted = $true
-    @{ Kind = 'EditBatch'; Text = "<EPHEMERAL_MESSAGE>`nThe last two steps each made one edit, and each step resends the whole conversation. When you know several changes, send them in one step: edits to different files together, and several changes to one file as hunks of one edit.`n</EPHEMERAL_MESSAGE>" }
+    @{ Kind = 'EditBatch'; Text = "<EPHEMERAL_MESSAGE>`nThe last two steps each changed one file, and each step resends the whole conversation. When you know several changes, send them in one step: changes to different files together, and several changes to one file as hunks of one edit.`n</EPHEMERAL_MESSAGE>" }
 }
 function Get-RunPolicyLonePlanMessage {
     # A step that only updates the plan costs a whole request; Luna runs spent about one step in nine that way.
