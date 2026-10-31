@@ -362,16 +362,21 @@ function New-AgentToolFileChange {
     $eol = { param($value) ConvertTo-HarnessFileText -Text $value -File $file }
     $text = $Tool.Spec.Edit ? '' : (& $eol $arguments.text)
     $ranges = [Collections.Generic.List[object]]::new()
-    $editHunks = @($arguments.hunks | Where-Object { $_ } | ForEach-Object { @{ start_line = $_.start_line; end_line = $_.end_line; before = (& $eol $_.before); after = (& $eol $_.after) } })
+    # Ranges are original-file lines, so hunks apply in line order whatever order they were sent in; Number is the sent order.
+    $sent = 0
+    $editHunks = @($arguments.hunks | Where-Object { $_ } | ForEach-Object { @{ Number = ++$sent; start_line = $_.start_line; end_line = $_.end_line; before = (& $eol $_.before); after = (& $eol $_.after) } } | Sort-Object -Stable { [long]$_.start_line })
     $before = & $eol $arguments.before; $after = & $eol $arguments.after
     if ($Tool.Spec.Edit -and $arguments.ContainsKey('hunks')) {
         $starts = @(0) + @([regex]::Matches($file.Text, '\r\n|\n|\r') | ForEach-Object { $_.Index + $_.Length })
         $builder = [Text.StringBuilder]::new()
-        $cursor = 0; $previous = 0; $lineDelta = 0; $number = 0
+        $cursor = 0; $previous = 0; $lineDelta = 0
         foreach ($hunk in $editHunks) {
-            $number++
-            if ($hunk.start_line -le $previous -or $hunk.end_line -lt $hunk.start_line -or $hunk.end_line -gt $starts.Count) {
-                throw 'Edit hunks require ordered nonoverlapping original-file line ranges.'
+            $number = $hunk.Number
+            if ($hunk.end_line -lt $hunk.start_line -or $hunk.end_line -gt $starts.Count) {
+                throw "Edit hunk $number has lines $($hunk.start_line)-$($hunk.end_line), outside the file's 1-$($starts.Count). Use original-file line numbers from read."
+            }
+            if ($hunk.start_line -le $previous) {
+                throw "Edit hunk $number (lines $($hunk.start_line)-$($hunk.end_line)) overlaps another hunk, which reaches line $previous. Merge overlapping changes into one hunk."
             }
             $start = $starts[$hunk.start_line - 1]
             $end = $hunk.end_line -lt $starts.Count ? $starts[$hunk.end_line] : $file.Text.Length
@@ -395,7 +400,9 @@ function New-AgentToolFileChange {
             $afterLines = [regex]::Matches($hunk.after, '\r\n|\n|\r').Count
             $ranges.Add(@{ start_line = $original + $lineDelta; end_line = $original + $lineDelta + $afterLines })
             $lineDelta += $afterLines - $beforeLines
-            $cursor = $offset + $hunk.before.Length; $previous = [Math]::Max($hunk.end_line, $original + $beforeLines)
+            # A before text that ends with a line ending finishes on the line before the next one starts.
+            $last = $original + $beforeLines - ($hunk.before -match '(\r\n|\n|\r)\z' ? 1 : 0)
+            $cursor = $offset + $hunk.before.Length; $previous = [Math]::Max($hunk.end_line, $last)
         }
         $text = $builder.Append($file.Text, $cursor, $file.Text.Length - $cursor).ToString()
     }
@@ -761,7 +768,7 @@ $lineRule = @{ Kind = 'Number'; Min = 1; Max = [int]::MaxValue }
 $script:PackTools = @{
     read  = @{ Description = "Read UTF-8 text with numbered lines and whole-file sha256; remove the N: prefix before editing.`nDefault 800 lines, bounded by Agent.MaxReadBytes. Read small files whole. Truncation names the next start_line; skill:<name> loads listed guidance."; Schema = @{ path = (@{} + $pathRule); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'First line, inclusive; defaults to 1.' }); line_count = @{ Kind = 'Number'; Min = 1; Max = 2000; Default = 800; Description = 'Requested line count, 1-2000; defaults to 800.' } }; Prepare = ${function:Read-AgentToolData}; Role = 'tool-read' }
     write = @{ Description = "Create a UTF-8 file with a null hash, or replace an entire existing file with its matching hash. Parents must exist.`nPrefer edit for partial changes. Returns hashes, bytes and available diagnostics."; Schema = @{ path = $pathRule; text = $string; expected_sha256 = (@{} + $hash + @{ Nullable = $true; Description = 'Existing file hash, or null for create-only. Required for write.' }) }; Prepare = ${function:New-AgentToolFileChange}; Execute = ${function:Invoke-AgentToolFileChange}; Role = 'tool-result' }
-    edit  = @{ Description = "Edit one file with one ordinal before match (optionally anchored), or 1-64 ordered nonoverlapping original-line hunks; each target must match once. One atomic change. Read first.`nOmitted expected_sha256 uses this run's observed hash; changed or unread files fail. Wait for each result before changing this file again. Returns hunks, hash and diagnostics."; Schema = @{ path = $pathRule; before = @{ Kind = 'String'; Min = 1; Description = 'Exact nonempty source text, unique within the optional line anchors.' }; after = $string; expected_sha256 = (@{} + $hash + @{ Optional = $true; Description = 'Optional after read in this run; explicit null is invalid. Stale files fail.' }); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'Optional inclusive first line of the matching region.' }); end_line = (@{} + $lineRule + @{ Default = [int]::MaxValue; Description = 'Optional inclusive last line of the matching region.' }) }; Prepare = ${function:New-AgentToolFileChange}; Execute = ${function:Invoke-AgentToolFileChange}; Edit = $true; Role = 'tool-result' }
+    edit  = @{ Description = "Edit one file with one ordinal before match (optionally anchored), or 1-64 nonoverlapping original-line hunks in any order; each target must match once. One atomic change. Read first.`nOmitted expected_sha256 uses this run's observed hash; changed or unread files fail. Wait for each result before changing this file again. Returns hunks, hash and diagnostics."; Schema = @{ path = $pathRule; before = @{ Kind = 'String'; Min = 1; Description = 'Exact nonempty source text, unique within the optional line anchors.' }; after = $string; expected_sha256 = (@{} + $hash + @{ Optional = $true; Description = 'Optional after read in this run; explicit null is invalid. Stale files fail.' }); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'Optional inclusive first line of the matching region.' }); end_line = (@{} + $lineRule + @{ Default = [int]::MaxValue; Description = 'Optional inclusive last line of the matching region.' }) }; Prepare = ${function:New-AgentToolFileChange}; Execute = ${function:Invoke-AgentToolFileChange}; Edit = $true; Role = 'tool-result' }
     pwsh  = @{ Description = "Run PowerShell in the context directory to search, build, test and inspect files. Each call starts a new pwsh process; run code directly, not through pwsh -Command. Unhandled cmdlet errors stop execution; handle expected failures explicitly. Check exit codes and stderr.`nRecursive search: Get-ChildItem -Recurse -File -Filter *.ps1 | Select-String -Pattern ...; ** is not recursive. Large output retains the head and tail; narrow commands to focus it. The harness sets time and output limits, so limit arguments such as timeout_ms are ignored."; Ignored = '^(?:max|limit|timeout)[A-Za-z_]{0,40}$'; Schema = @{ command = @{ Kind = 'String'; Min = 1; Max = 65536; Nonblank = $true; Description = 'Exact PowerShell source. Prefer bounded text output and focused checks.' } }; Prepare = ${function:New-AgentToolCommand}; Execute = ${function:Invoke-AgentToolProcess}; Role = 'tool-result' }
 }
 $script:PackTools.search = @{ Description = "Search permitted workspace files with bounded numbered matches; prefer it to shell searches.`nExact/regex mode is on unless the user disables it; ranked mode must be enabled by the user."; Schema = @{ query = @{ Kind = 'String'; Min = 1; Max = 4096; Nonblank = $true }; scope = @{ Kind = 'String'; Min = 1; Max = 4096; Default = '.' }; mode = @{ Kind = 'String'; Pattern = '\A(exact|ranked)\z'; Default = 'exact' }; regex = @{ Kind = 'Boolean'; Default = $false }; ignore_case = @{ Kind = 'Boolean'; Default = $false }; includes = @{ Kind = 'String'; Max = 1024; Default = '*' }; per_line = @{ Kind = 'Boolean'; Default = $true } }; Role = 'tool-read' }
@@ -773,7 +780,7 @@ $script:PackTools.read.Schema.content_offset = @{ Kind = 'Number'; Min = 0; Max 
 $script:PackTools.edit.Schema.allow_multiple = @{ Kind = 'Boolean'; Default = $false; Description = 'Replace all exact matches within the line anchors.' }
 $script:PackTools.edit.Schema.before.Optional = $true
 $script:PackTools.edit.Schema.after.Optional = $true
-$script:PackTools.edit.Schema.hunks = @{ Kind = 'Array'; Optional = $true; Description = '1-64 ordered nonoverlapping original-file line ranges. Supply instead of single-edit fields.' }
+$script:PackTools.edit.Schema.hunks = @{ Kind = 'Array'; Optional = $true; Description = '1-64 nonoverlapping original-file line ranges, in any order. Supply instead of single-edit fields.' }
 $script:PackTools.read.Schema.path.Description = 'Context-relative literal file, or skill:<name> from the available skills list.'
 function Get-AgentCompletionReview {
     [CmdletBinding()]
