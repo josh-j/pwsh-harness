@@ -169,6 +169,33 @@ function Wait-PowerShellRunTask {
     $true
 }
 
+function Wait-PowerShellTerminalReady {
+    [CmdletBinding()]
+    param($Task)
+    # The child decodes stdin in its console code page, which on Windows need not match ours. Setting
+    # [Console]::InputEncoding replaces its stdin reader and drops what that reader had buffered, so task input sent
+    # before the reset was lost and the command waited for it until the run deadline (Windows CI 3201). The prelude runs
+    # alone and answers before any command or input follows it.
+    $ready = 'harness_' + [guid]::NewGuid().ToString('N') + ':ready'
+    $Task.Process.StandardInput.WriteLine($script:PackTerminalPrelude + "[Console]::Out.WriteLine('$ready')")
+    $Task.Process.StandardInput.Flush()
+    $watch = $Task.Clock.Elapsed()
+    while (-not $Task.Stdout.Text.ToString().Contains($ready)) {
+        $Task.Token.ThrowIfCancellationRequested()
+        $Task.RunCancellation.Token.ThrowIfCancellationRequested()
+        if ($Task.Stdout.Finished -or $Task.Process.HasExited) {
+            throw 'The PowerShell terminal exited before it was ready.'
+        }
+        if ($watch.Elapsed.TotalSeconds -ge $Task.Timeout) {
+            throw "The PowerShell terminal was not ready within $($Task.Timeout) seconds."
+        }
+        Update-PowerShellRunCapture $Task.Stdout
+        $Task.Clock.Wait(20, $Task)
+    }
+    $text = $Task.Stdout.Text.ToString()
+    $null = $Task.Stdout.Text.Clear().Append($text.Replace($ready + [Environment]::NewLine, ''))
+}
+
 function Close-PowerShellRunTask {
     [CmdletBinding()]
     param($Task, [switch]$Force)

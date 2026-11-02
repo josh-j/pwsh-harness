@@ -219,6 +219,9 @@ function Invoke-PowerShellRun {
             $null = $Task.Process.Start()
             $Task.Stdout = New-PowerShellRunCapture $Task.Process.StandardOutput $Task.Budget
             $Task.Stderr = New-PowerShellRunCapture $Task.Process.StandardError $Task.Budget
+            if ($Terminal -and $Shell -ceq 'PowerShell') {
+                Wait-PowerShellTerminalReady $Task
+            }
         }
         $Task.Started = $true
         if (-not $AllowInput -and -not $Terminal) {
@@ -236,10 +239,9 @@ function Invoke-PowerShellRun {
                 $wrapper = '$global:LASTEXITCODE=0; $ErrorActionPreference=''Stop''; try { Set-Location -LiteralPath ' + $location + '; [Environment]::CurrentDirectory=' + $location + '; . ''' + $Task.ScriptFile.Replace("'", "''") + '''; $harness_rc=$LASTEXITCODE } catch { [Console]::Error.WriteLine($_); $harness_rc=1 }; [Console]::Out.WriteLine("`n' + $task.Marker + ':$harness_rc"); [Console]::Error.WriteLine(''' + $task.Marker + ':done'')'
             }
             if ($Shell -ceq 'PowerShell') {
-                # The child decodes stdin in its console code page, which on Windows need not match ours; an ASCII line
-                # keeps a working folder or temp path outside that code page, such as a non-ASCII user name, intact.
-                $source = ($IsWindows ? $script:PackUtf8Prelude : '') + $wrapper
-                $wrapper = ". ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($source)))'))))"
+                # An ASCII line keeps a working folder or temp path outside the child's input code page, such as a
+                # non-ASCII user name, intact.
+                $wrapper = ". ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wrapper)))'))))"
             }
             $task.Process.StandardInput.WriteLine($wrapper)
             $task.Process.StandardInput.Flush()

@@ -3,6 +3,8 @@
 # Unix. Input switches once, because each switch replaces [Console]::In and drops anything it had buffered.
 $script:PackUtf8Prelude = '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; ' +
 'if ([Console]::InputEncoding.CodePage -ne 65001) { try { [Console]::InputEncoding = [Text.UTF8Encoding]::new($false) } catch { $null = $_ } }; '
+# A new persistent PowerShell terminal runs this once, before its first command (Wait-PowerShellTerminalReady).
+$script:PackTerminalPrelude = $IsWindows ? $script:PackUtf8Prelude : ''
 function Invoke-PowerShellSaveGitQuery {
     [CmdletBinding()]
     param([string]$Directory, [string[]]$Arguments)
