@@ -100,6 +100,33 @@ function Invoke-AgentCodeSearch {
     if ($request.SearchError) {
         throw $request.SearchError
     }
+    if (-not $ranked -and $results.Count -gt 15) {
+        # A broad search shows its matching lines only, as rg prints them: the context lines of the seven h-hist-12
+        # searches with 30 or more matches were most of their text, 58% of all search text.
+        $options = [Text.RegularExpressions.RegexOptions]::CultureInvariant
+        if ($arguments.ignore_case) {
+            $options = $options -bor [Text.RegularExpressions.RegexOptions]::IgnoreCase
+        }
+        $matcher = [regex]::new(($request.SearchArguments.regex ? $arguments.query : [regex]::Escape($arguments.query)), $options, [TimeSpan]::FromMilliseconds(50))
+        foreach ($row in $results) {
+            $hit = [Collections.Generic.List[string]]::new()
+            foreach ($line in $row.text -split "`n") {
+                try {
+                    if ($matcher.IsMatch(($line -replace '^\d+: ', ''))) {
+                        $hit.Add($line)
+                    }
+                }
+                catch {
+                    # A match timeout keeps the row's context unchanged.
+                    $hit.Clear(); break
+                }
+            }
+            if ($hit.Count) {
+                $row.text = $hit -join "`n"
+            }
+        }
+        $note = (@($note, 'Many matches: showing matching lines only.') | Where-Object { $_ }) -join ' '
+    }
     Complete-AgentToolCall -Context $Context -Call $Call -Data @{ results = $results.ToArray(); truncated = $truncated; index_partial = $request.SearchPartial; stopped_at = $request.PSObject.Properties['SearchStop'] ? $request.SearchStop : $null; embedding_estimated_cost = $budget.EstimatedCost; embedding_requests = $budget.Requests; embedding_error = $request.EmbeddingError; skipped = $request.Skipped; note = $note }
 }
 function Format-AgentSearchText {
@@ -108,21 +135,34 @@ function Format-AgentSearchText {
     # Matches grouped by file, as rg prints them: the JSON form repeated each match's path, name and line range and was
     # about 44% of the search text Luna runs resent with every later request (h-hist-10).
     $lines = [Collections.Generic.List[string]]::new()
-    $path = $null; $end = 0
+    $path = $null; $end = 0; $printed = $null
     foreach ($result in @($Data['results'])) {
         if ($result.path -cne $path) {
             if ($lines.Count) {
                 $lines.Add('')
             }
-            $lines.Add($result.path); $path = $result.path
+            $lines.Add($result.path); $path = $result.path; $end = 0; $printed = [Collections.Generic.HashSet[int]]::new()
         }
-        elseif ($result.start_line -gt $end + 1) {
-            $lines.Add('--')
-        }
-        if ($result.retriever -cne 'Literal') {
+        if ($result.retriever -cnotin 'Literal', 'Regex') {
+            if ($end -and $result.start_line -gt $end + 1) {
+                $lines.Add('--')
+            }
             $lines.Add("[$($result.retriever) score $([Math]::Round([double]$result.score, 3))$($result.name -cne $result.path ? ": $($result.name)" : '')]")
+            $lines.Add($result.text); $end = $result.end_line
+            continue
         }
-        $lines.Add($result.text); $end = $result.end_line
+        # Neighbouring matches share context lines; print each numbered line once (16% of h-hist-12 search text).
+        foreach ($line in $result.text -split "`n") {
+            $number = [regex]::Match($line, '^(\d+): ')
+            $number = $number.Success ? [int]$number.Groups[1].Value : 0
+            if ($number -and -not $printed.Add($number)) {
+                continue
+            }
+            if ($number -and $end -and $number -gt $end + 1) {
+                $lines.Add('--')
+            }
+            $lines.Add($line); $end = $number ? $number : $end
+        }
     }
     if (-not $lines.Count) {
         $lines.Add('No matches.')

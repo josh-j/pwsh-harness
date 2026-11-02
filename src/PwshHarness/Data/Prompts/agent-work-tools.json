@@ -1,7 +1,7 @@
 [
   {
     "Name": "update_plan",
-    "Description": "Keep a short checklist plan for a multi-step task; skip it for simple tasks.\nEach call replaces the plan. Keep at most one step in_progress, mark steps completed when done, and finish or drop every step before answering.\nNot in your first step: read the code first. Then call it together with your next tool call, never as the only call in a step: each step resends the whole conversation.",
+    "Description": "Keep a short checklist plan for a multi-step task; skip it for simple tasks.\nEach call replaces the plan. Keep at most one step in_progress and mark steps completed as you go. Your final answer closes the plan: do not send update_plan only to mark the last step done.\nNot in your first step: read the code first. Then call it together with your next tool call, never as the only call in a step: each step resends the whole conversation.",
     "Parameters": {
       "type": "object",
       "additionalProperties": false,

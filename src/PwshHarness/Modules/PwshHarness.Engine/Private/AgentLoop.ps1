@@ -764,8 +764,10 @@ function Invoke-EngineAgentContinuation {
                 Save-EngineAgentResume $record $loop
                 return Complete-EngineAgentRun -Store $Store -Loop $loop -Reason Reload
             }
-            # Adaptive step reasoning (opt-in): low after a step of successful reads, high after a failure, else the profile's.
-            $effort = $turn.Config.'Agent.StepReasoning' -ceq 'adaptive' ? @{ read = 'low'; failed = 'high' }[$loop.Progress.LastStep] : ''
+            # Adaptive (opt-in): low until the run's first change, then the profile's effort. Providers cache prompts per
+            # effort, so switching per step lost most cache hits (h-hist-14: +39% cost on Luna); one switch costs one miss.
+            $mode = $turn.Config.'Agent.StepReasoning'
+            $effort = $mode -ceq 'adaptive' ? ($loop.Progress.Changes ? '' : 'low') : ($mode -ceq 'off' ? '' : $mode)
             Send-EngineAgentRequest -Store $Store -Loop $loop -ReasoningEffort $effort -AgentTools (@($Store.AgentTools.Schemas) + @($loop.Tools.Values | Where-Object { -not $_.Runtime } | Sort-Object Name | ForEach-Object { $_.Schema }))
             if ($loop.ChargedTokens -gt $loop.Settings.'Agent.MaxTotalTokens') {
                 return Complete-EngineAgentRun -Store $Store -Loop $loop -Reason TokenLimit

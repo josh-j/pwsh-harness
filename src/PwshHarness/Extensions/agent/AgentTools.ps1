@@ -383,11 +383,13 @@ function Repair-AgentEditEscape {
 }
 function Set-AgentObservation {
     [CmdletBinding()]
-    param($Observations, [string]$Path, [string]$Hash, [int]$Step)
+    param($Observations, [string]$Path, [string]$Hash, [int]$Step, [switch]$Written)
     # Seen keeps every hash this run observed for the path, so an edit naming an earlier one is told from an outside change.
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     if ($Observations.ContainsKey($Path) -and $Observations[$Path]['Seen']) {
         $seen.UnionWith([Collections.Generic.IEnumerable[string]]$Observations[$Path].Seen)
+        # The run's own write keeps its earlier view: a second edit in the same step lost a step to a refusal (h-hist-12).
+        $Step = $Written ? [Math]::Min($Step, $Observations[$Path].Step) : $Step
     }
     $null = $seen.Add($Hash)
     $Observations[$Path] = @{ Hash = $Hash; Step = $Step; Seen = $seen }
@@ -784,7 +786,7 @@ function Invoke-AgentToolApproval {
         foreach ($file in @($result.Status -ceq 'ok' ? $tool.Files : @()).Where({ $_ })) {
             # A file this run created holds exactly the text the model wrote, so a later step may replace it without a view.
             if ($null -ne $tool.Observations -and ($tool.Observations.ContainsKey($file.Path) -or -not $file.BeforeExists)) {
-                Set-AgentObservation -Observations $tool.Observations -Path $file.Path -Hash $file.FinalHash -Step $tool.Context.AgentStep
+                Set-AgentObservation -Observations $tool.Observations -Path $file.Path -Hash $file.FinalHash -Step $tool.Context.AgentStep -Written
             }
             if ($null -ne $tool.Changed -and -not $tool.Changed.ContainsKey($file.Path)) {
                 # The completion review compares against the text before this run's first change.
@@ -898,7 +900,9 @@ function Get-AgentCompletionReview {
     $parts += @(Get-AgentReviewOutcome $Context)
     $parts += @(Get-AgentCoverageReview $Context)
     $parts += @(Get-AgentVerificationReview $Context)
-    $open = @(Get-AgentOpenPlanStep $Context)
+    # The step in progress is usually what the answering step finished; closing it with update_plan cost a whole
+    # request in 19 of 66 lone plan steps (2026-10-30), so only steps never started bring the review.
+    $open = @(Get-AgentOpenPlanStep $Context | Where-Object { $_.StartsWith('pending: ', [StringComparison]::Ordinal) })
     if ($open.Count) {
         $parts += "your plan still has unfinished steps.`n$($open -join "`n")`nDo the ones not yet done now. Closing the plan needs no update_plan call of its own: in your answer, name any step you could not do and why."
     }

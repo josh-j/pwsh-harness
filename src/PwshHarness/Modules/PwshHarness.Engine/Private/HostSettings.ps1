@@ -153,8 +153,8 @@ function New-EngineHostStore {
     $store.Points.Settings['Agent.StallModel'].Validator = $store.Points.Settings['Agent.ExploreModel'].Validator
     # Steps without new evidence or changes before the run-policy stall message; 0 turns it off.
     $store.Points.Settings['Agent.StallSteps'].Validator = { param($v) $v -ge 0 -and $v -le 64 }
-    # adaptive sets each request's reasoning effort from the previous step; it awaits live comparison before any default.
-    $store.Points.Settings['Agent.StepReasoning'].Validator = { param($v) $v -cin @('off', 'adaptive') }
+    # A level replaces the profile's reasoning effort; adaptive sets it from the previous step (no default: see AGENT-MODE).
+    $store.Points.Settings['Agent.StepReasoning'].Validator = { param($v) $v -cin @('off', 'adaptive', 'low', 'medium', 'high') }
     $store.Points.Settings.InputTokenReservePercent.Validator = { param($v) $v -ge 0 -and $v -le 90 -and -not [double]::IsNaN($v) }
     $store.Points.Settings['Session.MaxAuditBytes'].Validator = { param($v) $v -ge 1024 -and $v -le 268435456 }
     $store.Points.Settings['Session.MaxAuditRecords'].Validator = { param($v) $v -ge 16 -and $v -le 65536 }

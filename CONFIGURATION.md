@@ -176,9 +176,10 @@ or keep the sent prefix identical so the provider can cache it.
   it too low can cut off a tool call instead of saving money. Reasoning effort
   itself comes from the model profile (`medium` for the bundled profile); the
   only config control is `Agent.StepReasoning`.
-- `Agent.StepReasoning` `adaptive` asks for `low` effort after a step of
-  successful reads and `high` after a failure. It is opt-in; the code notes it
-  still awaits a live comparison, so measure before relying on it.
+- `Agent.StepReasoning` `low`, `medium` or `high` replaces the profile's
+  effort for every request. `adaptive` asks for `low` effort until the run's
+  first file change and the profile's effort after it; providers cache prompts
+  per effort, so the switch costs one cache miss.
 
 **Prompt caching and provider choice (OpenRouter).**
 
@@ -332,7 +333,7 @@ Entries match `[A-Za-z0-9._:/*-]`, up to 128 characters.
 | `Agent.CheckInToolCalls` | 0 to 1024 | `25` | Progress check every N tool calls; `0` off. |
 | `Agent.CheckInTokens` | 0 to 100,000,000 | `250000` | Progress check every N charged tokens; `0` off. |
 | `Agent.StallSteps` | 0 to 64 | `4` | Steps without progress before a stall message; `0` off. |
-| `Agent.StepReasoning` | `off`, `adaptive` | `off` | Per-step reasoning effort. |
+| `Agent.StepReasoning` | `off`, `low`, `medium`, `high`, `adaptive` | `off` | Reasoning effort override. |
 | `Agent.ExploreModel` | model id or empty | empty | Model for read-only sub-agents. |
 | `Agent.FallbackModel` | model id or empty | empty | Model used after repeated provider failure. |
 | `Agent.StallModel` | model id or empty | empty | Stronger model after a second stall. |

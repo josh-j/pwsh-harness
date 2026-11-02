@@ -150,6 +150,21 @@ function Get-RunPolicyUnchangedMessage {
     $View.Memory.Unchanged = $true
     @{ Kind = 'Unchanged'; Text = "<EPHEMERAL_MESSAGE>`nThe user asked for a change and cannot answer questions, but this run has not changed any file. Make the change now and verify it. If no change is needed, or a command already made it, say so in your final answer.`n</EPHEMERAL_MESSAGE>" }
 }
+function Get-RunPolicyUnfinishedMessage {
+    # An unattended change whose answer says the work is unfinished is asked once to continue: Luna runs stopped on
+    # "the focused test still fails ... the next fix should" (h-hist-18) and on a test they knew was broken (h-hist-15)
+    # with most of their steps unused.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)]$View)
+    $pattern = '(?i)\b(?:(?:is|remains)\s+(?:still\s+)?not\s+(?:yet\s+)?(?:complete|completed|done|finished)|(?:is|remains)\s+incomplete|still\s+fail(?:s|ing)?|the\s+next\s+fix\s+(?:should|would|is))\b'
+    if (-not $View.Headless -or $View.Memory.Unfinished -or -not $View.Progress.Changes -or $View.StepsRemaining -le 0 -or
+        [string]$View.Answer -notmatch $pattern -or (Get-RunPolicyTaskKind $View) -cne 'fix') {
+        return
+    }
+    $View.Memory.Unfinished = $true
+    @{ Kind = 'Unfinished'; Text = "<EPHEMERAL_MESSAGE>`nYour answer says the work is not finished (`"$($Matches[0])`"), and the user cannot answer questions. Continue now: make the next change you described and rerun its check. If it cannot be done, say why in your final answer.`n</EPHEMERAL_MESSAGE>" }
+}
 function Invoke-RunPolicySteering {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Moment, [Parameter(Mandatory)]$View)
@@ -163,5 +178,6 @@ function Invoke-RunPolicySteering {
     elseif ($Moment -ceq 'Completing') {
         Get-RunPolicyKeepGoingMessage $View
         Get-RunPolicyUnchangedMessage $View
+        Get-RunPolicyUnfinishedMessage $View
     }
 }

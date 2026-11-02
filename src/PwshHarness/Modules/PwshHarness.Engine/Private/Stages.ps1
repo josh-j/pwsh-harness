@@ -122,8 +122,9 @@ function Invoke-EngineMiddlewareStage {
         }
     }
     if ($Turn.Request.PSObject.Properties['AgentTools']) {
+        # Runs read the included AGENTS.md again in three of five h-hist-12 tasks: about 2k tokens resent on every later step.
         $rulePath = Join-Path (Get-EngineAgentState $Turn.Store $Turn.Session).Loop.Run.ContextRoot 'AGENTS.md'
-        $rules = $Turn.RulesText ? "<user_rules>`nThe following user-defined rules take precedence over following instructions, subject to host safety and explicit user instructions. Review them carefully when generating responses and code:`n<RULE[$rulePath]>`n$($Turn.RulesText)</RULE[$rulePath]>`n</user_rules>" : ''
+        $rules = $Turn.RulesText ? "<user_rules>`nThe following user-defined rules take precedence over following instructions, subject to host safety and explicit user instructions. Review them carefully when generating responses and code. This is the full current text, so do not read the file again:`n<RULE[$rulePath]>`n$($Turn.RulesText)</RULE[$rulePath]>`n</user_rules>" : ''
         if ($Turn.Request.Messages[0].Content.Contains('{{USER_RULES}}')) {
             $Turn.Request.Messages[0].Content = $Turn.Request.Messages[0].Content.Replace('{{USER_RULES}}', $rules)
         }
