@@ -9,6 +9,7 @@
 . (Join-Path $PSScriptRoot 'AgentLessons.ps1')
 $script:PackToolOperations = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
 $script:PackToolObservations = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
+$script:PackFailedChanges = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
 function ConvertFrom-AgentToolArgument {
     [CmdletBinding()]
     param([string]$Name, [string]$Json, [string]$Id = ([guid]::NewGuid().ToString('N')))
@@ -253,6 +254,9 @@ function Complete-AgentToolCall {
         $model.ModelContent = Format-AgentPresentedResult -Context $Context -Call $Context.PresentedCall -Data $presentationData -ErrorData $errorData
         $Call = $Context.PresentedCall
     }
+    elseif ($Call.Name -ceq 'search' -and $status -ceq 'ok') {
+        $model.ModelContent = Format-AgentSearchText -Data (Get-HarnessToolModelData -Data $model)
+    }
     if ($feedback) {
         if ($model.Contains('ModelContent')) {
             $model.ModelContent += "`n`n$feedback"
@@ -279,7 +283,21 @@ function Read-AgentToolData {
     [CmdletBinding()]
     param($Tool)
     if (-not $Tool.File.Exists) {
-        throw [IO.FileNotFoundException]::new('Tool file does not exist.')
+        # Models guess file names, such as manifest.psd1 for extension.psd1 (6 of 7 missing reads in h-hist-10 and 11).
+        # Name the folder's files that pass the read policy, so the next call can use one.
+        $folder = ConvertTo-HarnessSlashPath ([IO.Path]::GetDirectoryName($Tool.Call.Arguments.path))
+        $names = @(foreach ($candidate in @([IO.Directory]::EnumerateFiles([IO.Path]::GetDirectoryName($Tool.Path)) | Sort-Object | Select-Object -First 20)) {
+                $name = [IO.Path]::GetFileName($candidate)
+                try {
+                    $null = Resolve-AgentToolPath -State $Tool.State -Root $Tool.Root -Path ($folder ? "$folder/$name" : $name) -Context $Tool.Context
+                    $script:Harness.OperationControl.ProtectText($Tool.State, $name)
+                }
+                catch {
+                    # A file the read policy refuses is not named.
+                    $null = $_
+                }
+            })
+        throw [IO.FileNotFoundException]::new('Tool file does not exist.' + ($names.Count ? " Files in its folder: $($names -join ', ')." : ''))
     }
     $arguments = $Tool.Call.Arguments
     $text = $script:Harness.OperationControl.ProtectText($Tool.State, $Tool.File.Text)
@@ -325,16 +343,10 @@ function Read-AgentToolData {
     $null = Invoke-HarnessService -Harness $script:Harness -Name 'source.warm' -Arguments @($Tool, $Tool.File.Text)
 }
 function Get-AgentEditMissHint {
-    # Says why a before text missed: backslashes escaped twice in JSON, a match outside the given lines, or the first
-    # line that differs from the file, so a retry fixes that line instead of resending the same text.
+    # Says why a before text missed: a match outside the given lines, or the first line that differs from the file, so
+    # a retry fixes that line instead of resending the same text. Backslashes escaped twice are repaired before matching.
     [CmdletBinding()]
     param([string]$Text, [string]$Before)
-    for ($candidate = $Before; $candidate.Contains('\\'); ) {
-        $candidate = $candidate.Replace('\\', '\')
-        if ($Text.Contains($candidate, [StringComparison]::Ordinal)) {
-            return ' It matches once each doubled backslash is single: the arguments escaped backslashes twice. Send before and after with the backslashes the file has (one backslash is \\ in JSON).'
-        }
-    }
     $newline = '\r\n|\n|\r'
     $at = $Text.IndexOf($Before, [StringComparison]::Ordinal)
     if ($at -ge 0) {
@@ -355,6 +367,31 @@ function Get-AgentEditMissHint {
     $sent = @($Before -split $newline)
     " Before line $($line + 1) of $($sent.Count) differs from file line ${fileLine}; the file has: $(@($Text -split $newline)[$fileLine - 1]) -- the before text has: $($sent[$line])"
 }
+function Repair-AgentEditEscape {
+    # A before text the file lacks but has once each doubled backslash is single was escaped twice in JSON, and so was
+    # its after text. Luna sent such edits in most rounds, and each refusal cost a step (h-hist-10 literal-context: 2).
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([string]$Text, [string]$Before, [string]$After)
+    for ($candidate = $Before; -not $Text.Contains($candidate, [StringComparison]::Ordinal) -and $candidate.Contains('\\'); ) {
+        $candidate = $candidate.Replace('\\', '\'); $After = $After.Replace('\\', '\')
+        if ($Text.Contains($candidate, [StringComparison]::Ordinal)) {
+            return @{ Before = $candidate; After = $After; Repaired = $true }
+        }
+    }
+    @{ Before = $Before; After = $After; Repaired = $false }
+}
+function Set-AgentObservation {
+    [CmdletBinding()]
+    param($Observations, [string]$Path, [string]$Hash, [int]$Step)
+    # Seen keeps every hash this run observed for the path, so an edit naming an earlier one is told from an outside change.
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    if ($Observations.ContainsKey($Path) -and $Observations[$Path]['Seen']) {
+        $seen.UnionWith([Collections.Generic.IEnumerable[string]]$Observations[$Path].Seen)
+    }
+    $null = $seen.Add($Hash)
+    $Observations[$Path] = @{ Hash = $Hash; Step = $Step; Seen = $seen }
+}
 function New-AgentToolFileChange {
     [CmdletBinding()]
     param($Tool)
@@ -364,11 +401,17 @@ function New-AgentToolFileChange {
         throw (New-AgentRefusal -Code CredentialRefused -Message 'Tool target contains a known credential; mutation refused.' -Next 'Reissue without the credential value; never copy secrets into files or commands.')
     }
     $expected = $arguments.expected_sha256
-    $observed = $Tool.Observations -and $Tool.Observations.ContainsKey($Tool.Path) -and $Tool.Observations[$Tool.Path].Step -lt $Tool.Context.AgentStep ? $Tool.Observations[$Tool.Path].Hash : $null
+    $record = $Tool.Observations -and $Tool.Observations.ContainsKey($Tool.Path) ? $Tool.Observations[$Tool.Path] : $null
+    $observed = $record -and $record.Step -lt $Tool.Context.AgentStep ? $record.Hash : $null
     if ($Tool.Spec.Edit -and -not $arguments.ContainsKey('expected_sha256')) {
         if (-not $observed) {
             throw 'Use read and wait for its result in the current agent run before omitting expected_sha256.'
         }
+        $expected = $observed
+    }
+    elseif ($Tool.Spec.Edit -and $expected -and $observed -ceq $file.Hash -and $record['Seen'] -and $record.Seen.Contains($expected)) {
+        # A hash this run read before its own later change: nothing outside the run changed the file, and the before
+        # text must still match the current bytes. Luna runs lost a step to each such refusal (h-hist-10).
         $expected = $observed
     }
     if ($file.Exists -and -not $expected) {
@@ -388,6 +431,17 @@ function New-AgentToolFileChange {
     $sent = 0
     $editHunks = @($arguments.hunks | Where-Object { $_ } | ForEach-Object { @{ Number = ++$sent; start_line = $_.start_line; end_line = $_.end_line; before = (& $eol $_.before); after = (& $eol $_.after) } } | Sort-Object -Stable { [long]$_.start_line })
     $before = & $eol $arguments.before; $after = & $eol $arguments.after
+    $unescaped = $false
+    if ($Tool.Spec.Edit) {
+        foreach ($hunk in $editHunks) {
+            $pair = Repair-AgentEditEscape $file.Text $hunk.before $hunk.after
+            $hunk.before = $pair.Before; $hunk.after = $pair.After; $unescaped = $unescaped -or $pair.Repaired
+        }
+        if (-not $arguments.ContainsKey('hunks')) {
+            $pair = Repair-AgentEditEscape $file.Text $before $after
+            $before = $pair.Before; $after = $pair.After; $unescaped = $unescaped -or $pair.Repaired
+        }
+    }
     if ($Tool.Spec.Edit -and $arguments.ContainsKey('hunks')) {
         $starts = @(0) + @([regex]::Matches($file.Text, '\r\n|\n|\r') | ForEach-Object { $_.Index + $_.Length })
         $builder = [Text.StringBuilder]::new()
@@ -437,6 +491,12 @@ function New-AgentToolFileChange {
         $end = $arguments.end_line -lt $starts.Count ? $starts[$arguments.end_line] : $file.Text.Length
         $region = $file.Text.Substring($start, $end - $start)
         $match = $region.IndexOf($before, [StringComparison]::Ordinal)
+        $whole = $match -lt 0 ? $file.Text.IndexOf($before, [StringComparison]::Ordinal) : -1
+        if ($whole -ge 0 -and $file.Text.IndexOf($before, $whole + 1, [StringComparison]::Ordinal) -lt 0) {
+            # Line anchors choose among repeated text; a before text found once in the whole file is unambiguous, so
+            # wrong anchors do not cost a step (h-hist-11 exit-alias).
+            $start = 0; $end = $file.Text.Length; $region = $file.Text; $match = $whole
+        }
         if ($match -lt 0) {
             throw ('Edit target not found. Copy the exact text and whitespace from read, without the line-number prefix.' + (Get-AgentEditMissHint $file.Text $before))
         }
@@ -462,6 +522,9 @@ function New-AgentToolFileChange {
     }
     $Tool.Files = @(@{ Path = $Tool.Path; BeforeExists = $file.Exists; BeforeBytes = $file.Bytes; BeforeHash = $file.Hash; FinalBytes = $final; FinalHash = (Get-HarnessSha256 $final) })
     $Tool.Data = @{ before_sha256 = $file.Hash; after_sha256 = $Tool.Files[0].FinalHash; bytes_written = $final.Length }
+    if ($unescaped) {
+        $Tool.Data.note = 'The before text matched once each doubled backslash was made single, so the after text was changed the same way. Send backslashes as the file has them (one backslash is \\ in JSON).'
+    }
     if ($Tool.Context.PSObject.Properties['PresentedCall']) {
         $Tool.Data.diff = Format-AgentPresentedDiff $file.Text $text
     }
@@ -610,7 +673,7 @@ function Invoke-AgentToolCall {
             Add-AgentInspected -Context $Context -Observed $observed -Physical $tool.Path
         }
         if ($null -ne $tool.Observations -and (-not $tool.Observations.ContainsKey($tool.Path) -or $tool.Observations[$tool.Path].Hash -cne $tool.File.Hash)) {
-            $tool.Observations[$tool.Path] = @{ Hash = $tool.File.Hash; Step = $tool.Context.AgentStep }
+            Set-AgentObservation -Observations $tool.Observations -Path $tool.Path -Hash $tool.File.Hash -Step $tool.Context.AgentStep
         }
         return $result
     }
@@ -721,7 +784,7 @@ function Invoke-AgentToolApproval {
         foreach ($file in @($result.Status -ceq 'ok' ? $tool.Files : @()).Where({ $_ })) {
             # A file this run created holds exactly the text the model wrote, so a later step may replace it without a view.
             if ($null -ne $tool.Observations -and ($tool.Observations.ContainsKey($file.Path) -or -not $file.BeforeExists)) {
-                $tool.Observations[$file.Path] = @{ Hash = $file.FinalHash; Step = $tool.Context.AgentStep }
+                Set-AgentObservation -Observations $tool.Observations -Path $file.Path -Hash $file.FinalHash -Step $tool.Context.AgentStep
             }
             if ($null -ne $tool.Changed -and -not $tool.Changed.ContainsKey($file.Path)) {
                 # The completion review compares against the text before this run's first change.
@@ -788,7 +851,7 @@ $hash = @{ Kind = 'String'; Pattern = '\A[0-9a-f]{64}\z' }
 $pathRule = @{ Kind = 'String'; Min = 1; Max = 4096; Description = 'Context-relative literal file path; no traversal, drives or providers.' }
 $lineRule = @{ Kind = 'Number'; Min = 1; Max = [int]::MaxValue }
 $script:PackTools = @{
-    read  = @{ Description = "Read UTF-8 text with numbered lines and whole-file sha256; remove the N: prefix before editing.`nDefault 800 lines, bounded by Agent.MaxReadBytes. Read small files whole. Truncation names the next start_line; skill:<name> loads listed guidance."; Schema = @{ path = (@{} + $pathRule); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'First line, inclusive; defaults to 1.' }); line_count = @{ Kind = 'Number'; Min = 1; Max = 2000; Default = 800; Description = 'Requested line count, 1-2000; defaults to 800.' } }; Prepare = ${function:Read-AgentToolData}; Role = 'tool-read' }
+    read  = @{ Description = "Read UTF-8 text with numbered lines and whole-file sha256; remove the N: prefix before editing.`nDefault 300 lines, bounded by Agent.MaxReadBytes. Read a file under 300 lines whole; in a larger one, search for the code first and read the lines you need. Truncation names the next start_line; skill:<name> loads listed guidance."; Schema = @{ path = (@{} + $pathRule); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'First line, inclusive; defaults to 1.' }); line_count = @{ Kind = 'Number'; Min = 1; Max = 2000; Default = 300; Description = 'Requested line count, 1-2000; defaults to 300.' } }; Prepare = ${function:Read-AgentToolData}; Role = 'tool-read' }
     write = @{ Description = "Create a UTF-8 file with a null hash, or replace an entire existing file with its matching hash. Parents must exist.`nPrefer edit for partial changes. Returns hashes, bytes and available diagnostics."; Schema = @{ path = $pathRule; text = $string; expected_sha256 = (@{} + $hash + @{ Nullable = $true; Description = 'Existing file hash, or null for create-only. Required for write.' }) }; Prepare = ${function:New-AgentToolFileChange}; Execute = ${function:Invoke-AgentToolFileChange}; Role = 'tool-result' }
     edit  = @{ Description = "Edit one file with one ordinal before match (optionally anchored), or 1-64 nonoverlapping original-line hunks in any order; each target must match once. One atomic change. Read first.`nOmitted expected_sha256 uses this run's observed hash; changed or unread files fail. Wait for each result before changing this file again. Returns hunks, hash and diagnostics."; Schema = @{ path = $pathRule; before = @{ Kind = 'String'; Min = 1; Description = 'Exact nonempty source text, unique within the optional line anchors.' }; after = $string; expected_sha256 = (@{} + $hash + @{ Optional = $true; Description = 'Optional after read in this run; explicit null is invalid. Stale files fail.' }); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'Optional inclusive first line of the matching region.' }); end_line = (@{} + $lineRule + @{ Default = [int]::MaxValue; Description = 'Optional inclusive last line of the matching region.' }) }; Prepare = ${function:New-AgentToolFileChange}; Execute = ${function:Invoke-AgentToolFileChange}; Edit = $true; Role = 'tool-result' }
     pwsh  = @{ Description = "Run PowerShell in the context directory to search, build, test and inspect files. Each call starts a new pwsh process; run code directly, not through pwsh -Command. Unhandled cmdlet errors stop execution; handle expected failures explicitly. Check exit codes and stderr.`nRecursive search: Get-ChildItem -Recurse -File -Filter *.ps1 | Select-String -Pattern ...; ** is not recursive. Large output retains the head and tail; narrow commands to focus it. The harness sets time and output limits, so limit arguments such as timeout_ms are ignored."; Ignored = '^(?:max|limit|timeout)[A-Za-z_]{0,40}$'; Schema = @{ command = @{ Kind = 'String'; Min = 1; Max = 65536; Nonblank = $true; Description = 'Exact PowerShell source. Prefer bounded text output and focused checks.' } }; Prepare = ${function:New-AgentToolCommand}; Execute = ${function:Invoke-AgentToolProcess}; Role = 'tool-result' }
@@ -897,12 +960,25 @@ function Register-AgentRuntime {
             $decoded
         }, {
             param($Context, $Call)
-            try {
+            # A check sent with a change that failed would test unchanged code, so it is not run; this lets the model
+            # send an edit and its check in one step instead of two (h-hist-10: 22 of 146 steps were a lone edit).
+            $lease = $Context.PSObject.Properties['AgentLease'] ? $Context.AgentLease : $null
+            $failed = $null
+            if ($lease -and $Call.Name -cin @('pwsh', 'check_file') -and $script:PackFailedChanges.TryGetValue($lease, [ref]$failed) -and $failed.Step -eq $Context.AgentStep) {
+                $skip = [InvalidOperationException]::new("Not run: the $($failed.Tool) earlier in this step failed, so this would check unchanged code. Fix the change and send this call with it again.")
+                $skip.Data['AgentNotExecuted'] = $true
+                return Complete-AgentToolCall -Context $Context -Call $Call -Data $null -Failure $skip
+            }
+            $result = try {
                 Invoke-AgentToolCall $Context $Call
             }
             catch {
                 Complete-AgentToolCall -Context $Context -Call $Call -Data $null -Failure $_.Exception
             }
+            if ($lease -and $Call.Name -cin @('edit', 'write', 'rename', 'rename_symbol') -and $result.Status -ceq 'error') {
+                $script:PackFailedChanges.AddOrUpdate($lease, @{ Step = $Context.AgentStep; Tool = $Call.Name })
+            }
+            $result
         }, {
             param($Parsed, [string]$Text)
             $fences = @(Get-HarnessFencedBlock $Text)

@@ -6,7 +6,7 @@ function Get-AgentSearchSchema {
     if ($Config.'Agent.CodeSearchExact' -or $Config.'Agent.CodeSearchRanked' -or $Config.'Agent.CodeSearchHybrid') {
         # The canonical schema is installed once; the dispatcher checks the enabled mode.
         @{ Name = 'search'; Description = $script:PackTools.search.Description; Parameters = @{ type = 'object'; additionalProperties = $false; required = @('query'); properties = @{
-                    query = @{ type = 'string'; description = 'Literal text; a .NET regular expression when regex is true; keywords in ranked mode.' }; scope = @{ type = 'string'; description = 'A context-relative file or directory, or several separated by ;; defaults to the whole context. Use includes for name patterns.' }
+                    query = @{ type = 'string'; description = 'Literal text; a .NET regular expression when regex is true (set it for alternatives such as a|b); keywords in ranked mode.' }; scope = @{ type = 'string'; description = 'A context-relative file or directory, or several separated by ;; defaults to the whole context. Use includes for name patterns.' }
                     mode = @{ type = 'string'; enum = @('exact', 'ranked'); description = 'exact (default) or ranked.' }; regex = @{ type = 'boolean'; description = 'Treat query as a regular expression.' }; ignore_case = @{ type = 'boolean'; description = 'Match case-insensitively.' }
                     includes = @{ type = 'string'; description = 'Semicolon-separated path wildcards such as *.ps1;*.psm1; defaults to *.' }; per_line = @{ type = 'boolean'; description = 'Return every matching line (default) or only the first match per file.' }
                 }
@@ -62,24 +62,84 @@ function Invoke-AgentCodeSearch {
         Pump = $Context.Pump; CancellationToken = $Context.CancellationToken
     }
     $limit = [Math]::Min($config.'Agent.MaxReadBytes', $config.'Agent.MaxCaptureBytes')
-    $results = [Collections.Generic.List[object]]::new(); $used = 256; $truncated = $false
-    foreach ($candidate in @($script:Harness.Retrievers.Invoke('BM25', @($arguments.query, $limit, $request)))) {
-        $chunk = $candidate.Chunk
-        if (-not $ranked -and $candidate.Truncated) {
-            $truncated = $true
+    $results = [Collections.Generic.List[object]]::new(); $used = 256; $truncated = $false; $note = $null
+    foreach ($attempt in 0, 1) {
+        foreach ($candidate in @($script:Harness.Retrievers.Invoke('BM25', @($arguments.query, $limit, $request)))) {
+            $chunk = $candidate.Chunk
+            if (-not $ranked -and $candidate.Truncated) {
+                $truncated = $true
+            }
+            # Recheck each returned path through the read-tool policy, including exclusions.
+            $null = Resolve-AgentToolPath -State $state -Root $root -Path $chunk.Path -Context $Context -Inventory:([bool]$candidate.Listed)
+            $row = @{ path = $control.ProtectText($state, $chunk.Path); start_line = $chunk.StartLine; end_line = $chunk.EndLine; name = $control.ProtectText($state, $chunk.Title); text = $control.ProtectText($state, $chunk.Text); score = $candidate.Score; retriever = $candidate.Retriever }
+            $bytes = [Text.Encoding]::UTF8.GetByteCount(($row | ConvertTo-Json -Depth 6 -Compress)) + 1
+            if ($results.Count -ge 50 -or $used + $bytes -gt $limit) {
+                $truncated = $true; continue
+            }
+            $used += $bytes; $results.Add($row)
         }
-        # Recheck each returned path through the read-tool policy, including exclusions.
-        $null = Resolve-AgentToolPath -State $state -Root $root -Path $chunk.Path -Context $Context -Inventory:([bool]$candidate.Listed)
-        $row = @{ path = $control.ProtectText($state, $chunk.Path); start_line = $chunk.StartLine; end_line = $chunk.EndLine; name = $control.ProtectText($state, $chunk.Title); text = $control.ProtectText($state, $chunk.Text); score = $candidate.Score; retriever = $candidate.Retriever }
-        $bytes = [Text.Encoding]::UTF8.GetByteCount(($row | ConvertTo-Json -Depth 6 -Compress)) + 1
-        if ($results.Count -ge 50 -or $used + $bytes -gt $limit) {
-            $truncated = $true; continue
+        # Models write rg-style alternation and wildcards (a|b, Get.*Item) with regex false, and the literal search finds
+        # nothing; 16 of 38 searches in one h-hist-11 run came back empty that way. Retry such a query once as a regex.
+        if ($attempt -or $results.Count -or $ranked -or $arguments.regex -or $request.SearchError -or $arguments.query -notmatch '\||\.\*|\\[bdsw]') {
+            break
         }
-        $used += $bytes; $results.Add($row)
+        try {
+            $null = [regex]::new($arguments.query)
+        }
+        catch {
+            break
+        }
+        $retry = @{}
+        foreach ($name in $arguments.Keys) {
+            $retry[$name] = $arguments[$name]
+        }
+        $retry.regex = $true; $request.SearchArguments = $retry; $truncated = $false
+        $note = 'Nothing matched the query as literal text; these results treat it as a regular expression.'
     }
     $Context.CancellationToken.ThrowIfCancellationRequested()
     if ($request.SearchError) {
         throw $request.SearchError
     }
-    Complete-AgentToolCall -Context $Context -Call $Call -Data @{ results = $results.ToArray(); truncated = $truncated; index_partial = $request.SearchPartial; stopped_at = $request.PSObject.Properties['SearchStop'] ? $request.SearchStop : $null; embedding_estimated_cost = $budget.EstimatedCost; embedding_requests = $budget.Requests; embedding_error = $request.EmbeddingError; skipped = $request.Skipped }
+    Complete-AgentToolCall -Context $Context -Call $Call -Data @{ results = $results.ToArray(); truncated = $truncated; index_partial = $request.SearchPartial; stopped_at = $request.PSObject.Properties['SearchStop'] ? $request.SearchStop : $null; embedding_estimated_cost = $budget.EstimatedCost; embedding_requests = $budget.Requests; embedding_error = $request.EmbeddingError; skipped = $request.Skipped; note = $note }
 }
+function Format-AgentSearchText {
+    [CmdletBinding()]
+    param([Collections.IDictionary]$Data)
+    # Matches grouped by file, as rg prints them: the JSON form repeated each match's path, name and line range and was
+    # about 44% of the search text Luna runs resent with every later request (h-hist-10).
+    $lines = [Collections.Generic.List[string]]::new()
+    $path = $null; $end = 0
+    foreach ($result in @($Data['results'])) {
+        if ($result.path -cne $path) {
+            if ($lines.Count) {
+                $lines.Add('')
+            }
+            $lines.Add($result.path); $path = $result.path
+        }
+        elseif ($result.start_line -gt $end + 1) {
+            $lines.Add('--')
+        }
+        if ($result.retriever -cne 'Literal') {
+            $lines.Add("[$($result.retriever) score $([Math]::Round([double]$result.score, 3))$($result.name -cne $result.path ? ": $($result.name)" : '')]")
+        }
+        $lines.Add($result.text); $end = $result.end_line
+    }
+    if (-not $lines.Count) {
+        $lines.Add('No matches.')
+    }
+    $notes = @(
+        $Data['truncated'] ? 'More matches exist; narrow the query or scope.' : $null
+        $Data['index_partial'] ? 'The index was partial, so some files were not searched.' : $null
+        $Data['stopped_at'] ? "Search stopped at $($Data['stopped_at'])." : $null
+        $Data['skipped'] ? "Skipped $($Data['skipped']) files." : $null
+        $Data['note']
+        $Data['embedding_error'] ? "Embedding search failed: $($Data['embedding_error'])" : $null
+        $Data['embedding_requests'] ? "Embedding requests: $($Data['embedding_requests']); estimated cost $($Data['embedding_estimated_cost'])." : $null
+    )
+    $known = @('results', 'truncated', 'index_partial', 'stopped_at', 'skipped', 'note', 'embedding_error', 'embedding_requests', 'embedding_estimated_cost')
+    foreach ($entry in $Data.GetEnumerator() | Where-Object { $_.Key -cnotin $known -and $null -ne $_.Value -and $_.Value -ne '' }) {
+        $notes += "$($entry.Key): $($entry.Value -is [string] ? $entry.Value : ($entry.Value | ConvertTo-Json -Depth 6 -Compress))"
+    }
+    (@($lines) + @($notes | Where-Object { $_ })) -join "`n"
+}
+
