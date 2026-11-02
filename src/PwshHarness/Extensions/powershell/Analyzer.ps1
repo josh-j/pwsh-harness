@@ -3,6 +3,9 @@ $script:PackAnalyzer = $null
 $script:PackAnalyzerWarmup = $null
 $script:PackAnalyzerDrain = $null
 $script:PackAnalyzerSettings = @{}
+# Findings by analyzed text. An edit analyzes the file before and after it, and the text before is usually the one
+# the last edit or read analyzed already: rerunning it cost two to eight seconds an edit (Luna runs, 2026-11-02).
+$script:PackAnalyzerFindings = [Collections.Concurrent.ConcurrentDictionary[string, object]]::new([StringComparer]::Ordinal)
 . (Join-Path $PSScriptRoot 'EditorDiscovery.ps1')
 function Read-PowerShellAnalyzerManifest {
     [CmdletBinding()]
@@ -293,6 +296,10 @@ function Invoke-PowerShellAnalyzer {
         throw $a.Error
     }
     if ($a.Module) {
+        $reuse = -not $Format -and -not $AnalyzerRules.Count; $known = $null
+        if ($reuse -and $script:PackAnalyzerFindings.TryGetValue($Code, [ref]$known) -and [object]::ReferenceEquals($known.Analyzer, $a) -and [object]::ReferenceEquals($known.Settings, $s.Settings)) {
+            return $known.Findings
+        }
         $p = @{ ScriptDefinition = $Code; ErrorAction = 'Stop' }
         if ($Format -and $Range.Count) {
             $p.Range = $Range
@@ -310,9 +317,16 @@ function Invoke-PowerShellAnalyzer {
         }
         # A record's Line and Column are script properties from the analyzer runspace's type data, so they read as
         # empty here; take the position from the extent.
-        foreach ($d in $result) {
-            [pscustomobject]@{ RuleName = $d.RuleName; Severity = [string]$d.Severity; Message = $d.Message; Line = $d.Extent.StartLineNumber; Column = $d.Extent.StartColumnNumber }
+        $findings = @(foreach ($d in $result) {
+                [pscustomobject]@{ RuleName = $d.RuleName; Severity = [string]$d.Severity; Message = $d.Message; Line = $d.Extent.StartLineNumber; Column = $d.Extent.StartColumnNumber }
+            })
+        if ($reuse) {
+            if ($script:PackAnalyzerFindings.Count -ge 64) {
+                $script:PackAnalyzerFindings.Clear()
+            }
+            $script:PackAnalyzerFindings[$Code] = [pscustomobject]@{ Analyzer = $a; Settings = $s.Settings; Findings = $findings }
         }
+        $findings
     }
 }
 function Invoke-PowerShellFormatterProcessor {
@@ -349,7 +363,7 @@ function Start-PowerShellAnalyzerWarmup {
     # without making a check or a format queue behind it: a full-file warm-up in the shared runspace made the next
     # edit's formatter give up after five seconds. Files read while a warm-up runs wait in its queue, which the
     # running warm-up drains: dropping them left each later edit of them over budget (Luna runs, 2026-10-30). One
-    # warm-up runs at a time and its findings are discarded.
+    # warm-up runs at a time; its findings are kept for the first edit of the file, which analyzes the text before it.
     [CmdletBinding()]
     [OutputType([bool])]
     param([string]$Code, $Config, $Analyzer)
@@ -373,7 +387,7 @@ function Start-PowerShellAnalyzerWarmup {
             Write-Verbose "Discarded a failed analyzer warm-up: $($_.Exception.Message)"
         }
     }
-    $parameters = @{ ErrorAction = 'SilentlyContinue' }
+    $parameters = @{ ErrorAction = 'Stop' }
     $settings = (Resolve-PowerShellAnalyzerSetting $Config).Settings
     if ($null -ne $settings) {
         $parameters.Settings = $settings
@@ -382,7 +396,7 @@ function Start-PowerShellAnalyzerWarmup {
     # One script: disposing a running multi-statement pipeline crashed the process from a thread-pool thread.
     # Import-Module returns at once after the first warm-up has loaded the module. A file queued just as the loop
     # ends waits for the next read.
-    $null = $p.AddScript('param($Path, $Parameters, $Queue) Microsoft.PowerShell.Core\Import-Module -Name $Path -Scope Local -ErrorAction Stop; $code = $null; while ($Queue.TryDequeue([ref]$code)) { $Parameters.ScriptDefinition = $code; $null = PSScriptAnalyzer\Invoke-ScriptAnalyzer @Parameters }').AddArgument($Analyzer.Path).AddArgument($parameters).AddArgument($w.Queue)
+    $null = $p.AddScript('param($Path, $Parameters, $Queue, $Found, $Analyzer) Microsoft.PowerShell.Core\Import-Module -Name $Path -Scope Local -ErrorAction Stop; $code = $null; while ($Queue.TryDequeue([ref]$code)) { $Parameters.ScriptDefinition = $code; try { $hits = @(foreach ($d in PSScriptAnalyzer\Invoke-ScriptAnalyzer @Parameters) { [pscustomobject]@{ RuleName = $d.RuleName; Severity = [string]$d.Severity; Message = $d.Message; Line = $d.Extent.StartLineNumber; Column = $d.Extent.StartColumnNumber } }); if ($Found.Count -ge 64) { $Found.Clear() }; $Found[$code] = [pscustomobject]@{ Analyzer = $Analyzer; Settings = $Parameters.Settings; Findings = $hits } } catch { $null = $_ } }').AddArgument($Analyzer.Path).AddArgument($parameters).AddArgument($w.Queue).AddArgument($script:PackAnalyzerFindings).AddArgument($Analyzer)
     $w.Pending = $p.BeginInvoke()
     $true
 }
@@ -406,7 +420,7 @@ function Clear-PowerShellAnalyzer {
     $script:PackAnalyzerDrain = $null
     $null = ${script:PackAnalyzer}?.Pipeline?.Dispose()
     $null = ${script:PackAnalyzer}?.Runspace?.Dispose()
-    $script:PackAnalyzer = $null; $script:PackAnalyzerSettings.Clear()
+    $script:PackAnalyzer = $null; $script:PackAnalyzerSettings.Clear(); $script:PackAnalyzerFindings.Clear()
 }
 function Invoke-PowerShellAnalyzerCommand {
     [CmdletBinding()]
@@ -418,7 +432,7 @@ function Invoke-PowerShellAnalyzerCommand {
         throw 'Use /analyzer or /analyzer refresh.'
     }
     $a = Get-PowerShellAnalyzer $Context.State.Config; $s = Resolve-PowerShellAnalyzerSetting $Context.State.Config
-    "Analyzer: $($a.Source)`nPath: $($a.Path)`nVersion: $($a.Version)`nEnabled: $($s.Enabled)`nSettings: $($s.SettingsSource)`nIncludeRule override: $($Context.State.Config.AnalyzerRules -join ', ')`nFormatter: $($s.Format); settings: $($s.FormatSource)`nDiagnostics: $(@($a.Error) + $s.Errors -join '; ')"
+    "Analyzer: $($a.Source)`nPath: $($a.Path)`nVersion: $($a.Version)`nEnabled: $($s.Enabled)`nSettings: $($s.SettingsSource)`nIncludeRule override: $($Context.State.Config.AnalyzerRules -join ', ')`nFormatter: $($s.Format); settings: $($s.FormatSource)`nDiagnostics: $(@($a.Error) + $s.Errors -join '; ')`nCached analyses: $($script:PackAnalyzerFindings.Count)"
 }
 function Register-PowerShellAnalyzer {
     [CmdletBinding()]
