@@ -82,9 +82,10 @@ function Resolve-AgentToolPath {
         # Name the missing folder so a guessed path can be corrected.
         throw "The folder for '$Path' does not exist; tool paths must be in existing folders. List or search a parent folder to find the right path."
     }
+    $comparison = Get-HarnessPathComparison
     foreach ($protected in @($script:Harness.ConfigService.GetPath(), $State.Config.ConfigPath, $State.Config.SessionDirectory, (Get-AgentRewindDirectory $State -Root))) {
-        if ($protected -and ($full.Equals([IO.Path]::GetFullPath($protected), (Get-HarnessPathComparison)) -or
-                $full.StartsWith([IO.Path]::GetFullPath($protected).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar, (Get-HarnessPathComparison)))) {
+        $protected = $protected ? [IO.Path]::GetFullPath($protected) : $null
+        if ($protected -and ($full.Equals($protected, $comparison) -or $full.StartsWith($protected.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar, $comparison))) {
             throw (New-AgentRefusal -Code ProtectedPath -Message 'Protected configuration or session-store path.' -Next 'The harness never reads or writes this path; continue without it.')
         }
     }
@@ -94,7 +95,7 @@ function Resolve-AgentToolPath {
     $query = [pscustomobject]@{ Pump = $Context.Pump; CancellationToken = $Context.CancellationToken }
     $repository = $Inventory ? $null : (Invoke-HarnessService -Harness $script:Harness -Name 'workspace.git' -Arguments @($Root, @('rev-parse', '--is-bare-repository'), $query) -Required)
     if (($repository -and $repository.ExitCode -eq 0 -and $repository.Text.Trim() -ceq 'true') -or
-        ([IO.File]::Exists((Join-Path $Root 'HEAD')) -and [IO.Directory]::Exists((Join-Path $Root 'objects')))) {
+        ([IO.File]::Exists([IO.Path]::Combine($Root, 'HEAD')) -and [IO.Directory]::Exists([IO.Path]::Combine($Root, 'objects')))) {
         throw (New-AgentRefusal -Code ProtectedPath -Message 'Protected bare Git repository.' -Next 'The harness never reads or writes this path; continue without it.')
     }
     if (-not $explicit) {
