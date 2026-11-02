@@ -53,6 +53,8 @@ function Get-RunPolicyBatchMessage {
 function Get-RunPolicyEditBatchMessage {
     # Edits to different files are independent, yet Luna runs sent 1.1 edits per editing step while Codex patched a
     # change and its test together (2026-10-31); the batching reminder exempts edits, so lone edits get this note.
+    # After two lone edits it came too late: at low effort 6 of 10 lone-edit pairs were a source change and then its
+    # test, followed by a separate check step (h-hist-18), so it follows the first.
     [CmdletBinding()]
     [OutputType([hashtable])]
     param([Parameter(Mandatory)]$View)
@@ -62,11 +64,11 @@ function Get-RunPolicyEditBatchMessage {
     }
     $memory.EditStep = $View.Step
     $memory.LoneEdits = ($View.LastCalls -join ',') -cin @('edit', 'write') ? [int]$memory.LoneEdits + 1 : 0
-    if ($memory.LoneEdits -lt 2) {
+    if ($memory.LoneEdits -lt 1) {
         return
     }
     $memory.EditsNoted = $true
-    @{ Kind = 'EditBatch'; Text = "<EPHEMERAL_MESSAGE>`nThe last two steps each changed one file, and each step resends the whole conversation. When you know several changes, send them in one step: changes to different files together, and several changes to one file as hunks of one edit.`n</EPHEMERAL_MESSAGE>" }
+    @{ Kind = 'EditBatch'; Text = "<EPHEMERAL_MESSAGE>`nThat step changed one file, and each step resends the whole conversation. Send the other changes you know in one step, such as its test: changes to different files together and several changes to one file as hunks of one edit, followed by the check that verifies them (calls run in order).`n</EPHEMERAL_MESSAGE>" }
 }
 function Get-RunPolicyLonePlanMessage {
     # A step that only updates the plan costs a whole request; Luna runs spent about one step in nine that way.
@@ -153,13 +155,14 @@ function Get-RunPolicyUnchangedMessage {
 function Get-RunPolicyUnfinishedMessage {
     # An unattended change whose answer says the work is unfinished is asked once to continue: Luna runs stopped on
     # "the focused test still fails ... the next fix should" (h-hist-18) and on a test they knew was broken (h-hist-15)
-    # with most of their steps unused.
+    # with most of their steps unused, and on "The focused test **failed** ... needs debugging" (h-hist-20). A test
+    # that failed before the fix is not unfinished work.
     [CmdletBinding()]
     [OutputType([hashtable])]
     param([Parameter(Mandatory)]$View)
-    $pattern = '(?i)\b(?:(?:is|remains)\s+(?:still\s+)?not\s+(?:yet\s+)?(?:complete|completed|done|finished)|(?:is|remains)\s+incomplete|still\s+fail(?:s|ing)?|the\s+next\s+fix\s+(?:should|would|is))\b'
+    $pattern = '(?i)\b(?:(?:is|remains)\s+(?:still\s+)?not\s+(?:yet\s+)?(?:complete|completed|done|finished)|(?:is|remains)\s+(?:incomplete|unverified)|still\s+fail(?:s|ing)?|(?:test|check)s?\s+failed\b(?!\s+(?:before|without))|needs?\s+(?:more\s+|further\s+)?debugging|the\s+next\s+fix\s+(?:should|would|is))\b'
     if (-not $View.Headless -or $View.Memory.Unfinished -or -not $View.Progress.Changes -or $View.StepsRemaining -le 0 -or
-        [string]$View.Answer -notmatch $pattern -or (Get-RunPolicyTaskKind $View) -cne 'fix') {
+        ([string]$View.Answer).Replace('*', '') -notmatch $pattern -or (Get-RunPolicyTaskKind $View) -cne 'fix') {
         return
     }
     $View.Memory.Unfinished = $true

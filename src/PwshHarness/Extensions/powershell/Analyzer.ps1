@@ -1,6 +1,7 @@
 #Requires -Version 7.6
 $script:PackAnalyzer = $null
 $script:PackAnalyzerWarmup = $null
+$script:PackAnalyzerDrain = $null
 $script:PackAnalyzerSettings = @{}
 . (Join-Path $PSScriptRoot 'EditorDiscovery.ps1')
 function Read-PowerShellAnalyzerManifest {
@@ -77,14 +78,45 @@ function Get-PowerShellAnalyzer {
     }
     $script:PackAnalyzer
 }
+function Move-PowerShellAnalyzerAside {
+    # Lets a busy analyzer runspace finish on its own and gives the analyzer a fresh one. One runspace drains at a
+    # time; it is disposed once it stops, never while it runs.
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param($Analyzer, $Context, [int]$TimeoutMilliseconds)
+    $d = $script:PackAnalyzerDrain
+    if ($d) {
+        if ($d.Pipeline.InvocationStateInfo.State -in @('Running', 'Stopping')) {
+            return $false
+        }
+        $d.Pipeline.Dispose(); $d.Runspace.Dispose()
+    }
+    $script:PackAnalyzerDrain = [pscustomobject]@{ Pipeline = $Analyzer.Pipeline; Runspace = $Analyzer.Runspace }
+    $Analyzer.Runspace = [runspacefactory]::CreateRunspace(); $Analyzer.Runspace.Open()
+    $Analyzer.Pipeline = [powershell]::Create(); $Analyzer.Pipeline.Runspace = $Analyzer.Runspace
+    $Analyzer.Stop = $null; $Analyzer.Pending = $null; $Analyzer.FailedAsync = $false
+    $null = Invoke-PowerShellAnalyzerPipeline -Analyzer $Analyzer -Command 'Import-Module' -Parameters @{ Name = $Analyzer.Path; Scope = 'Local'; ErrorAction = 'Stop' } -Context $Context -TimeoutMilliseconds $TimeoutMilliseconds
+    $true
+}
 function Invoke-PowerShellAnalyzerPipeline {
     [CmdletBinding()]
     param($Analyzer, [ValidateSet('Import-Module', 'Invoke-ScriptAnalyzer', 'Invoke-Formatter')][string]$Command, [hashtable]$Parameters, $Context, [int]$TimeoutMilliseconds = 5000)
     $p = $Analyzer.Pipeline
     if ($p.InvocationStateInfo.State -in @('Running', 'Stopping') -and $Context) {
-        # Queue behind earlier work, such as the stop after a timeout, instead of failing this check.
+        # Queue behind earlier work, such as the stop after a timeout, instead of failing this check. PSScriptAnalyzer
+        # stops only between rules: the stop after a timed-out cold analysis held the next edit's formatter and analysis
+        # for five seconds each, and both gave up (h-hist-18). After a short wait the busy runspace finishes aside and a
+        # fresh one takes the check; the process has already loaded the module and cached its command lookups.
         $watch = $script:Harness.Clock.Elapsed()
+        $aside = [bool]$Analyzer.Path
         while ($p.InvocationStateInfo.State -in @('Running', 'Stopping') -and $watch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+            if ($aside -and $watch.ElapsedMilliseconds -ge 250) {
+                $aside = $false
+                if (Move-PowerShellAnalyzerAside -Analyzer $Analyzer -Context $Context -TimeoutMilliseconds $TimeoutMilliseconds) {
+                    $p = $Analyzer.Pipeline
+                    break
+                }
+            }
             $Context.CancellationToken.ThrowIfCancellationRequested()
             if ($Context.Pump) {
                 $null = & $Context.Pump
@@ -365,6 +397,13 @@ function Clear-PowerShellAnalyzer {
     $null = $warmup?.Pipeline?.Dispose()
     $null = $warmup?.Runspace?.Dispose()
     $script:PackAnalyzerWarmup = $null
+    $drain = $script:PackAnalyzerDrain
+    if ($drain -and $drain.Pipeline.InvocationStateInfo.State -in @('Running', 'Stopping')) {
+        $drain.Pipeline.Stop()
+    }
+    $null = $drain?.Pipeline?.Dispose()
+    $null = $drain?.Runspace?.Dispose()
+    $script:PackAnalyzerDrain = $null
     $null = ${script:PackAnalyzer}?.Pipeline?.Dispose()
     $null = ${script:PackAnalyzer}?.Runspace?.Dispose()
     $script:PackAnalyzer = $null; $script:PackAnalyzerSettings.Clear()
