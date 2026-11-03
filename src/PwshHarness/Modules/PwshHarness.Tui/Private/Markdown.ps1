@@ -29,8 +29,22 @@ function Get-TuiMarkdownInlineSegment {
             [pscustomobject]@{ Text = $match.Groups['literal'].Value; Color = 'Green' }
         }
         elseif ($match.Groups['link'].Success) {
-            Get-TuiMarkdownInlineSegment -Text $match.Groups['label'].Value -Color Cyan -Depth ($Depth + 1)
-            [pscustomobject]@{ Text = ' (' + $match.Groups['url'].Value + ')'; Color = 'BrightBlack' }
+            $label = $match.Groups['label'].Value
+            $url = $match.Groups['url'].Value
+            Get-TuiMarkdownInlineSegment -Text $label -Color Cyan -Depth ($Depth + 1)
+            # The agent links files by absolute file: URL. One labelled with its path or name (line suffixes and
+            # anchors aside) shows the label alone; another names its file and line, not the whole path.
+            $named = ($label.Replace('`', '') -replace '\\', '/' -replace ':\d+(?:-\d+)?(?::\d+)?$').TrimStart('/')
+            $target = [uri]::UnescapeDataString(($url -replace '#.*$')) -replace '\\', '/'
+            if ($url -match '\Afile:' -and $target -match '[^/]/*\z') {
+                if (-not $named -or $target -notmatch ('/' + [regex]::Escape($named) + '\z')) {
+                    $line = [regex]::Match($url, '#L(\d+)')
+                    [pscustomobject]@{ Text = ' (' + $target.TrimEnd('/').Split('/')[-1] + ($line.Success ? ':' + $line.Groups[1].Value : '') + ')'; Color = 'BrightBlack' }
+                }
+            }
+            elseif ($url -cne $label) {
+                [pscustomobject]@{ Text = ' (' + $url + ')'; Color = 'BrightBlack' }
+            }
         }
         elseif ($match.Groups['strong'].Success) {
             Get-TuiMarkdownInlineSegment -Text $match.Groups['bold'].Value -Color Magenta -Depth ($Depth + 1)
@@ -47,21 +61,70 @@ function Get-TuiMarkdownInlineSegment {
 
 function Split-TuiStyledRow {
     [CmdletBinding()]
-    param([object[]]$Segments, [int]$Width, [string]$Prefix = '')
+    param([object[]]$Segments, [int]$Width, [string]$Prefix = '', [switch]$WordWrap)
     $available = [Math]::Max(1, $Width - (Get-TuiTextWidth $Prefix))
     $parts = [Collections.Generic.List[object]]::new()
     $size = 0
+    # Word wrapping breaks prose at spaces: a word that does not fit the rest of a row starts the next one,
+    # spaces at a break are dropped, and a word wider than a row, or after only indentation, splits between glyphs.
+    # Continuation rows hang under the text of an indented line or list item.
+    $plain = $WordWrap ? (@($Segments.ForEach({ [string]$_.Text })) -join '') : ''
+    $hang = $WordWrap ? (Get-TuiTextWidth ([regex]::Match($plain, '\A *(?:(?:[-*+•]|\d{1,3}[.)]) +)?').Value)) : 0
+    if ($hang * 2 -gt $available) {
+        $hang = 0
+    }
+    $base = 0
+    $wrapped = $false
+    $inked = $false
     foreach ($segment in $Segments) {
         $text = [string]$segment.Text
         $offset = 0
         while ($offset -lt $text.Length) {
-            if ($size -eq $available) {
+            $position = $base + $offset
+            $next = $text.Length
+            if ($WordWrap) {
+                if ($wrapped -and -not $inked -and $text[$offset] -eq ' ') {
+                    $offset++
+                    continue
+                }
+                if ($wrapped -and -not $size -and $hang) {
+                    $parts.Add([pscustomobject]@{ Text = ' ' * $hang; Color = 'Default' })
+                    $size = $hang
+                }
+                if ($text[$offset] -ne ' ' -and ($position -eq 0 -or $plain[$position - 1] -eq ' ')) {
+                    $end = $plain.IndexOf(' ', $position)
+                    $word = $end -lt 0 ? $plain.Substring($position) : $plain.Substring($position, $end - $position)
+                    $cells = $word -notmatch '[^\x20-\x7E]' ? $word.Length : (Get-TuiTextWidth $word)
+                    if ($inked -and $size + $cells -gt $available -and $cells -le $available) {
+                        $size = $available
+                    }
+                }
+                # Stop each piece at the next word so its fit is checked.
+                $space = $text.IndexOf(' ', $offset)
+                if ($space -ge 0) {
+                    $after = $space
+                    while ($after -lt $text.Length -and $text[$after] -eq ' ') {
+                        $after++
+                    }
+                    $next = $after
+                }
+            }
+            if ($size -ge $available) {
+                while ($parts.Count -and $parts[-1].Text.EndsWith(' ') -and $WordWrap) {
+                    $parts[-1].Text = $parts[-1].Text.TrimEnd(' ')
+                    if (-not $parts[-1].Text) {
+                        $parts.RemoveAt($parts.Count - 1)
+                    }
+                }
                 New-TuiStyledRow $parts.ToArray() $Prefix
                 $parts.Clear()
                 $size = 0
+                $wrapped = $true
+                $inked = $false
+                continue
             }
             if ($text -notmatch '[^\x20-\x7E]') {
-                $count = [Math]::Min($available - $size, $text.Length - $offset)
+                $count = [Math]::Min($available - $size, $next - $offset)
                 $part = $text.Substring($offset, $count)
                 $size += $count
             }
@@ -69,17 +132,18 @@ function Split-TuiStyledRow {
                 $part = [Globalization.StringInfo]::GetNextTextElement($text, $offset)
                 $cells = $part.Length -eq 1 -and $part[0] -ge ' ' -and $part[0] -le '~' ? 1 : (Get-TuiGlyphWidth -Glyph $part)
                 if ($size + $cells -gt $available -and $size) {
-                    New-TuiStyledRow $parts.ToArray() $Prefix
-                    $parts.Clear()
-                    $size = 0
+                    $size = $available
+                    continue
                 }
                 $size += $cells
             }
             $parts.Add([pscustomobject]@{ Text = $part; Color = $segment.Color })
+            $inked = $inked -or $part.Trim()
             $offset += $part.Length
         }
+        $base += $text.Length
     }
-    if ($parts.Count -or -not $size) {
+    if ($parts.Count -or -not ($size -or $wrapped)) {
         New-TuiStyledRow $parts.ToArray() $Prefix
     }
 }
@@ -138,7 +202,7 @@ function Get-TuiMarkdownLineRow {
             else {
                 @(Get-TuiMarkdownInlineSegment $Text $Color)
             }
-            @(Split-TuiStyledRow -Segments $segments -Width $Width -Prefix $Prefix)
+            @(Split-TuiStyledRow -Segments $segments -Width $Width -Prefix $Prefix -WordWrap:(-not $Code))
         }
     }
     if ($null -ne $NextLineCache -and $NextLineCache.Count -lt 8192 -and $Text.Length -le 16384 -and -not $NextLineCache.ContainsKey($key)) {

@@ -92,6 +92,10 @@ function Start-PwshHarness {
         }
         if ($ownsHost -and $HarnessHost) {
             $HarnessHost.Dispose()
+            # The shell outlives the session: return the session's index, transcript and frame garbage now. An idle
+            # prompt may never reach the next collection, and the shell kept 513 MB after /quit (wlab, 2026-11-03).
+            $arguments = $session = $HarnessHost = $null
+            [GC]::Collect(2, [GCCollectionMode]::Aggressive, $true, $true)
         }
     }
 }

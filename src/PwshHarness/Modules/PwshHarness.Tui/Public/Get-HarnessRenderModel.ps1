@@ -79,9 +79,50 @@ function Get-HarnessRenderModel {
         $cachedRecords = [Collections.Generic.List[object]]::new()
         $cachedRowCount = 0
         $liveRows = [Collections.Generic.List[int]]::new()
-        $recordIndex = -1
-        foreach ($record in $records) {
-            $recordIndex++
+        $rowStarts = [Collections.Generic.List[int]]::new()
+        $entryRows = [Collections.Generic.List[int]]::new()
+        $sources = [Collections.Generic.List[object]]::new()
+        # Records before the first changed one keep their rows, so a new record or streamed text lays out only the
+        # tail. Their rows depend only on the layout settings compared here (the layout key covers the result's code
+        # blocks, which apply to its record only while no run is busy).
+        $reused = 0
+        $inlineCodeIndex = -1
+        if ($cacheStart -eq 0 -and $records.Count -le 2048 -and $cache.Start -eq 0 -and $null -ne $cache.Transcript -and
+            (Test-TuiRecordProperty $cache 'RowStarts') -and $cache.Width -eq $Width -and $cache.Ascii -eq $State.StatusBar.Ascii -and
+            $cache.Expanded -eq $State.Panels.ExpandTools -and $cache.PreviewLines -eq $State.StatusBar.ToolPreviewLines -and
+            $cache.ReviewMode -eq $State.ReviewMode -and [string]::Equals($cache.LayoutKey, $layoutKey, [StringComparison]::Ordinal) -and
+            ($cache.Busy -eq $State.SessionView.Busy -or -not ($result -and $result.CodeBlocks.Count))) {
+            $limit = [Math]::Min($records.Count, $cache.Sources.Count)
+            while ($reused -lt $limit -and [string]::Equals($cache.Sources[$reused].Role, $records[$reused].Role, [StringComparison]::Ordinal) -and
+                [string]::Equals($cache.Sources[$reused].Text, $records[$reused].Text, [StringComparison]::Ordinal) -and
+                ($records[$reused].Role -ne 'run' -or $cache.Sources[$reused].ExitCode -eq (Get-TuiRenderRecordExitCode $records[$reused]))) {
+                $reused++
+            }
+            if ($reused) {
+                $all.AddRange([ArraySegment[object]]::new($cache.Transcript, 0, $cache.RowStarts[$reused]))
+                $cachedRecords.AddRange([ArraySegment[object]]::new($cache.Records, 0, $reused))
+                $sources.AddRange([ArraySegment[object]]::new($cache.Sources, 0, $reused))
+                $rowStarts.AddRange([ArraySegment[int]]::new($cache.RowStarts, 0, $reused))
+                $entryRows.AddRange([ArraySegment[int]]::new($cache.EntryRows, 0, $reused))
+                $cachedRowCount = $cache.EntryRows[$reused]
+                if ($cache.InlineCodeIndex -ge 0 -and $cache.InlineCodeIndex -lt $reused) {
+                    $hasInlineCode = $cache.InlineCode
+                    $inlineCodeIndex = $cache.InlineCodeIndex
+                }
+                foreach ($row in $cache.LiveRows) {
+                    if ($row -lt $all.Count) {
+                        $liveRows.Add($row)
+                    }
+                }
+            }
+        }
+        for ($recordIndex = $reused; $recordIndex -lt $records.Count; $recordIndex++) {
+            $record = $records[$recordIndex]
+            $rowStarts.Add($all.Count)
+            $entryRows.Add($cachedRowCount)
+            if ($records.Count -le 2048) {
+                $sources.Add([pscustomobject]@{ Role = $record.Role; Text = $record.Text; ExitCode = ($record.Role -eq 'run' ? (Get-TuiRenderRecordExitCode $record) : 0) })
+            }
             $exitCode = $record.Role -eq 'run' ? (Get-TuiRenderRecordExitCode $record) : 0
             if ($record.Role -eq 'continuation' -or -not $record.Text -or
                 ($record.Role -eq 'tool-detail' -and -not $State.Panels.ExpandTools -and -not $State.ReviewMode)) {
@@ -128,7 +169,8 @@ function Get-HarnessRenderModel {
                     'agent-footer' = @{ Color = 'BrightBlack'; Prefix = '' }
                     user           = @{ Color = 'Default'; Prefix = '> ' }
                     notice         = @{ Color = 'Yellow' }
-                    system         = @{ Color = 'Cyan' }
+                    # Command output (/resume, /extensions, /undo list) keeps its lines; a notice stays one line.
+                    system         = @{ Color = 'Cyan'; Prefix = '' }
                     'agent-stop'   = @{ Color = 'Red' }
                 }[$record.Role]
                 $lines = if ($record.Role -ceq 'agent-footer') {
@@ -152,7 +194,7 @@ function Get-HarnessRenderModel {
                     }
                 }
                 elseif ($format.ContainsKey('Prefix')) {
-                    foreach ($line in ($record.Text -split '\r\n|\n|\r')) {
+                    foreach ($line in ($record.Text.Trim("`r", "`n") -split '\r\n|\n|\r')) {
                         Split-TuiDisplayLine ($format.Prefix + (ConvertTo-HarnessSafeText $line)) $Width
                     }
                 }
@@ -205,6 +247,7 @@ function Get-HarnessRenderModel {
             $recordRows = @($recordRows)
             if ($blocks.Count) {
                 $hasInlineCode = @($recordRows | Where-Object { $_.Text -match '^--- (powershell|pwsh|ps1) #\d+ ---$' }).Count -gt 0
+                $inlineCodeIndex = $recordIndex
             }
             if ($record.Role -eq 'tool-running') {
                 $liveRows.Add($all.Count)
@@ -220,6 +263,8 @@ function Get-HarnessRenderModel {
                 $cachedRecords.Add($entry)
             }
         }
+        $rowStarts.Add($all.Count)
+        $entryRows.Add($cachedRowCount)
         if (-not $State.SessionView.Busy -and $result -and $result.CodeBlocks.Count -and (-not $hasInlineCode -or $State.Panels.ShowDiff -or $State.Panels.CodeLine -gt 1)) {
             $heading = if ($State.StatusBar.Ascii) {
                 '--- Fixed code ---'
@@ -309,11 +354,11 @@ function Get-HarnessRenderModel {
                 $null
             }
             LiveRows        = $liveRows.ToArray()
-            Sources         = @(if ($records.Count -le 2048) {
-                    foreach ($record in $records) {
-                        [pscustomobject]@{ Role = $record.Role; Text = $record.Text; ExitCode = ($record.Role -eq 'run' ? (Get-TuiRenderRecordExitCode $record) : 0) }
-                    }
-                })
+            Sources         = $sources.ToArray()
+            RowStarts       = $rowStarts.ToArray()
+            InlineCode      = $hasInlineCode
+            InlineCodeIndex = $inlineCodeIndex
+            EntryRows       = $entryRows.ToArray()
             Transcript      = if ($allRows.Count -le 32768 -and $records.Count -le 2048) {
                 , $allRows
             }

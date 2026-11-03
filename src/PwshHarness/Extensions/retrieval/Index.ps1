@@ -515,6 +515,7 @@ function Update-RetrievalIndex {
     $root = $identity.Root; $key = $identity.Key
     if (-not $script:Indexes.ContainsKey($key)) {
         $script:Indexes[$key] = New-RetrievalIndex $Request $Corpus
+        $script:Indexes[$key].Churn = $script:Indexes[$key].Files.psbase.Count
     }
     $index = $script:Indexes[$key]
     $loadMilliseconds = $watch.Elapsed.TotalMilliseconds
@@ -692,6 +693,13 @@ function Update-RetrievalIndex {
         $phase.Restart()
         Save-RetrievalIndex $index
         $phases.PersistMilliseconds = $phase.Elapsed.TotalMilliseconds
+    }
+    $index.Churn += $phases.ProcessedFiles
+    if ($view.Ready -and $index.Churn -ge 300) {
+        # A large load or build leaves its JSON, tokenizer and postings garbage committed. One compacting collection
+        # (about 0.1 s) returned 175 MB of a 600 MB process after building a 1,400-file repository's index.
+        $index.Churn = 0
+        [GC]::Collect(2, [GCCollectionMode]::Aggressive, $true, $true)
     }
     $state = [pscustomobject]@{
         SessionId         = $Request.State.SessionId

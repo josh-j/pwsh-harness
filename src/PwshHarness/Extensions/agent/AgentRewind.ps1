@@ -2,6 +2,7 @@
 # Run rewind: snapshot the workspace's permitted files at an agent run's first change and again when it stops,
 # so /undo can reverse the latest changing runs' file and command changes. Content is stored by SHA-256 in
 # private session data (in memory for sessions that are not persisted); the latest changing runs are kept as checkpoints.
+# A persisted snapshot goes into a few pack files indexed in memory; only a checkpoint's prior content becomes a blob file.
 $script:PackRewind = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
 $script:PackRewindCheckpoints = 5
 function Get-AgentRewindDirectory {
@@ -19,7 +20,7 @@ function Get-AgentRewindRecord {
     $record = $null
     if (-not $script:PackRewind.TryGetValue([string]$State.SessionId, [ref]$record)) {
         $comparer = $IsWindows ? [StringComparer]::OrdinalIgnoreCase : [StringComparer]::Ordinal
-        $record = @{ Active = $null; Checkpoints = [Collections.Generic.List[object]]::new(); Cache = [Collections.Generic.Dictionary[string, object]]::new($comparer); Blobs = [Collections.Generic.Dictionary[string, byte[]]]::new([StringComparer]::Ordinal) }
+        $record = @{ Active = $null; Checkpoints = [Collections.Generic.List[object]]::new(); Cache = [Collections.Generic.Dictionary[string, object]]::new($comparer); Blobs = [Collections.Generic.Dictionary[string, byte[]]]::new([StringComparer]::Ordinal); Packs = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal) }
         $directory = Get-AgentRewindDirectory $State
         $journal = $directory ? (Join-Path $directory 'journal.json') : ''
         if ($journal -and [IO.File]::Exists($journal)) {
@@ -35,7 +36,7 @@ function Get-AgentRewindRecord {
 function Write-AgentRewindFile {
     # Only the journal is flushed to disk; a blob is checked against its hash on every read.
     [CmdletBinding()]
-    param([string]$Path, [byte[]]$Bytes, [switch]$Durable)
+    param([string]$Path, [byte[]]$Bytes, [switch]$Durable, [byte[][]]$Parts)
     # The mode applies only to the directory named, so create each missing level separately.
     $missing = [Collections.Generic.Stack[string]]::new()
     for ($directory = [IO.Path]::GetDirectoryName($Path); -not [IO.Directory]::Exists($directory); $directory = [IO.Path]::GetDirectoryName($directory)) {
@@ -52,7 +53,10 @@ function Write-AgentRewindFile {
     $stream = [IO.FileStream]::new($temp, $options)
     try {
         Protect-HarnessPrivateItem $stream
-        $stream.Write($Bytes, 0, $Bytes.Length); $stream.Flush([bool]$Durable)
+        foreach ($Bytes in ($Parts ? $Parts : @(, $Bytes))) {
+            $stream.Write($Bytes, 0, $Bytes.Length)
+        }
+        $stream.Flush([bool]$Durable)
         $stream.Dispose(); $stream = $null
         Invoke-HarnessFileRetry { [IO.File]::Move($temp, $Path, $true) }
     }
@@ -87,16 +91,57 @@ function Save-AgentRewindBlob {
     }
     $hash
 }
+function Save-AgentRewindPack {
+    # A private file per workspace file made the first snapshot of a 1416-file workspace take 4 to 46 s on Windows
+    # (wlab, 2026-11-03); one file holds a scan's new content and the record indexes it.
+    [CmdletBinding()]
+    param($State, $Record, [Collections.Generic.List[object]]$Blobs)
+    $path = Join-Path (Get-AgentRewindDirectory $State) ('packs/' + [guid]::NewGuid().ToString('N') + '.pack')
+    $parts = [byte[][]]::new($Blobs.Count)
+    for ($i = 0; $i -lt $Blobs.Count; $i++) {
+        $parts[$i] = $Blobs[$i].Bytes
+    }
+    Write-AgentRewindFile -Path $path -Parts $parts
+    $offset = 0L
+    foreach ($blob in $Blobs) {
+        $Record.Packs[$blob.Hash] = @{ Path = $path; Offset = $offset; Length = $blob.Bytes.Length }
+        $offset += $blob.Bytes.Length
+    }
+}
+function Test-AgentRewindBlob {
+    # Whether the record still holds a copy of the content. Restoring checks its hash, so a damaged copy is skipped then.
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param($State, $Record, [string]$Hash, [long]$Length)
+    $directory = Get-AgentRewindDirectory $State
+    if (-not $directory) {
+        return $Record.Blobs.ContainsKey($Hash)
+    }
+    $blob = [IO.FileInfo]::new((Join-Path $directory "blobs/$Hash"))
+    $Record.Packs.ContainsKey($Hash) -or ($blob.Exists -and $blob.Length -eq $Length)
+}
 function Read-AgentRewindBlob {
     [CmdletBinding()]
     param($State, $Record, [string]$Hash)
     $directory = Get-AgentRewindDirectory $State
-    $bytes = $null
+    $bytes = $null; $packed = $null
     if (-not $directory) {
         $null = $Record.Blobs.TryGetValue($Hash, [ref]$bytes)
     }
     elseif ([IO.File]::Exists((Join-Path $directory "blobs/$Hash"))) {
         $bytes = (Read-HarnessFileByte (Join-Path $directory "blobs/$Hash") ([int]::MaxValue) -NoHardLinks).Bytes
+    }
+    elseif ($Record.Packs.TryGetValue($Hash, [ref]$packed)) {
+        $null = Get-HarnessPathSnapshot $packed.Path -NoHardLinks
+        $stream = [IO.File]::Open($packed.Path, 'Open', 'Read', 'Read')
+        try {
+            $bytes = [byte[]]::new($packed.Length)
+            $stream.Position = $packed.Offset
+            $stream.ReadExactly($bytes, 0, $bytes.Length)
+        }
+        finally {
+            $stream.Dispose()
+        }
     }
     if ($null -ne $bytes -and (Get-HarnessSha256 -Bytes $bytes) -ceq $Hash) {
         , [byte[]]$bytes
@@ -112,6 +157,8 @@ function Get-AgentRewindScan {
     $files = [ordered]@{}
     $needed = [Collections.Generic.HashSet[string]]::new([string[]]$Required, $Record.Cache.Comparer)
     $partial = $limit -le 0 -or $RequiredOnly
+    $directory = $Copy ? (Get-AgentRewindDirectory $State) : ''
+    $pack = [Collections.Generic.List[object]]::new(); $packed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); $packBytes = 0L
     $names = @($Required) + @($partial ? @() : (Get-AgentWorkspaceListing -State $State -Root $Root -Context $Context))
     $total = 0L; $count = 0
     $now = [datetime]::UtcNow
@@ -130,18 +177,26 @@ function Get-AgentRewindScan {
                 }
                 continue
             }
-            if (-not $isRequired -and ($count -ge $script:PackWorkspaceMaxFiles -or $info.Length -gt $maxFile -or $total + $info.Length -gt $limit)) {
+            if ($info.Length -gt $maxFile) {
+                # Too large to copy: a size and write-time fingerprint still shows whether the run changed it.
+                $files[$name] = '~' + $info.Length + '-' + $info.LastWriteTimeUtc.Ticks
+                continue
+            }
+            if (-not $isRequired -and ($count -ge $script:PackWorkspaceMaxFiles -or $total + $info.Length -gt $limit)) {
                 $partial = $true
                 continue
             }
             $cached = $null
             if ($Record.Cache.TryGetValue($name, [ref]$cached) -and $cached.Length -eq $info.Length -and $cached.Ticks -eq $info.LastWriteTimeUtc.Ticks -and
-                $info.LastWriteTimeUtc -lt $cached.Seen.AddSeconds(-2) -and (-not $Copy -or $null -ne (Read-AgentRewindBlob -State $State -Record $Record -Hash $cached.Hash))) {
+                $info.LastWriteTimeUtc -lt $cached.Seen.AddSeconds(-2) -and (-not $Copy -or (Test-AgentRewindBlob -State $State -Record $Record -Hash $cached.Hash -Length $cached.Length))) {
                 $hash = $cached.Hash
             }
             else {
                 $bytes = (Read-HarnessFileByte $path $maxFile -NoHardLinks).Bytes
-                $hash = $Copy ? (Save-AgentRewindBlob -State $State -Record $Record -Bytes $bytes) : (Get-HarnessSha256 -Bytes $bytes)
+                $hash = ($Copy -and -not $directory) ? (Save-AgentRewindBlob -State $State -Record $Record -Bytes $bytes) : (Get-HarnessSha256 -Bytes $bytes)
+                if ($directory -and $packed.Add($hash) -and -not (Test-AgentRewindBlob -State $State -Record $Record -Hash $hash -Length $bytes.Length)) {
+                    $pack.Add(@{ Hash = $hash; Bytes = $bytes }); $packBytes += $bytes.Length
+                }
                 $Record.Cache[$name] = @{ Length = $info.Length; Ticks = $info.LastWriteTimeUtc.Ticks; Hash = $hash; Seen = $now }
             }
             $files[$name] = $hash
@@ -154,6 +209,14 @@ function Get-AgentRewindScan {
                 $files[$name] = '?'
             }
         }
+        # A pack that cannot be written fails the scan: its files are already listed as copied.
+        if ($packBytes -ge 8MB) {
+            Save-AgentRewindPack -State $State -Record $Record -Blobs $pack
+            $pack.Clear(); $packBytes = 0L
+        }
+    }
+    if ($pack.Count) {
+        Save-AgentRewindPack -State $State -Record $Record -Blobs $pack
     }
     @{ Files = $files; Partial = $partial }
 }
@@ -219,6 +282,13 @@ function Stop-AgentRewind {
             }
         })
     if ($changes.Count) {
+        # A resumed session has no pack index, so a checkpoint's prior content is kept as a blob file.
+        foreach ($hash in @($changes.Start).Where({ $_ -and -not $_.StartsWith('~') })) {
+            $bytes = Read-AgentRewindBlob -State $state -Record $record -Hash $hash
+            if ($null -ne $bytes) {
+                $null = Save-AgentRewindBlob -State $state -Record $record -Bytes $bytes
+            }
+        }
         $record.Checkpoints.Add([pscustomobject]@{ RunId = $active.RunId; Root = $active.Root; Partial = $active.Partial; Error = $active.Error; Prompt = $active.Prompt; Time = $active.Time; Changes = $changes })
         if ($record.Checkpoints.Count -gt $script:PackRewindCheckpoints) {
             $record.Checkpoints.RemoveRange(0, $record.Checkpoints.Count - $script:PackRewindCheckpoints)
@@ -252,6 +322,9 @@ function Remove-AgentRewindBlob {
     foreach ($hash in @($Record.Blobs.Keys | Where-Object { -not $keep.Contains($_) })) {
         $null = $Record.Blobs.Remove($hash)
     }
+    foreach ($hash in @($Record.Packs.Keys | Where-Object { -not $keep.Contains($_) })) {
+        $null = $Record.Packs.Remove($hash)
+    }
     $directory = Get-AgentRewindDirectory $State
     if ($directory -and [IO.Directory]::Exists((Join-Path $directory 'blobs'))) {
         foreach ($blob in [IO.Directory]::EnumerateFiles((Join-Path $directory 'blobs'))) {
@@ -259,6 +332,16 @@ function Remove-AgentRewindBlob {
                 [IO.File]::Delete($blob)
             }
         }
+    }
+    if ($directory -and [IO.Directory]::Exists((Join-Path $directory 'packs'))) {
+        $live = [Collections.Generic.HashSet[string]]::new([string[]]@($Record.Packs.Values | ForEach-Object { [IO.Path]::GetFileName($_.Path) }), [StringComparer]::Ordinal)
+        foreach ($pack in [IO.Directory]::EnumerateFiles((Join-Path $directory 'packs'), '*.pack')) {
+            if (-not $live.Contains([IO.Path]::GetFileName($pack))) {
+                [IO.File]::Delete($pack)
+            }
+        }
+    }
+    if ($directory -and [IO.Directory]::Exists($directory)) {
         # Retain the eight most recently used session stores.
         foreach ($old in @([IO.DirectoryInfo]::new((Get-AgentRewindDirectory $State -Root)).GetDirectories() | Sort-Object LastWriteTimeUtc -Descending | Select-Object -Skip 8)) {
             if ($old.Name -cne $State.SessionId -and -not ($old.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -297,6 +380,12 @@ function New-AgentUndoChange {
     $Tool.Files = @(foreach ($change in @($changes.Values).Where({ $_.Start -cne $_.End })) {
             try {
                 $path = Resolve-AgentToolPath -State $Tool.State -Root $Tool.Root -Path $change.Path -Context $Tool.Context
+                if (([string]$change.Start).StartsWith('~')) {
+                    throw 'it was larger than Agent.MaxFileBytes when the run started, so no copy was kept'
+                }
+                if (([string]$change.End).StartsWith('~')) {
+                    throw 'it is larger than Agent.MaxFileBytes'
+                }
                 $current = Read-HarnessFileByte $path $Tool.State.Config.'Agent.MaxFileBytes' -AllowMissing -NoHardLinks
                 $hash = $current.Exists ? (Get-HarnessSha256 -Bytes $current.Bytes) : $null
                 if ($hash -cne $change.End) {
@@ -324,7 +413,7 @@ function New-AgentUndoChange {
     }
     $Tool.Risks = @($Tool.Data.skipped | ForEach-Object { "Not restored: $_" })
     foreach ($checkpoint in @($Tool.Checkpoints).Where({ $_.Partial })) {
-        $Tool.Risks += "The run's snapshot was partial or unavailable$($checkpoint.Error ? " ($($checkpoint.Error))" : ''); files outside it (beyond Agent.RewindMaxBytes or 20000 files) are not restored."
+        $Tool.Risks += "The run's snapshot was partial or unavailable$($checkpoint.Error ? " ($($checkpoint.Error))" : ''); files beyond Agent.RewindMaxBytes in all or 20000 files are not restored."
     }
 }
 function Invoke-AgentUndoChange {

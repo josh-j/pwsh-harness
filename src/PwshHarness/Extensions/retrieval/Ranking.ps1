@@ -138,27 +138,50 @@ function Initialize-RetrievalSearch {
     }
     $ordered = @(foreach ($file in $Index.Files.psbase.Values) {
             for ($i = 0; $i -lt $file.Chunks.Count; $i++) {
-                @{ Chunk = $file.Chunks[$i]; Frequency = $file.Frequencies -is [array] -and $i -lt $file.Frequencies.Count ? $file.Frequencies[$i] : $null }
+                $stored = $file.Frequencies -is [array] -and $i -lt $file.Frequencies.Count
+                @{ Chunk = $file.Chunks[$i]; Frequency = $stored ? $file.Frequencies[$i] : $null; File = $stored ? $file : $null; Position = $i }
             }
         })
     $ordered = @($ordered | Sort-Object { $_.Chunk.Id })
     $chunks = @($ordered | ForEach-Object Chunk)
     $records = [Collections.Generic.List[object]]::new()
-    $postings = @{}; $total = 0.0
+    # Postings and the chunk frequencies are most of an index's memory. Typed dictionaries over one shared string per
+    # term hold them in about a third of what hashtables of boxed counts took (113 MB for a 1,400-file repository).
+    $postings = [hashtable]::new([StringComparer]::OrdinalIgnoreCase)
+    $terms = [hashtable]::new([StringComparer]::OrdinalIgnoreCase)
+    $total = 0.0
     foreach ($entry in $ordered) {
         $Request.CancellationToken.ThrowIfCancellationRequested()
         $chunk = $entry.Chunk; $frequency = $entry.Frequency
-        if ($frequency -isnot [hashtable]) {
+        if ($frequency -isnot [Collections.IDictionary]) {
             $frequency = Get-RetrievalFrequency $chunk $Request
         }
         $length = 0.0
-        foreach ($pair in $frequency.GetEnumerator()) {
-            $term = $pair.Key
-            if (-not $postings.ContainsKey($term)) {
-                $postings[$term] = @{}
+        $id = $records.Count
+        if ($frequency -is [Collections.Generic.Dictionary[string, int]]) {
+            foreach ($pair in $frequency.GetEnumerator()) {
+                $posting = $postings[$pair.Key]
+                if ($null -eq $posting) {
+                    $posting = [Collections.Generic.Dictionary[int, int]]::new(); $postings[$pair.Key] = $posting; $terms[$pair.Key] = $pair.Key
+                }
+                $posting[$id] = $pair.Value
+                $length += $pair.Value
             }
-            $postings[$term][$records.Count] = $frequency[$term]
-            $length += $frequency[$term]
+        }
+        else {
+            $compact = [Collections.Generic.Dictionary[string, int]]::new($frequency.Count, [StringComparer]::OrdinalIgnoreCase)
+            foreach ($pair in $frequency.GetEnumerator()) {
+                $term = $terms[$pair.Key]
+                if ($null -eq $term) {
+                    $term = $pair.Key; $terms[$term] = $term; $postings[$term] = [Collections.Generic.Dictionary[int, int]]::new()
+                }
+                $postings[$term][$id] = $pair.Value
+                $compact[$term] = $pair.Value
+                $length += $pair.Value
+            }
+            if ($entry.File) {
+                $entry.File.Frequencies[$entry.Position] = $compact
+            }
         }
         if ($records.Count % 20 -eq 0 -and $Request.Pump) {
             $null = & $Request.Pump

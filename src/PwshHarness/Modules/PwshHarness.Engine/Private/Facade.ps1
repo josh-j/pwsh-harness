@@ -223,7 +223,18 @@ function New-EngineFacade {
         }
         if ($category -eq 'Highlighters' -and $isHost) {
             $endpoint | Add-Member ScriptMethod Snapshot {
-                @($Store.Points.Highlighters.Values | Where-Object { $_.Extension -notin $Store.Config.Extensions.Disabled } | Sort-Object Name | ForEach-Object { $_.Value })
+                # Every frame calls this: a loop costs a twentieth of a cmdlet pipeline.
+                $names = [Collections.Generic.List[string]]::new()
+                $values = [Collections.Generic.List[object]]::new()
+                foreach ($entry in $Store.Points.Highlighters.Values) {
+                    if ($entry.Extension -notin $Store.Config.Extensions.Disabled) {
+                        $names.Add($entry.Name)
+                        $values.Add($entry.Value)
+                    }
+                }
+                $sorted = $values.ToArray()
+                [Array]::Sort[string, object]($names.ToArray(), $sorted, [StringComparer]::CurrentCultureIgnoreCase)
+                , $sorted
             }.GetNewClosure()
             $endpoint | Add-Member ScriptMethod ReportFault {
                 param([string]$Name)

@@ -285,7 +285,7 @@ function Get-TuiFittedHint {
 }
 function Format-TuiActionOutput {
     [CmdletBinding()]
-    param($Result)
+    param($Result, [switch]$Plain)
     if (Test-TuiRecordProperty $Result 'AgentSummary') {
         if ($Result.AgentSummary.StopReason -ceq 'AwaitingApproval' -and (Test-TuiRecordProperty $Result 'OperationReview')) {
             return $Result.OperationReview
@@ -294,6 +294,17 @@ function Format-TuiActionOutput {
     }
     if ($Result -is [string]) {
         return $Result
+    }
+    if ((Test-TuiRecordProperty $Result 'CallId') -and (Test-TuiRecordProperty $Result 'Status')) {
+        # A tool call's result (/undo, /approve) is already in the transcript as its tool record; line mode, which
+        # does not draw that record, gets its review or outcome.
+        if (-not $Plain) {
+            return ''
+        }
+        if (Test-TuiRecordProperty $Result 'Review') {
+            return $Result.Review
+        }
+        return $Result.Status + $((Test-TuiRecordProperty $Result 'Error') -and $Result.Error ? ": $($Result.Error.message)" : '')
     }
     if ($Result -and $Result.PSObject.Properties['ExitCode'] -and $Result.PSObject.Properties['Output'] -and $Result.PSObject.Properties['ErrorOutput']) {
         return "Exit code: $($Result.ExitCode)`n$($Result.Output)$($Result.ErrorOutput)"

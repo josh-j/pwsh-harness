@@ -108,9 +108,11 @@ function Get-TuiActiveRenderModel {
             $frame.Status -isnot [string] -or $frame.Width -ne [Math]::Max(20, $Width) -or $frame.Height -ne [Math]::Max(8, $Height) -or $frame.CursorRow -lt 0 -or $frame.CursorRow -ge $frame.Height -or $frame.CursorColumn -lt 0 -or $frame.CursorColumn -ge $frame.Width) {
             throw 'Renderer returned an invalid frame.'
         }
-        $knownArchive = $View.Renderer -eq 'Default' -and @($View.ValidatedArchives | Where-Object {
-                $_.Width -eq $frame.Width -and [object]::ReferenceEquals($_.Rows, $frame.AllTranscript)
-            }).Count -gt 0
+        # Every frame runs this check, so it uses loops and an ASCII fast path instead of pipelines and calls.
+        $knownArchive = $false
+        foreach ($archive in ($View.Renderer -eq 'Default' ? $View.ValidatedArchives : @())) {
+            $knownArchive = $knownArchive -or ($archive.Width -eq $frame.Width -and [object]::ReferenceEquals($archive.Rows, $frame.AllTranscript))
+        }
         $validateRows = @($frame.Rows)
         if ($frame.PSObject.Properties['AllTranscript'] -and
             ($View.Renderer -ne 'Default' -or (-not $knownArchive -and -not [object]::ReferenceEquals($View.ValidatedTranscript, $frame.AllTranscript)))) {
@@ -127,22 +129,32 @@ function Get-TuiActiveRenderModel {
                 $validateRows += @($frame.AllTranscript[$firstChanged..($frame.AllTranscript.Count - 1)])
             }
         }
+        $colors = [Collections.Generic.HashSet[string]]::new([string[]]@('Default', 'Black', 'Red', 'Green', 'Yellow', 'Blue', 'Magenta', 'Cyan', 'White', 'BrightBlack', 'BrightRed', 'BrightGreen', 'BrightYellow', 'BrightBlue', 'BrightMagenta', 'BrightCyan', 'BrightWhite'), [StringComparer]::OrdinalIgnoreCase)
         foreach ($row in $validateRows) {
-            if ((Get-TuiTextWidth ($row.Segments.Text -join '')) -gt $frame.Width) {
+            $text = $row.Segments.Text -join ''
+            if (($text -match '[^\x20-\x7E]' ? (Get-TuiTextWidth $text) : $text.Length) -gt $frame.Width) {
                 throw 'Renderer returned an oversized row.'
             }
             foreach ($segment in $row.Segments) {
-                if ($segment.Text -isnot [string] -or $segment.Color -notin @('Default', 'Black', 'Red', 'Green', 'Yellow', 'Blue', 'Magenta', 'Cyan', 'White', 'BrightBlack', 'BrightRed', 'BrightGreen', 'BrightYellow', 'BrightBlue', 'BrightMagenta', 'BrightCyan', 'BrightWhite') -or
-                    ($segment.Text.Contains("`n") -or -not [string]::Equals($segment.Text, (ConvertTo-HarnessSafeText $segment.Text), [StringComparison]::Ordinal))) {
+                # Printable ASCII is already safe text.
+                if ($segment.Text -isnot [string] -or -not $colors.Contains([string]$segment.Color) -or ($segment.Text -match '[^\x20-\x7E]' -and
+                        ($segment.Text.Contains("`n") -or -not [string]::Equals($segment.Text, (ConvertTo-HarnessSafeText $segment.Text), [StringComparison]::Ordinal)))) {
                     throw 'Renderer returned unsafe segments.'
                 }
             }
         }
         if ($View.Renderer -eq 'Default' -and $frame.PSObject.Properties['AllTranscript']) {
             $View.ValidatedTranscript = $frame.AllTranscript
-            $View.ValidatedArchives = @(if ($frame.AllTranscript.Count -le 32768 -and $null -ne $frame.RenderCache.Transcript) {
+            $archives = @(if ($frame.AllTranscript.Count -le 32768 -and $null -ne $frame.RenderCache.Transcript) {
                     [pscustomobject]@{ Width = $frame.Width; Rows = $frame.AllTranscript }
-                }) + @($View.ValidatedArchives | Where-Object { $_.Width -ne $frame.Width } | Select-Object -First 1)
+                })
+            foreach ($archive in $View.ValidatedArchives) {
+                if ($archive.Width -ne $frame.Width) {
+                    $archives += $archive
+                    break
+                }
+            }
+            $View.ValidatedArchives = $archives
         }
         if ($View.Renderer -eq 'Default' -and $frame.PSObject.Properties['MaxScroll']) {
             # Keep the same output in view when new rows arrive while reading above the bottom.
@@ -361,11 +373,11 @@ function Invoke-TuiFrontendInput {
                 }
                 $message = Format-TuiActionOutput $output
                 $snapshot = $HarnessHost.GetConversationSnapshot($Session)
-                if ($snapshot.Transcript.Count -le $recordsBefore -or $snapshot.Transcript[-1].Text -cne $message) {
+                if ($message -and ($snapshot.Transcript.Count -le $recordsBefore -or $snapshot.Transcript[-1].Text -cne $message)) {
                     $HarnessHost.AddTranscript($Session, 'system', $message, $null)
                 }
                 if ($LineMode) {
-                    $Terminal.WriteText((& $safeText ($message + "`n")))
+                    $Terminal.WriteText((& $safeText ((Format-TuiActionOutput $output -Plain) + "`n")))
                 }
             }
             Set-TuiViewSnapshot $View ($HarnessHost.GetConversationSnapshot($Session)) -Conversation

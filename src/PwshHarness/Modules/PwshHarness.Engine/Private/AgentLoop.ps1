@@ -296,7 +296,8 @@ function Add-EngineAgentFriction {
     }
     if ($message -and $friction.Examples.Count -lt 3) {
         $message = ($message -replace '\s+', ' ').Trim()
-        $friction.Examples.Add("$($Call.Name): $($message.Substring(0, [Math]::Min(120, $message.Length)))")
+        # A cut message ends in an ellipsis, or a cut list of accepted arguments reads as complete.
+        $friction.Examples.Add("$($Call.Name): $($message.Length -gt 120 ? $message.Substring(0, 119) + '…' : $message)")
     }
     if ($Seconds -ge 30) {
         $friction.Slow.Add(@{ Tool = $Call.Name; Seconds = [Math]::Round($Seconds, 1) })
