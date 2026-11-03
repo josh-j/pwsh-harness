@@ -20,7 +20,9 @@ function Set-RetrievalOrientation {
             Set-RetrievalOrientationSkipped $Request 'input budget'
             return
         }
-        $index = Update-RetrievalIndex $Request -BuildBudgetMilliseconds 3000 -MetadataOnly
+        # The map reads the shared index, which later searches reuse and which a later session loads instead of
+        # chunking every file again; it is saved only when retrieval is on, as a retrieval pass would save it.
+        $index = Update-RetrievalIndex $Request -BuildBudgetMilliseconds 3000 -MemoryOnly:(-not $Request.Config.Rag)
         $tracked = Invoke-RetrievalGit -Root $index.Root -Arguments @('ls-files', '--cached', '--exclude-standard', '-z') -Request $Request
         $ignoredText = Invoke-RetrievalGit -Root $index.Root -Arguments @('ls-files', '--cached', '--ignored', '--exclude-standard', '-z') -Request $Request
         if ($null -eq $tracked -or $null -eq $ignoredText) {
@@ -46,21 +48,33 @@ function Set-RetrievalOrientation {
         if ($treeOmitted) {
             $null = $tree.Append("[more directories omitted]`n")
         }
-        $functions = @($paths | ForEach-Object {
-                if ($index.Files.ContainsKey($_)) {
-                    $index.Files[$_].Chunks | Where-Object { $_.Kind -eq 'Function' -or ($_.Kind -eq 'Symbol' -and $_.StartLine -eq $_.Fields.DeclarationLine) } | Sort-Object StartLine
+        $functions = [Collections.Generic.List[object]]::new()
+        foreach ($path in $paths) {
+            if ($index.Files.ContainsKey($path)) {
+                foreach ($chunk in $index.Files[$path].Chunks) {
+                    if ($chunk.Kind -eq 'Function' -or ($chunk.Kind -eq 'Symbol' -and $chunk.StartLine -eq $chunk.Fields.DeclarationLine)) {
+                        $functions.Add($chunk)
+                    }
                 }
-            })
+            }
+        }
         $body = [Text.StringBuilder]::new($tree.ToString() + "Symbol index (name -> path:line):`n")
-        # Rotate through top-level areas so a large fixture directory cannot consume the index.
-        $ordered = @($functions | Sort-Object @{ Expression = { ($_.Path -split '/').Count } }, StartLine, Path)
+        $bytes = [Text.Encoding]::UTF8.GetByteCount($body.ToString())
+        # Rotate through top-level areas so a large fixture directory cannot consume the index. Symbols are ordered by
+        # depth, line and path through padded keys: Sort-Object took 0.7 s over 2,000 chunks loaded from the cache.
+        $ordered = $functions.ToArray()
+        $keys = [string[]]@(foreach ($chunk in $ordered) {
+                '{0:D4}{1:D10}{2}' -f $chunk.Path.Split('/').Length, $chunk.StartLine, $chunk.Path
+            })
+        [Array]::Sort[string, object]($keys, $ordered, [StringComparer]::CurrentCultureIgnoreCase)
         $selected = 0
         foreach ($chunk in (Select-RetrievalAreaItem -Item $ordered -Limit 5000)) {
             $line = "$($chunk.Fields.Name) -> $($chunk.Path):$($chunk.StartLine)`n"
-            if ([Text.Encoding]::UTF8.GetByteCount($body.ToString() + $line) -gt $capacity) {
+            $size = [Text.Encoding]::UTF8.GetByteCount($line)
+            if ($bytes + $size -gt $capacity) {
                 continue
             }
-            $null = $body.Append($line); $selected++
+            $null = $body.Append($line); $selected++; $bytes += $size
         }
         $null = $body.Append("Indexed symbols shown: $selected/$($functions.Count). Other files/symbols may be omitted; use tools for details.`n")
         # Match the host's character/4 estimate, leaving room for the framing below.

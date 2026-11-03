@@ -33,8 +33,10 @@ function Split-PowerShellSource {
     }
     # Blank each function's text in one replace; a per-character loop was 5 of the 7 s an index of 1,000 files took.
     $remainder = [Text.StringBuilder]::new($Text)
+    # Only the synopsis is kept, and help lookup took a third of chunking, so a file without one skips it.
+    $described = $Text.IndexOf('.SYNOPSIS', [StringComparison]::OrdinalIgnoreCase) -ge 0
     foreach ($function in $functions) {
-        $help = $function.GetHelpContent($tokenCache)
+        $help = $described ? $function.GetHelpContent($tokenCache) : $null
         $parameters = @($function.Body.ParamBlock.Parameters.Name.VariablePath.UserPath)
         $parameters += @($function.Parameters.Name.VariablePath.UserPath)
         $id = "${Path}::function:$($function.Name)"
@@ -44,14 +46,14 @@ function Split-PowerShellSource {
         New-HarnessChunk -Id $id -Path $Path `
             -StartLine $function.Extent.StartLineNumber -EndLine $function.Extent.EndLineNumber `
             -Kind Function -Title $function.Name -Text $function.Extent.Text `
-            -Fields @{ Name = $function.Name; Parameters = (($parameters | Where-Object { $_ }) -join ' '); Synopsis = [string]$help.Synopsis }
+            -Fields @{ Name = $function.Name; Parameters = ($parameters.Where({ $_ }) -join ' '); Synopsis = [string]$help.Synopsis }
         $start = $function.Extent.StartOffset; $length = $function.Extent.EndOffset - $start
         $null = $remainder.Remove($start, $length).Insert($start, [regex]::Replace($Text.Substring($start, $length), '[^\r\n]', ' '))
     }
     $body = $remainder.ToString() -replace '(?m)[ \t]+$', ''
     if ($body.Trim()) {
         New-HarnessChunk -Id "${Path}::script" -Path $Path -EndLine $ast.Extent.EndLineNumber `
-            -Kind Script -Title $Path -Text $body -Fields @{ MetadataOnly = (-not @($ast.EndBlock.Statements | Where-Object { $_ -isnot [Management.Automation.Language.FunctionDefinitionAst] }).Count -and -not $ast.BeginBlock -and -not $ast.ProcessBlock -and -not $ast.CleanBlock) }
+            -Kind Script -Title $Path -Text $body -Fields @{ MetadataOnly = (-not @($ast.EndBlock.Statements).Where({ $_ -isnot [Management.Automation.Language.FunctionDefinitionAst] }).Count -and -not $ast.BeginBlock -and -not $ast.ProcessBlock -and -not $ast.CleanBlock) }
     }
 }
 function Get-PowerShellSyntaxContext {

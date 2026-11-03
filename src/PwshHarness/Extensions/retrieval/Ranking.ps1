@@ -1,25 +1,21 @@
+# Conservative suffix normalization; lexical content is retained by the tokenizer too. A word ending in -ir before
+# -ing or -ed regains its e, and -s is kept after s, u or i.
+$script:RetrievalStemPattern = [regex]::new('^(?:(.{2,}ir)(?:ing|ed)|(.{4,})(?:ing|ed)|(.{3,}[^sui])s)$', 'IgnoreCase, CultureInvariant')
 function Get-RetrievalStem {
     [CmdletBinding()]
-    param([string]$Term)
-    # Conservative suffix normalization; lexical content is retained by the tokenizer too.
-    if ($Term -match '^(.{4,})ing$') {
-        $root = $Matches[1]
-        if ($root.EndsWith('ir')) {
-            return ($root + 'e')
+    param([string[]]$Term)
+    foreach ($value in $Term) {
+        $match = $script:RetrievalStemPattern.Match($value)
+        if (-not $match.Success) {
+            $value
         }
-        return $root
-    }
-    if ($Term -match '^(.{4,})ed$') {
-        $root = $Matches[1]
-        if ($root.EndsWith('ir')) {
-            return ($root + 'e')
+        elseif ($match.Groups[1].Success) {
+            $match.Groups[1].Value + 'e'
         }
-        return $root
+        else {
+            $match.Groups[2].Value + $match.Groups[3].Value
+        }
     }
-    if ($Term -match '^(.{4,})s$' -and $Term -notmatch '(ss|us|is)$') {
-        return $Matches[1]
-    }
-    $Term
 }
 function Select-RetrievalDistinctSymbol {
     [CmdletBinding()]
@@ -44,37 +40,58 @@ function Select-RetrievalDistinctSymbol {
 # Identifiers recur across a project, so each distinct one is split and stemmed once: the per-identifier stem calls
 # and replaces were most of the 25 ms indexing spent on a file, which held each prompt about a second.
 $script:RetrievalTokenTerms = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::Ordinal)
+$script:RetrievalTokenPattern = [regex]::new('[\p{L}_][\p{L}\p{Nd}_./\\:-]*', 'Compiled')
+# Compiled selectors let a chunk's identifiers be expanded to their cached terms and counted in .NET.
+$script:RetrievalTokenMatch = [Linq.Expressions.Expression]::Parameter([Text.RegularExpressions.Match])
+$script:RetrievalMatchValue = [Linq.Expressions.Expression]::Lambda[Func[Text.RegularExpressions.Match, string]]([Linq.Expressions.Expression]::Property($script:RetrievalTokenMatch, 'Value'), $script:RetrievalTokenMatch).Compile()
+$script:RetrievalMatchTerm = [Linq.Expressions.Expression]::Lambda[Func[Text.RegularExpressions.Match, Collections.Generic.IEnumerable[string]]]([Linq.Expressions.Expression]::Property([Linq.Expressions.Expression]::Constant($script:RetrievalTokenTerms), 'Item', [Linq.Expressions.Expression]::Property($script:RetrievalTokenMatch, 'Value')), $script:RetrievalTokenMatch).Compile()
+$script:RetrievalTokenMatch = [Linq.Expressions.Expression]::Parameter([string])
+$script:RetrievalTermKey = [Linq.Expressions.Expression]::Lambda[Func[string, string]]($script:RetrievalTokenMatch, $script:RetrievalTokenMatch).Compile()
+function Add-RetrievalTokenTerm {
+    [CmdletBinding()]
+    param([string[]]$Identifier)
+    # New identifiers are split and stemmed together: calls per identifier and per stem made the first index of a
+    # 1,400-file repository spend about 3 s on its 44,000 identifiers.
+    $wholes = @($Identifier.TrimEnd('.', ':', '/', '\').ToLowerInvariant())
+    $parts = @($Identifier -creplace '([a-z\d])([A-Z])', '$1 $2' -creplace '([A-Z])([A-Z][a-z])', '$1 $2')
+    $owners = [Collections.Generic.List[int]]::new(); $candidates = [Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt $Identifier.Count; $i++) {
+        $whole = $wholes[$i]
+        if ($whole) {
+            $owners.Add($i); $candidates.Add($whole)
+        }
+        foreach ($part in ($parts[$i] -split '[^\p{L}\p{Nd}]+')) {
+            $lower = $part.ToLowerInvariant()
+            if ($lower -and $lower -ne $whole) {
+                $owners.Add($i); $candidates.Add($lower)
+            }
+        }
+    }
+    $stems = @(Get-RetrievalStem $candidates)
+    $terms = [Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt $candidates.Count; $i++) {
+        $terms.Add($candidates[$i])
+        if ($stems[$i] -ne $candidates[$i]) {
+            $terms.Add($stems[$i])
+        }
+        if ($i + 1 -eq $candidates.Count -or $owners[$i + 1] -ne $owners[$i]) {
+            $script:RetrievalTokenTerms[$Identifier[$owners[$i]]] = $terms.ToArray()
+            $terms.Clear()
+        }
+    }
+}
 function Get-RetrievalToken {
     [CmdletBinding()]
     param([string]$Text)
     $cache = $script:RetrievalTokenTerms
-    foreach ($match in [regex]::Matches($Text, '[\p{L}_][\p{L}\p{Nd}_./\\:-]*')) {
+    foreach ($match in $script:RetrievalTokenPattern.Matches($Text)) {
         $terms = $null
         if (-not $cache.TryGetValue($match.Value, [ref]$terms)) {
-            $terms = [string[]]@(
-                $whole = $match.Value.TrimEnd('.', ':', '/', '\').ToLowerInvariant()
-                if ($whole) {
-                    $whole
-                    $stem = Get-RetrievalStem $whole
-                    if ($stem -ne $whole) {
-                        $stem
-                    }
-                }
-                $parts = $match.Value -creplace '([a-z\d])([A-Z])', '$1 $2' -creplace '([A-Z])([A-Z][a-z])', '$1 $2'
-                foreach ($part in ($parts -split '[^\p{L}\p{Nd}]+')) {
-                    $lower = $part.ToLowerInvariant()
-                    if ($lower -and $lower -ne $whole) {
-                        $lower
-                        $stem = Get-RetrievalStem $lower
-                        if ($stem -ne $lower) {
-                            $stem
-                        }
-                    }
-                })
-            if ($cache.Count -ge 200000) {
+            if ($cache.psbase.Count -ge 200000) {
                 $cache.Clear()
             }
-            $cache[$match.Value] = $terms
+            Add-RetrievalTokenTerm $match.Value
+            $terms = $cache[$match.Value]
         }
         $terms
     }
@@ -82,19 +99,36 @@ function Get-RetrievalToken {
 function Get-RetrievalFrequency {
     [CmdletBinding()]
     param($Chunk, $Request)
-    $frequency = @{}
-    foreach ($field in @(
-            @{ Text = $Chunk.Text; Boost = 1 }, @{ Text = $Chunk.Fields.Synopsis; Boost = 2 },
+    # Terms are expanded and counted in .NET, with each integer field boost applied as repeats, in a third of the
+    # time adding each term in script took.
+    $Request.CancellationToken.ThrowIfCancellationRequested()
+    $cache = $script:RetrievalTokenTerms
+    # Clear only between chunks, so this chunk's terms stay cached until they are counted. The count is read through
+    # psbase: $cache.Count is the cached entry for an identifier named Count, which cleared the cache on most files.
+    if ($cache.psbase.Count -ge 200000) {
+        $cache.Clear()
+    }
+    $terms = [Linq.Enumerable]::Empty[string]()
+    foreach ($field in @(@{ Text = $Chunk.Text; Boost = 1 }, @{ Text = $Chunk.Fields.Synopsis; Boost = 2 },
             @{ Text = $Chunk.Fields.Parameters; Boost = 3 }, @{ Text = $Chunk.Fields.Name; Boost = 4 })) {
-        $Request.CancellationToken.ThrowIfCancellationRequested()
-        foreach ($term in (Get-RetrievalToken $field.Text)) {
-            if (-not $frequency.ContainsKey($term)) {
-                $frequency[$term] = 0.0
-            }
-            $frequency[$term] += $field.Boost
+        if (-not $field.Text) {
+            continue
+        }
+        $found = $script:RetrievalTokenPattern.Matches([string]$field.Text)
+        $missing = [string[]]@(foreach ($identifier in [Linq.Enumerable]::Distinct[string]([Linq.Enumerable]::Select[Text.RegularExpressions.Match, string]($found, $script:RetrievalMatchValue), [StringComparer]::Ordinal)) {
+                if (-not $cache.ContainsKey($identifier)) {
+                    $identifier
+                }
+            })
+        if ($missing.Count) {
+            Add-RetrievalTokenTerm $missing
+        }
+        $expanded = [Linq.Enumerable]::SelectMany[Text.RegularExpressions.Match, string]($found, $script:RetrievalMatchTerm)
+        for ($repeat = 0; $repeat -lt $field.Boost; $repeat++) {
+            $terms = [Linq.Enumerable]::Concat[string]($terms, $expanded)
         }
     }
-    $frequency
+    [hashtable]::new([Linq.Enumerable]::ToDictionary[string, int]([Linq.Enumerable]::CountBy[string, string]($terms, $script:RetrievalTermKey, [StringComparer]::OrdinalIgnoreCase)), [StringComparer]::OrdinalIgnoreCase)
 }
 function Initialize-RetrievalSearch {
     [CmdletBinding()]

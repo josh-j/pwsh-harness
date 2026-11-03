@@ -474,23 +474,38 @@ function Update-RetrievalFileRevision {
 function Select-RetrievalAreaItem {
     [CmdletBinding()]
     param([object[]]$Item, [string]$PathProperty = 'Path', [int]$Limit = [int]::MaxValue, [switch]$Directory)
-    $property = $PathProperty
-    $directoryPath = [bool]$Directory
-    $ranked = $Item | Group-Object -CaseSensitive {
-        $relative = $_ -is [string] ? $_ : $_.$property
-        ($directoryPath -or $relative.Contains('/')) ? ($relative -split '/')[0] : ''
-    } | ForEach-Object {
+    # Round-robin over top-level areas: each round takes every area's next item, ordered by path. Rounds are sorted
+    # as arrays, since grouping and sorting 2,000 symbols through the pipeline took about half a second a prompt.
+    $areas = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
+    $rounds = [Collections.Generic.List[object]]::new()
+    foreach ($value in $Item) {
+        $relative = $value -is [string] ? $value : $value.$PathProperty
+        $slash = $relative.IndexOf('/')
+        $area = $slash -ge 0 ? $relative.Substring(0, $slash) : ($Directory ? $relative : '')
         $rank = 0
-        foreach ($value in $_.Group) {
-            [pscustomobject]@{ Rank = $rank++; Value = $value }
+        $null = $areas.TryGetValue($area, [ref]$rank)
+        $areas[$area] = $rank + 1
+        if ($rank -eq $rounds.Count) {
+            $rounds.Add(@{ Keys = [Collections.Generic.List[string]]::new(); Values = [Collections.Generic.List[object]]::new() })
+        }
+        $rounds[$rank].Keys.Add($relative); $rounds[$rank].Values.Add($value)
+    }
+    $selected = 0
+    foreach ($round in $rounds) {
+        $keys = $round.Keys.ToArray(); $values = $round.Values.ToArray()
+        # Explicit type arguments: inferred from the values, the call would sort a converted copy of them.
+        [Array]::Sort[string, object]($keys, $values, [StringComparer]::CurrentCultureIgnoreCase)
+        foreach ($value in $values) {
+            if ($selected++ -ge $Limit) {
+                return
+            }
+            $value
         }
     }
-    $ranked | Sort-Object Rank, @{ Expression = { $_.Value -is [string] ? $_.Value : $_.Value.$property } } |
-        Select-Object -First $Limit | ForEach-Object { $_.Value }
 }
 function Update-RetrievalIndex {
     [CmdletBinding()]
-    param($Request, [switch]$Complete, [string]$Corpus = 'project', [ValidateRange(1, 5000)][int]$BuildBudgetMilliseconds = 650, [switch]$MemoryOnly, [switch]$MetadataOnly, [string]$Scope = '.')
+    param($Request, [switch]$Complete, [string]$Corpus = 'project', [ValidateRange(1, 5000)][int]$BuildBudgetMilliseconds = 650, [switch]$MemoryOnly, [string]$Scope = '.')
     $null = $script:RetrievalAdmission.Remove($Request)
     $scoped = $Request.PSObject.Properties['ToolRoot'] -and $Scope -cne '.'
     $scopePrefix = $Scope.TrimEnd('/') + '/'
@@ -498,9 +513,6 @@ function Update-RetrievalIndex {
     $comparison = Get-HarnessPathComparison
     $identity = Get-RetrievalIndexIdentity $Request $Corpus
     $root = $identity.Root; $key = $identity.Key
-    if ($MetadataOnly) {
-        $key += ':metadata'
-    }
     if (-not $script:Indexes.ContainsKey($key)) {
         $script:Indexes[$key] = New-RetrievalIndex $Request $Corpus
     }
@@ -548,9 +560,14 @@ function Update-RetrievalIndex {
     $ignoreFiles = New-HarnessPathTable
     $present = New-HarnessPathTable; $pending = [Collections.Generic.List[object]]::new()
     $cacheRoot = [IO.Path]::GetFullPath($Request.Config.DataDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-    # Interleave areas so a large deep fixture tree cannot starve source directories.
+    # Interleave areas so a large deep fixture tree cannot starve source directories, shallow paths first.
     if (-not $resume) {
-        $inventory = @(Select-RetrievalAreaItem -Item @($inventory | Sort-Object @{ Expression = { ($_.Path -split '/').Count } }, Path))
+        $inventory = [object[]]@($inventory).Where({ $null -ne $_ })
+        $keys = [string[]]@(foreach ($file in $inventory) {
+                '{0:D4}{1}' -f $file.Path.Split('/').Length, $file.Path
+            })
+        [Array]::Sort[string, object]($keys, $inventory, [StringComparer]::CurrentCultureIgnoreCase)
+        $inventory = @(Select-RetrievalAreaItem -Item $inventory)
     }
     $allInventory = $resume ? $resume.Inventory : @($inventory)
     if ($resume) {
@@ -580,7 +597,7 @@ function Update-RetrievalIndex {
         }
         $revision = $file.Revision + '|chunks:2' + ([IO.Path]::GetExtension($file.Path) -ieq '.md' ? '|markdown:2' : '')
         if ($index.Files.ContainsKey($file.Path) -and $index.Files[$file.Path].Revision -eq $revision -and
-            ($MetadataOnly -or ($index.Files[$file.Path].Frequencies -is [array] -and $index.Files[$file.Path].Frequencies.Count -eq $index.Files[$file.Path].Chunks.Count))) {
+            $index.Files[$file.Path].Frequencies -is [array] -and $index.Files[$file.Path].Frequencies.Count -eq $index.Files[$file.Path].Chunks.Count) {
             $phases.ReusedFiles++; continue
         }
         if (-not $Complete -and $watch.ElapsedMilliseconds -gt $BuildBudgetMilliseconds) {
@@ -626,7 +643,7 @@ function Update-RetrievalIndex {
         $phases.ReadMilliseconds += $phase.Elapsed.TotalMilliseconds
         $phase.Restart()
         $frequencies = [Collections.Generic.List[object]]::new()
-        foreach ($chunk in ($MetadataOnly ? @() : $valid)) {
+        foreach ($chunk in $valid) {
             $frequencies.Add((Get-RetrievalFrequency $chunk $Request))
             $phases.TokenizedChunks++
         }
@@ -663,13 +680,15 @@ function Update-RetrievalIndex {
             }
         }
     }
+    $view.Ready = $pending.Count -eq 0
     $phase.Restart()
-    if (-not $MetadataOnly) {
+    # Postings are prepared once the index is complete; a search over a partial one builds them when it needs them,
+    # since the next slice would discard them.
+    if ($view.Ready) {
         $null = Initialize-RetrievalSearch $view $Request
     }
     $phases.PostingsMilliseconds = $phase.Elapsed.TotalMilliseconds
-    $view.Ready = $pending.Count -eq 0
-    if (-not $MemoryOnly -and -not $MetadataOnly) {
+    if (-not $MemoryOnly) {
         $phase.Restart()
         Save-RetrievalIndex $index
         $phases.PersistMilliseconds = $phase.Elapsed.TotalMilliseconds
@@ -690,7 +709,7 @@ function Update-RetrievalIndex {
     if ($scoped) {
         $state.Message = "index:$($state.Status) $($state.Files)f/$($state.Chunks)c ($Scope)"
     }
-    if ($resume -and -not $MetadataOnly -and -not $Request.PSObject.Properties['ToolRoot']) {
+    if ($resume -and -not $Request.PSObject.Properties['ToolRoot']) {
         # Cached candidates from earlier slices still pass live policy before context or embedding use.
         $files = New-HarnessPathTable
         foreach ($file in $allInventory) {
