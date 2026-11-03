@@ -1,6 +1,7 @@
 # .agentsignore patterns per request, so one search or index pass reads the file once.
 $script:RetrievalAdmission = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
 $script:RetrievalAgentsIgnore = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
+$script:RetrievalPathRules = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
 function Get-RetrievalAgentsIgnore {
     [CmdletBinding()]
     param($Request, [string]$Root)
@@ -51,11 +52,11 @@ function Test-RetrievalIncludedPath {
         })
     $selected = -not $suppressed
     foreach ($include in $includes) {
-        $include = ConvertTo-HarnessContextPattern $Root $include
-        if ($Path.Equals($include, $comparison)) {
+        $include = Get-RetrievalPathRule $Request $Root $include
+        if ($Path.Equals($include.Pattern, $comparison)) {
             return $true
         }
-        if ((New-HarnessContextPathPattern -Pattern $include -Root $Root -LiteralPaths $null).IsMatch($Path) -or $Path.StartsWith($include.TrimEnd('/') + '/', $comparison)) {
+        if ($include.Matcher.IsMatch($Path) -or $Path.StartsWith($include.Prefix, $comparison)) {
             $selected = $true
         }
     }
@@ -63,12 +64,34 @@ function Test-RetrievalIncludedPath {
         return $false
     }
     foreach ($pattern in $exclusions) {
-        $pattern = ConvertTo-HarnessContextPattern $Root $pattern
-        if ($Path.Equals($pattern, $comparison) -or (New-HarnessContextPathPattern -Pattern $pattern -Root $Root -LiteralPaths $null).IsMatch($Path) -or $Path.StartsWith($pattern.TrimEnd('/') + '/', $comparison)) {
+        $pattern = Get-RetrievalPathRule $Request $Root $pattern
+        if ($Path.Equals($pattern.Pattern, $comparison) -or $pattern.Matcher.IsMatch($Path) -or $Path.StartsWith($pattern.Prefix, $comparison)) {
             return $false
         }
     }
     $true
+}
+function Get-RetrievalPathRule {
+    # A context pattern normalized and compiled once per request: compiling every pattern for every file made an index
+    # pass over 1,400 pending files cost about half a second on each prompt. The lists are still read on each call,
+    # so a changed exclusion applies at once; a literal path that appears later is seen by the next request.
+    [CmdletBinding()]
+    param($Request, [string]$Root, [string]$Pattern)
+    $rules = $null
+    if ($null -ne $Request -and -not $script:RetrievalPathRules.TryGetValue($Request, [ref]$rules)) {
+        $rules = [Collections.Generic.Dictionary[string, hashtable]]::new([StringComparer]::Ordinal)
+        $script:RetrievalPathRules.AddOrUpdate($Request, $rules)
+    }
+    $key = $Root + [char]0 + $Pattern
+    $rule = $null
+    if ($null -eq $rules -or -not $rules.TryGetValue($key, [ref]$rule)) {
+        $normalized = ConvertTo-HarnessContextPattern $Root $Pattern
+        $rule = @{ Pattern = $normalized; Prefix = $normalized.TrimEnd('/') + '/'; Matcher = (New-HarnessContextPathPattern -Pattern $normalized -Root $Root -LiteralPaths $null) }
+        if ($null -ne $rules) {
+            $rules[$key] = $rule
+        }
+    }
+    $rule
 }
 function Start-RetrievalClock {
     [CmdletBinding()]
@@ -80,7 +103,7 @@ function Start-RetrievalClock {
 }
 function Invoke-RetrievalGit {
     [CmdletBinding()]
-    param([string]$Root, [string[]]$Arguments, $Request, [switch]$Result)
+    param([string]$Root, [string[]]$Arguments, $Request, [switch]$Result, [string]$InputText)
     if (-not $script:GitPath) {
         $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $git) {
@@ -94,6 +117,7 @@ function Invoke-RetrievalGit {
     $start.RedirectStandardError = $true
     $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
     $start.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    $start.RedirectStandardInput = $PSBoundParameters.ContainsKey('InputText')
     $start.Environment['GIT_TERMINAL_PROMPT'] = '0'
     foreach ($argument in @('-c', 'core.quotepath=off', '-c', 'color.ui=never', '--no-pager', '-C', $Root) + $Arguments) {
         $start.ArgumentList.Add($argument)
@@ -102,6 +126,11 @@ function Invoke-RetrievalGit {
     try {
         $output = $process.StandardOutput.ReadToEndAsync()
         $errorOutput = $process.StandardError.ReadToEndAsync()
+        if ($start.RedirectStandardInput) {
+            $writer = [IO.StreamWriter]::new($process.StandardInput.BaseStream, [Text.UTF8Encoding]::new($false))
+            $writer.Write($InputText)
+            $writer.Dispose()
+        }
         $readCompletion = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($output, $errorOutput))
         $watch = Start-RetrievalClock $Request inventory
         while ($true) {
@@ -378,13 +407,50 @@ function Save-RetrievalIndex {
         }
     }
 }
+function Get-RetrievalIgnoredName {
+    # Per repository root, the names Git ignores among $Files, from one check-ignore for the whole slice: a process
+    # per file made each validation slice take about 3 s on Linux and longer on Windows. A root that is not a
+    # repository, or whose Git call fails, is left out, so its files are checked one at a time as before.
+    [CmdletBinding()]
+    param([object[]]$Files, $Request, [string]$Root)
+    $byRoot = @{}
+    foreach ($file in $Files) {
+        if ($file.FullPath) {
+            $sourceRoot = $file.PSObject.Properties['Root'] ? $file.Root : $Root
+            if (-not $byRoot.ContainsKey($sourceRoot)) {
+                $byRoot[$sourceRoot] = [Collections.Generic.List[string]]::new()
+            }
+            $byRoot[$sourceRoot].Add([IO.Path]::GetRelativePath($sourceRoot, $file.FullPath).Replace('\', '/'))
+        }
+    }
+    $sets = @{}
+    foreach ($sourceRoot in $byRoot.Keys) {
+        if (-not (Invoke-HarnessService -Harness $script:Harness -Name 'workspace.repository-candidate' -Arguments @($sourceRoot, $Request) -Required)) {
+            continue
+        }
+        $result = Invoke-RetrievalGit -Root $sourceRoot -Arguments @('check-ignore', '--no-index', '--stdin', '-z') -Request $Request -Result -InputText (($byRoot[$sourceRoot] -join "`0") + "`0")
+        if ($result -and $result.ExitCode -in @(0, 1)) {
+            $ignored = New-HarnessPathTable
+            foreach ($name in $result.Text.Split([char]0, [StringSplitOptions]::RemoveEmptyEntries)) {
+                $ignored[$name] = $true
+            }
+            $sets[$sourceRoot] = $ignored
+        }
+    }
+    $sets
+}
 function Update-RetrievalFileRevision {
     [CmdletBinding()]
-    param($File, $Request, [string]$Root, [hashtable]$IgnoreFiles)
+    param($File, $Request, [string]$Root, [hashtable]$IgnoreFiles, $IgnoredNames)
     try {
         $sourceRoot = $File.PSObject.Properties['Root'] ? $File.Root : $Root
         $name = [IO.Path]::GetRelativePath($sourceRoot, $File.FullPath).Replace('\', '/')
-        if (Invoke-HarnessService -Harness $script:Harness -Name 'workspace.repository-candidate' -Arguments @($sourceRoot, $Request) -Required) {
+        if ($IgnoredNames -and $IgnoredNames.ContainsKey($sourceRoot)) {
+            if ($IgnoredNames[$sourceRoot].ContainsKey($name)) {
+                return $false
+            }
+        }
+        elseif (Invoke-HarnessService -Harness $script:Harness -Name 'workspace.repository-candidate' -Arguments @($sourceRoot, $Request) -Required) {
             $ignored = Invoke-RetrievalGit -Root $sourceRoot -Arguments @('check-ignore', '--no-index', '--', $name) -Request $Request -Result
             if ($ignored.ExitCode -ne 1) {
                 return $false
@@ -493,6 +559,7 @@ function Update-RetrievalIndex {
         }
     }
     $phases.EnumerationMilliseconds = $watch.Elapsed.TotalMilliseconds - $loadMilliseconds
+    $ignoredNames = $resume ? (Get-RetrievalIgnoredName -Files $inventory -Request $Request -Root $root) : $null
     foreach ($file in $inventory) {
         Invoke-HarnessCheckpoint $Request
         if ($Corpus -eq 'project' -and $file.FullPath -and $file.FullPath.StartsWith($cacheRoot, $comparison)) {
@@ -506,7 +573,7 @@ function Update-RetrievalIndex {
             if (-not $Complete -and $watch.ElapsedMilliseconds -gt $BuildBudgetMilliseconds) {
                 $pending.Add($file); continue
             }
-            if (-not (Update-RetrievalFileRevision -File $file -Request $Request -Root $root -IgnoreFiles $ignoreFiles)) {
+            if (-not (Update-RetrievalFileRevision -File $file -Request $Request -Root $root -IgnoreFiles $ignoreFiles -IgnoredNames $ignoredNames)) {
                 $index.Files.Remove($file.Path); $index.Search = $null; $index.Dirty = $true
                 continue
             }

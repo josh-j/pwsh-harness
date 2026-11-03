@@ -76,7 +76,8 @@ function Start-PwshHarness {
             $record = $_
             & (Get-Module PwshHarness.Tui -All | Where-Object Path -EQ (Join-Path (Split-Path $PSScriptRoot -Parent) 'Modules/PwshHarness.Tui/PwshHarness.Tui.psm1') | Select-Object -First 1) {
                 param($failure)
-                $message = ConvertTo-HarnessSafeText ((Get-TuiFrontendErrorMessage $failure).Replace(' Details: F12 (/logs).', ''))
+                # The process exits here, so the in-session hints (F12 logs, retry with Enter) do not apply.
+                $message = ConvertTo-HarnessSafeText ((Get-TuiFrontendErrorMessage $failure) -replace ' Details: F12 \(/logs\)\..*\z', '')
                 [Console]::Out.WriteLine($PSStyle.Foreground.Yellow + '! Setup stopped: ' + $message + $PSStyle.Reset)
             } $record
         }

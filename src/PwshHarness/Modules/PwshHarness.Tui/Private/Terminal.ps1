@@ -209,19 +209,19 @@ function Restore-TuiTerminalState {
     }
     if ($Terminal.InlineActive) {
         try {
-            $down = if ($Terminal.InlineState) {
-                $Terminal.InlineState.Rows.Count - 1 - $Terminal.InlineState.CursorRow
+            $state = $Terminal.InlineState
+            $footer = $state -and $state.PSObject.Properties['Footer'] ? [Math]::Min($state.Footer, $state.Rows.Count) : 0
+            if ($footer -gt 0) {
+                # Erase the editor, menus and status bar, leaving the transcript above the shell prompt.
+                $up = $state.CursorRow - ($state.Rows.Count - $footer)
+                $move = $up -gt 0 ? "`e[$($up)A" : ($up -lt 0 ? "`e[$(-$up)B" : '')
+                $Terminal.Api.Write($move + "`r`e[0m`e[J`e[?25h")
             }
             else {
-                0
+                $down = $state ? $state.Rows.Count - 1 - $state.CursorRow : 0
+                $move = $down -gt 0 ? "`e[$($down)B" : ''
+                $Terminal.Api.Write($move + "`r`n`e[0m`e[?25h")
             }
-            $move = if ($down -gt 0) {
-                "`e[$($down)B"
-            }
-            else {
-                ''
-            }
-            $Terminal.Api.Write($move + "`r`n`e[0m`e[?25h")
         }
         catch {
             Write-Verbose "Could not restore inline terminal: $_" -Verbose:($VerbosePreference -eq 'Continue')
@@ -329,8 +329,10 @@ function New-TuiConsoleTerminal {
         Previous = $null; Changed = [ordered]@{}; Entered = $false; Rescue = $null
         Inline = $false; InlineActive = $false; InlineState = $null; InlineContinue = $false
     }
+    # Inline rows on Windows stop short of the last column: the console marks a row written to its last column as
+    # wrapped and joins it with the next row when a resize reflows the buffer, which moved the viewport under the redraw.
     $terminal | Add-Member ScriptMethod GetSize { [pscustomobject]@{
-            Width  = [Math]::Max(0, $this.Api.Get('WindowWidth'))
+            Width  = [Math]::Max(0, $this.Api.Get('WindowWidth') - ($this.Inline -and $this.Api.Get('IsWindows') ? 1 : 0))
             Height = [Math]::Max(0, $this.Api.Get('WindowHeight'))
         } }
     $terminal | Add-Member ScriptMethod Available { $this.Api.Get('KeyAvailable') }

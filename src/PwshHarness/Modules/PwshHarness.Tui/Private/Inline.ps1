@@ -162,6 +162,11 @@ function Get-TuiInlineDraw {
                     }
                     $null = $builder.Append($color).Append((ConvertTo-HarnessSafeText $segment.Text))
                 }
+                if ($i -eq $archiveRows.Count + $cursor -and (Get-TuiTextWidth -Text ($drawRows[$i].Segments.Text -join '')) -lt $Frame.Width) {
+                    # A cursor past the last written character of its row is moved to the end of the text when the
+                    # Windows console reflows on a resize; a no-break space, which it does not trim, keeps it in place.
+                    $null = $builder.Append([char]0xA0)
+                }
             }
             $null = $builder.Append($PSStyle.Reset)
             if ($i -lt $end - 1) {
@@ -192,6 +197,8 @@ function Get-TuiInlineDraw {
         State = [pscustomobject]@{
             Rows = $rows; FullRows = $all; Archived = $archived; Width = $Frame.Width; Height = $Frame.Height
             CursorRow = $cursor; CursorColumn = $Frame.CursorColumn
+            # The editor, hints, menus and status bar below the transcript, which exit erases.
+            Footer = $Frame.PSObject.Properties['PaneHeight'] ? $Frame.Height - $Frame.PaneHeight : 0
         }
     }
 }

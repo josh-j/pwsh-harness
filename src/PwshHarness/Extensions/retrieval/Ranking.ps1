@@ -41,29 +41,42 @@ function Select-RetrievalDistinctSymbol {
         $candidate
     }
 }
+# Identifiers recur across a project, so each distinct one is split and stemmed once: the per-identifier stem calls
+# and replaces were most of the 25 ms indexing spent on a file, which held each prompt about a second.
+$script:RetrievalTokenTerms = [Collections.Generic.Dictionary[string, string[]]]::new([StringComparer]::Ordinal)
 function Get-RetrievalToken {
     [CmdletBinding()]
     param([string]$Text)
+    $cache = $script:RetrievalTokenTerms
     foreach ($match in [regex]::Matches($Text, '[\p{L}_][\p{L}\p{Nd}_./\\:-]*')) {
-        $whole = $match.Value.TrimEnd('.', ':', '/', '\').ToLowerInvariant()
-        if ($whole) {
-            $whole
-            $stem = Get-RetrievalStem $whole
-            if ($stem -ne $whole) {
-                $stem
-            }
-        }
-        $parts = $match.Value -creplace '([a-z\d])([A-Z])', '$1 $2' -creplace '([A-Z])([A-Z][a-z])', '$1 $2'
-        foreach ($part in ($parts -split '[^\p{L}\p{Nd}]+')) {
-            $lower = $part.ToLowerInvariant()
-            if ($lower -and $lower -ne $whole) {
-                $lower
-                $stem = Get-RetrievalStem $lower
-                if ($stem -ne $lower) {
-                    $stem
+        $terms = $null
+        if (-not $cache.TryGetValue($match.Value, [ref]$terms)) {
+            $terms = [string[]]@(
+                $whole = $match.Value.TrimEnd('.', ':', '/', '\').ToLowerInvariant()
+                if ($whole) {
+                    $whole
+                    $stem = Get-RetrievalStem $whole
+                    if ($stem -ne $whole) {
+                        $stem
+                    }
                 }
+                $parts = $match.Value -creplace '([a-z\d])([A-Z])', '$1 $2' -creplace '([A-Z])([A-Z][a-z])', '$1 $2'
+                foreach ($part in ($parts -split '[^\p{L}\p{Nd}]+')) {
+                    $lower = $part.ToLowerInvariant()
+                    if ($lower -and $lower -ne $whole) {
+                        $lower
+                        $stem = Get-RetrievalStem $lower
+                        if ($stem -ne $lower) {
+                            $stem
+                        }
+                    }
+                })
+            if ($cache.Count -ge 200000) {
+                $cache.Clear()
             }
+            $cache[$match.Value] = $terms
         }
+        $terms
     }
 }
 function Get-RetrievalFrequency {

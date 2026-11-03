@@ -82,15 +82,23 @@ function Format-PowerShellToolSource {
 function Get-PowerShellToolAnalyzerDiagnostic {
     [CmdletBinding()]
     param($Tool, [string]$Text, [int]$TimeoutMilliseconds = 5000)
+    # A finding is old when the original had it on a line with the same text. Matching on rule and message alone
+    # blamed a run's new findings on the last old ones in the file, and the model rewrote code it never touched.
+    $keyOf = {
+        param($d, [string[]]$Lines)
+        "$($d.Severity)|$($d.RuleName)|$($d.Message)|" + ($d.Line -ge 1 -and $d.Line -le $Lines.Count ? $Lines[$d.Line - 1].Trim() : '')
+    }
     try {
         $before = @{}
         if ($Tool.File.Exists) {
+            $lines = $Tool.File.Text -split '\r?\n'
             foreach ($d in @(Invoke-PowerShellAnalyzer $Tool.File.Text $Tool.State.Config -Context $Tool.Context -TimeoutMilliseconds $TimeoutMilliseconds)) {
-                $key = "$($d.Severity)|$($d.RuleName)|$($d.Message)"; $before[$key] = [int]$before[$key] + 1
+                $key = & $keyOf $d $lines; $before[$key] = [int]$before[$key] + 1
             }
         }
+        $lines = $Text -split '\r?\n'
         foreach ($d in @(Invoke-PowerShellAnalyzer $Text $Tool.State.Config -Context $Tool.Context -TimeoutMilliseconds $TimeoutMilliseconds)) {
-            $key = "$($d.Severity)|$($d.RuleName)|$($d.Message)"
+            $key = & $keyOf $d $lines
             if ($before[$key] -gt 0) {
                 $before[$key]--
             }

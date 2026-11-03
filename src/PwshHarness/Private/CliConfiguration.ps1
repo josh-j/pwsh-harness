@@ -96,7 +96,7 @@ function Assert-HarnessSavedOption {
 }
 function Save-HarnessConfiguration {
     [CmdletBinding()]
-    param($HarnessHost, $Config, [hashtable]$Options, [Security.SecureString]$Key, [string]$ConfigPath)
+    param($HarnessHost, $Config, [hashtable]$Options, [Security.SecureString]$Key, [string]$ConfigPath, [switch]$KeepSessionKey)
     Assert-HarnessSavedOption $HarnessHost $Options
     $settings = @{}
     foreach ($name in @('Provider', 'Model', 'BaseUrl') + @($Options.Keys)) {
@@ -109,7 +109,17 @@ function Save-HarnessConfiguration {
     }
     $HarnessHost.ConfigService.Save($settings, $ConfigPath)
     if ($Key -and $Key.Length) {
-        $HarnessHost.Credentials.Save($Config, $Key, $ConfigPath)
+        try {
+            $HarnessHost.Credentials.Save($Config, $Key, $ConfigPath)
+        }
+        catch {
+            if (-not $KeepSessionKey) {
+                throw
+            }
+            # The key the user typed still works; a store this logon cannot use (DPAPI without a loaded profile) only
+            # loses the save, so the session starts instead of exiting.
+            Write-Warning (ConvertTo-HarnessSafeText "The API key was not saved and applies to this session only: $($_.Exception.GetBaseException().Message)")
+        }
     }
 }
 function Initialize-HarnessConnection {
@@ -180,6 +190,6 @@ function Initialize-HarnessConnection {
         }
     }
     if ($save) {
-        Save-HarnessConfiguration -HarnessHost $HarnessHost -Config $Config -Options $Options -Key $keyToSave -ConfigPath $ConfigPath
+        Save-HarnessConfiguration -HarnessHost $HarnessHost -Config $Config -Options $Options -Key $keyToSave -ConfigPath $ConfigPath -KeepSessionKey:(-not $SaveConfig)
     }
 }
