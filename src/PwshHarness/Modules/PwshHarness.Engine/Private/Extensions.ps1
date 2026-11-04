@@ -95,17 +95,17 @@ function Import-EngineExtension {
             }
             $api = New-EngineFacade -Store $Store -Target $stage -Extension $name -GatewayOrigins $manifest.CredentialOrigins -ReadCredentials:(Test-EngineCredentialReader -Store $Store -Directory $record.Directory -EntryPoint $manifest.EntryPoint) -Builtin:((Test-EngineBuiltinPath $Store $record.Directory) -and (Test-EngineBuiltinPath $Store (Join-Path $record.Directory $manifest.EntryPoint)))
             if (Test-EngineBuiltinPath $Store $record.Directory) {
-                $api | Add-Member NoteProperty OperationControl $Store.Host.OperationControl
+                $api.PSObject.Properties.Add([Management.Automation.PSNoteProperty]::new('OperationControl', $Store.Host.OperationControl))
                 if ($manifest.Capabilities -contains 'AgentRuntime' -and (Test-EngineBuiltinPath $Store (Join-Path $record.Directory $manifest.EntryPoint))) {
-                    $api | Add-Member NoteProperty AgentRuntime (New-EngineAgentRuntime -Store $Store -Stage $stage -Extension $name)
+                    $api.PSObject.Properties.Add([Management.Automation.PSNoteProperty]::new('AgentRuntime', (New-EngineAgentRuntime -Store $Store -Stage $stage -Extension $name)))
                 }
             }
             foreach ($method in @('CollectContext', 'TestCode', 'AddTranscript', 'GetSession', 'NewSession', 'RestoreResult')) {
-                $api | Add-Member ScriptMethod $method $Store.Host.PSObject.Methods[$method].Script
+                $api.PSObject.Methods.Add([Management.Automation.PSScriptMethod]::new($method, $Store.Host.PSObject.Methods[$method].Script))
             }
             Add-EngineHostMethod -Store $Store -Endpoint $api.Commands -Methods @{ Invoke = ${function:Invoke-EngineExtensionCommand} }
-            $api.Actions | Add-Member ScriptMethod Invoke $Store.Host.Actions.PSObject.Methods['Invoke'].Script
-            $api.Renderers | Add-Member ScriptMethod Render $Store.Host.Renderers.PSObject.Methods['Render'].Script
+            $api.Actions.PSObject.Methods.Add([Management.Automation.PSScriptMethod]::new('Invoke', $Store.Host.Actions.PSObject.Methods['Invoke'].Script))
+            $api.Renderers.PSObject.Methods.Add([Management.Automation.PSScriptMethod]::new('Render', $Store.Host.Renderers.PSObject.Methods['Render'].Script))
             $sourceHash = ''
             if (-not (Test-EngineBuiltinPath $Store $record.Directory)) {
                 try {

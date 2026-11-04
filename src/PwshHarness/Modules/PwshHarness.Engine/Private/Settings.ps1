@@ -130,7 +130,14 @@ function Resolve-EngineSetting {
             $value = $file[$name]
             $contextSource = $file
         }
-        $envName = Get-EngineSettingEnvironmentName -Store $Store -Name $name -Override (($name -ceq 'BaseUrl' -and -not $spec.Env -and $connection) ? $connection.Defaults.BaseUrlEnvironment : $spec.Env)
+        $envName = ($name -ceq 'BaseUrl' -and -not $spec.Env -and $connection) ? $connection.Defaults.BaseUrlEnvironment : $spec.Env
+        if (-not $envName) {
+            # Every extension's load resolves every setting again, so each derived name is kept.
+            $envName = $Store.EnvironmentNames[$name]
+            if (-not $envName) {
+                $envName = $Store.EnvironmentNames[$name] = Get-EngineSettingEnvironmentName -Store $Store -Name $name
+            }
+        }
         $environment = [Environment]::GetEnvironmentVariable($envName)
         if ($null -ne $environment -and $environment -ne '') {
             $value = if ($spec.Type -eq [string[]]) {
@@ -174,7 +181,10 @@ function Resolve-EngineSetting {
                 throw "Setting '$name' requires $($spec.Type.Name)."
             }
         }
-        $value = Copy-EngineConfigValue $value
+        $scalar = $null -eq $value -or $value -is [string] -or $value -is [ValueType]
+        if (-not $scalar) {
+            $value = Copy-EngineConfigValue $value
+        }
         if ($spec.Validator) {
             try {
                 $validation = & $spec.Validator $value
@@ -195,7 +205,7 @@ function Resolve-EngineSetting {
         if ($name -ceq 'ContextPath' -and $contextSource) {
             $value = Resolve-EngineConfigContextPath -Store $Store -Config $contextSource
         }
-        $values[$name] = Copy-EngineConfigValue $value
+        $values[$name] = $scalar ? $value : (Copy-EngineConfigValue $value)
     }
     if ($values.Autonomy -ceq 'Auto') {
         Write-EngineFault -Store $Store -Extension configuration -Point Autonomy -Failure 'Autonomy=Auto in configuration is inactive; explicit user activation is required.' -Warning

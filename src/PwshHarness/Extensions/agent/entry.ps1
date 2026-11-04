@@ -1,6 +1,7 @@
-. (Join-Path $PSScriptRoot 'AgentTools.ps1')
-. (Join-Path $PSScriptRoot 'Operations.ps1')
-. (Join-Path $PSScriptRoot 'Continuation.ps1')
+$files = 'AgentTools', 'Operations', 'Continuation'
+foreach ($block in Get-HarnessScriptBlock -Path $files.ForEach({ Join-Path $PSScriptRoot "$_.ps1" })) {
+    . $block
+}
 {
     param($Harness)
     $script:Harness = $Harness

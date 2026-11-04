@@ -1,11 +1,7 @@
-. (Join-Path $PSScriptRoot 'Chunkers.ps1')
-. (Join-Path $PSScriptRoot 'Index.ps1')
-. (Join-Path $PSScriptRoot 'Orientation.ps1')
-. (Join-Path $PSScriptRoot 'Ranking.ps1')
-. (Join-Path $PSScriptRoot 'Search.ps1')
-. (Join-Path $PSScriptRoot 'Embeddings.ps1')
-. (Join-Path $PSScriptRoot 'Commands.ps1')
-. (Join-Path $PSScriptRoot 'Examples.ps1')
+$files = 'Chunkers', 'Index', 'Orientation', 'Ranking', 'Search', 'Embeddings', 'Commands', 'Examples'
+foreach ($block in Get-HarnessScriptBlock -Path $files.ForEach({ Join-Path $PSScriptRoot "$_.ps1" })) {
+    . $block
+}
 {
     param($Harness)
     $script:Harness = $Harness

@@ -34,6 +34,7 @@ function New-EngineHostStore {
         Host              = $null
         ManifestReader    = $Context['ManifestReader']
         EnvironmentPrefix = $Context['EnvironmentPrefix']
+        EnvironmentNames  = @{}
         HostId            = [guid]::NewGuid().ToString('N')
         PointCancellation = [Threading.CancellationToken]::None
         CancelMarker      = [object]::new()

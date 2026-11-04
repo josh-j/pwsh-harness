@@ -1,6 +1,7 @@
-. (Join-Path $PSScriptRoot 'Connection.ps1')
-. (Join-Path $PSScriptRoot 'Embeddings.ps1')
-. (Join-Path $PSScriptRoot 'Transport.ps1')
+$files = 'Connection', 'Embeddings', 'Transport'
+foreach ($block in Get-HarnessScriptBlock -Path $files.ForEach({ Join-Path $PSScriptRoot "$_.ps1" })) {
+    . $block
+}
 {
     param($Harness)
     $script:Credentials = $Harness.Credentials

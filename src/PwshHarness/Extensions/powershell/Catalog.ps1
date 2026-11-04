@@ -268,8 +268,11 @@ function New-PowerShellSnapshotCatalog {
 }
 function New-PowerShellComposedCatalog {
     [CmdletBinding()]
-    param([string]$Path, [string]$DataDirectory, [switch]$Live)
-    $core = Get-PowerShellHostCoreCatalog $DataDirectory
+    param([string]$Path, [string]$DataDirectory, [switch]$Live, [switch]$Deferred, [hashtable]$Core)
+    $core = $Core ? $Core : (Get-PowerShellHostCoreCatalog $DataDirectory)
+    if ($Deferred) {
+        return , (New-PowerShellDeferredCatalog -Path $Path -DataDirectory $DataDirectory -Live:$Live -Core $core)
+    }
     $snapshot = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable
     $overlay = @{}
     $isDelta = $snapshot.ContainsKey('OverlayMode') -and $snapshot.OverlayMode -eq 'Delta'
@@ -334,6 +337,51 @@ function New-PowerShellComposedCatalog {
     $frozenKey = "catalog-v1:$coreHash`:$overlayHash"
     New-PowerShellLayeredCatalog -Layers $layers -Modules $modules -Cache $core -LiveResolver $resolver `
         -ModuleResolver $moduleResolver -FrozenKey $frozenKey
+}
+$script:DeferredCatalogs = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
+function New-PowerShellDeferredCatalog {
+    # Merging the overlay and building an entry per command takes about 0.3 s on Linux and longer on Windows, and nothing
+    # reads them before the first check. The host cache and the overlay's syntax are still checked here, so a bad file
+    # fails registration as before.
+    [CmdletBinding()]
+    param([string]$Path, [string]$DataDirectory, [switch]$Live, [hashtable]$Core)
+    $document = [Text.Json.JsonDocument]::Parse([ReadOnlyMemory[byte]][IO.File]::ReadAllBytes($Path), [Text.Json.JsonDocumentOptions]::new())
+    try {
+        $element = [Text.Json.JsonElement]::new()
+        $captured = $document.RootElement.TryGetProperty('Provenance', [ref]$element) -and $element.ToString() -match '^Captured'
+    }
+    finally {
+        $document.Dispose()
+    }
+    $items = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    $items['Kind'] = 'LayeredCatalog'
+    $items['Provenance'] = $Live -or $captured ? 'Captured' : 'Composed'
+    $result = [Collections.ObjectModel.ReadOnlyDictionary[string, object]]::new($items)
+    foreach ($name in $items.Keys) {
+        $result.PSObject.Properties.Add([Management.Automation.PSVariableProperty]::new([Management.Automation.PSVariable]::new($name, $items[$name], 'Constant')))
+    }
+    $script:DeferredCatalogs.Add($result, @{ Path = $Path; DataDirectory = $DataDirectory; Live = [bool]$Live; Core = $Core; Catalog = $null })
+    $result.PSObject.Properties.Add([Management.Automation.PSScriptProperty]::new('Modules', { (Get-PowerShellDeferredCatalog $this).Modules }))
+    $result.PSObject.Properties.Add([Management.Automation.PSScriptProperty]::new('Entries', { (Get-PowerShellDeferredCatalog $this).Entries }))
+    $result.PSObject.Properties.Add([Management.Automation.PSScriptProperty]::new('LayerCounts', { (Get-PowerShellDeferredCatalog $this).LayerCounts }))
+    $result.PSObject.Properties.Add([Management.Automation.PSScriptProperty]::new('Cache', { (Get-PowerShellDeferredCatalog $this).Cache }))
+    $result.PSObject.Methods.Add([Management.Automation.PSScriptMethod]::new('Resolve', { param([string]$Name) (Get-PowerShellDeferredCatalog $this).Resolve($Name) }))
+    $result.PSObject.Methods.Add([Management.Automation.PSScriptMethod]::new('HasModule', { param([string]$Name) (Get-PowerShellDeferredCatalog $this).HasModule($Name) }))
+    $result.PSObject.TypeNames.Insert(0, 'Harness.Frozen')
+    return , $result
+}
+function Get-PowerShellDeferredCatalog {
+    [CmdletBinding()]
+    param([object]$Catalog)
+    $slot = $null
+    if (-not $script:DeferredCatalogs.TryGetValue($Catalog, [ref]$slot)) {
+        throw 'Missing deferred catalog.'
+    }
+    if (-not $slot.Catalog) {
+        $slot.Catalog = New-PowerShellComposedCatalog $slot.Path $slot.DataDirectory -Live:$slot.Live -Core $slot.Core
+        $slot.Core = $null
+    }
+    return , $slot.Catalog
 }
 function New-PowerShellLiveCatalog {
     [CmdletBinding()]

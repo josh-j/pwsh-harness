@@ -21,8 +21,10 @@ foreach ($typeName in $exportedTypes) {
 }
 $typeVersion = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($sources.ToArray()))
 $loaded = $accelerators::Get['HarnessRecord']
+. (Join-Path $PSScriptRoot 'Public/Get-HarnessScriptBlock.ps1')
 if (-not $loaded -or $loaded.GetField('SourceVersion')?.GetValue($null) -cne $typeVersion) {
     foreach ($typeName in $exportedTypes) {
+        # Dot-sourced by path: PowerShell's per-path script cache returns the same types when unchanged sources load again.
         . (Join-Path $PSScriptRoot "Classes/$typeName.ps1")
         $null = $accelerators::Remove($typeName)
         $accelerators::Add($typeName, ($typeName -as [type]))
@@ -33,16 +35,20 @@ if (-not $loaded -or $loaded.GetField('SourceVersion')?.GetValue($null) -cne $ty
 foreach ($setting in 'MaxSteps', 'MaxRunSeconds', 'MaxToolCalls', 'InputTokenBudget', 'MaxReadBytes', 'MaxTotalTokens', 'CompactTokens') {
     Update-TypeData -TypeName HarnessModelProfile -MemberType AliasProperty -MemberName "Agent.$setting" -Value "Agent$setting" -Force
 }
-. (Join-Path $PSScriptRoot 'Private/Frozen.ps1')
-. (Join-Path $PSScriptRoot 'Private/Filesystem.ps1')
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Public') -Filter '*.ps1' | Sort-Object Name) {
-    . $file.FullName
+foreach ($block in Get-HarnessScriptBlock -Path (Join-Path $PSScriptRoot 'Private/Frozen.ps1'), (Join-Path $PSScriptRoot 'Private/Filesystem.ps1')) {
+    . $block
+}
+# Filesystem.ps1 has already loaded the public files it needs; each file defines the function it is named after. Only this
+# module's scope counts: a caller's function of the same name must not stop the module from defining its own.
+$files = (Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'Public') -Filter '*.ps1' | Sort-Object Name).Where({ -not (Test-Path -LiteralPath "function:script:$($_.BaseName)") }).FullName
+foreach ($block in Get-HarnessScriptBlock -Path $files) {
+    . $block
 }
 
 Export-ModuleMember -Function @(
     'ConvertTo-HarnessContextPattern', 'New-HarnessContextPathPattern',
     'Select-HarnessUniquePath',
-    'Get-HarnessTextExcerpt', 'Invoke-HarnessService', 'Get-HarnessOperationDirectory', 'Get-HarnessRunSetting', 'New-HarnessPathTable', 'Invoke-HarnessCheckpoint',
+    'Get-HarnessTextExcerpt', 'Get-HarnessScriptBlock', 'Invoke-HarnessService', 'Get-HarnessOperationDirectory', 'Get-HarnessRunSetting', 'New-HarnessPathTable', 'Invoke-HarnessCheckpoint',
     'Resolve-HarnessFileSystemPath', 'Get-HarnessPathSnapshot', 'Test-HarnessLinkItem', 'Get-HarnessSha256', 'Get-HarnessPathComparison', 'ConvertTo-HarnessSlashPath', 'Read-HarnessFileByte', 'Read-HarnessTextFile', 'ConvertTo-HarnessFileText', 'Write-HarnessAtomicFile', 'Invoke-HarnessFileRetry', 'Protect-HarnessPrivateItem'
     'ConvertTo-HarnessSafeText', 'Get-HarnessSecretPattern', 'Get-HarnessSecretSuffixLength', 'Protect-HarnessText', 'Test-HarnessSecretName'
     'New-HarnessUsage', 'Get-HarnessUsageCounter', 'New-HarnessNativeBatch',

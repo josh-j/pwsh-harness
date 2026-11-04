@@ -5,9 +5,9 @@ function Add-EngineHostMethod {
     param($Store, $Endpoint, [hashtable]$Methods)
     foreach ($name in $Methods.Keys) {
         $handler = $Methods[$name]
-        $Endpoint | Add-Member ScriptMethod $name {
-            & $handler $Store @args
-        }.GetNewClosure()
+        $Endpoint.PSObject.Methods.Add([Management.Automation.PSScriptMethod]::new($name, {
+                    & $handler $Store @args
+                }.GetNewClosure()))
     }
 }
 function Initialize-EngineHostExtension {
@@ -128,8 +128,8 @@ function Remove-EngineHost {
 function Initialize-EngineHostLifecycle {
     [CmdletBinding()]
     param($Store)
-    $Store.Host | Add-Member NoteProperty Id $Store.HostId
-    $Store.Host | Add-Member NoteProperty IsDisposed $false
+    $Store.Host.PSObject.Properties.Add([Management.Automation.PSNoteProperty]::new('Id', $Store.HostId))
+    $Store.Host.PSObject.Properties.Add([Management.Automation.PSNoteProperty]::new('IsDisposed', $false))
     Add-EngineHostMethod -Store $Store -Endpoint $Store.Host -Methods @{ Dispose = ${function:Remove-EngineHost} }
     $loader = [pscustomobject]@{}
     Add-EngineHostMethod -Store $Store -Endpoint $loader -Methods @{
@@ -141,5 +141,5 @@ function Initialize-EngineHostLifecycle {
         Enable     = { param($Store, [string]$Name) Set-EngineExtensionDisabled -Store $Store -Name $Name -Disabled $false }
         Forget     = ${function:Clear-EngineExtensionRecord}
     }
-    $Store.Host | Add-Member NoteProperty ExtensionLoader $loader
+    $Store.Host.PSObject.Properties.Add([Management.Automation.PSNoteProperty]::new('ExtensionLoader', $loader))
 }

@@ -1,17 +1,10 @@
-. (Join-Path $PSScriptRoot 'Examples.ps1')
-. (Join-Path $PSScriptRoot 'Verification.ps1')
-. (Join-Path $PSScriptRoot 'Amplification.ps1')
-. (Join-Path $PSScriptRoot 'Retrieval.ps1')
-. (Join-Path $PSScriptRoot 'History.ps1')
-. (Join-Path $PSScriptRoot 'Language.ps1')
-. (Join-Path $PSScriptRoot 'Highlighter.ps1')
-. (Join-Path $PSScriptRoot 'Actions.ps1')
-. (Join-Path $PSScriptRoot 'Operations.ps1')
-. (Join-Path $PSScriptRoot 'AgentLanguage.ps1')
-. (Join-Path $PSScriptRoot 'Catalog.ps1')
-. (Join-Path $PSScriptRoot 'Windows.ps1')
-. (Join-Path $PSScriptRoot 'Save.ps1')
-. (Join-Path $PSScriptRoot 'Behavior.ps1')
+$files = @(
+    'Examples', 'Verification', 'Amplification', 'Retrieval', 'History', 'Language', 'Highlighter', 'Actions',
+    'Operations', 'AgentLanguage', 'Catalog', 'Windows', 'Save', 'Behavior'
+)
+foreach ($block in Get-HarnessScriptBlock -Path $files.ForEach({ Join-Path $PSScriptRoot "$_.ps1" })) {
+    . $block
+}
 {
     param($Harness)
     $script:Harness = $Harness
@@ -180,7 +173,7 @@
     $Harness.Settings.Declare('CommandCatalogPath', [string], '')
     $catalogConfig = $Harness.ConfigService.Resolve()
     $catalogPath = $catalogConfig.CommandCatalogPath ? $catalogConfig.CommandCatalogPath : (Join-Path $PSScriptRoot 'windows-7.6.json')
-    $catalog = New-PowerShellComposedCatalog $catalogPath $catalogConfig.DataDirectory -Live:$IsWindows
+    $catalog = New-PowerShellComposedCatalog $catalogPath $catalogConfig.DataDirectory -Live:$IsWindows -Deferred
     $Harness.TargetProfiles.Add('Windows', (New-PowerShellTargetProfile -OS Windows -EOL CRLF -CommandCatalog $catalog))
     $Harness.TargetProfiles.Select('Windows')
 }

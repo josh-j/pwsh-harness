@@ -5,7 +5,7 @@
     FunctionsToExport = @(
         'ConvertTo-HarnessContextPattern', 'New-HarnessContextPathPattern',
         'Select-HarnessUniquePath',
-        'Get-HarnessTextExcerpt', 'Invoke-HarnessService', 'Get-HarnessOperationDirectory', 'Get-HarnessRunSetting', 'New-HarnessPathTable', 'Invoke-HarnessCheckpoint',
+        'Get-HarnessTextExcerpt', 'Get-HarnessScriptBlock', 'Invoke-HarnessService', 'Get-HarnessOperationDirectory', 'Get-HarnessRunSetting', 'New-HarnessPathTable', 'Invoke-HarnessCheckpoint',
         'Resolve-HarnessFileSystemPath', 'Get-HarnessPathSnapshot', 'Test-HarnessLinkItem', 'Get-HarnessSha256', 'Get-HarnessPathComparison', 'ConvertTo-HarnessSlashPath', 'Read-HarnessFileByte', 'Read-HarnessTextFile', 'ConvertTo-HarnessFileText', 'Write-HarnessAtomicFile', 'Invoke-HarnessFileRetry', 'Protect-HarnessPrivateItem',
         'ConvertTo-HarnessSafeText', 'Get-HarnessSecretPattern', 'Get-HarnessSecretSuffixLength', 'Protect-HarnessText', 'Test-HarnessSecretName'
         'New-HarnessUsage', 'Get-HarnessUsageCounter', 'New-HarnessNativeBatch',
