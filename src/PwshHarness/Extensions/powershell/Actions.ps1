@@ -242,9 +242,12 @@ function Invoke-PowerShellRun {
                 # An ASCII line keeps a working folder or temp path outside the child's input code page, such as a
                 # non-ASCII user name, intact.
                 $wrapper = ". ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wrapper)))'))))"
+                Wait-PowerShellTerminalReady $task -Command $wrapper
             }
-            $task.Process.StandardInput.WriteLine($wrapper)
-            $task.Process.StandardInput.Flush()
+            else {
+                $task.Process.StandardInput.WriteLine($wrapper)
+                $task.Process.StandardInput.Flush()
+            }
         }
         $task.Timer = $script:Harness.Clock.Elapsed()
         $task.Watchdog = Start-PowerShellCommandWatchdog $task $Terminal

@@ -286,6 +286,10 @@ function Resolve-AgentPresentedPath {
         throw 'The scratch directory is outside the workspace; create, read and run scratch files with run_command.'
     }
     $relative = [IO.Path]::GetRelativePath($root, $Path)
+    if ($full -notmatch '[\p{Cc}\p{Cf}]' -and ([IO.Path]::IsPathRooted($relative) -or $relative -match '^\.\.([\\/]|$)')) {
+        # Name the boundary: the relative-path rule this would reach next says nothing about the workspace.
+        throw (New-AgentRefusal -Code OutsideWorkspace -Message "$full is outside the workspace $root." -Next 'File tools reach only files under the workspace; continue with workspace files.')
+    }
     if ($relative -ceq '.') {
         # The workspace itself, often echoed with a trailing separator, is a search scope or command folder.
         return $relative

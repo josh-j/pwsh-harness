@@ -171,19 +171,22 @@ function Wait-PowerShellRunTask {
 
 function Wait-PowerShellTerminalReady {
     [CmdletBinding()]
-    param($Task)
+    param($Task, [string]$Command)
     # The child decodes stdin in its console code page, which on Windows need not match ours. Setting
     # [Console]::InputEncoding replaces its stdin reader and drops what that reader had buffered, so task input sent
     # before the reset was lost and the command waited for it until the run deadline (Windows CI 3201). The prelude runs
-    # alone and answers before any command or input follows it.
+    # alone and answers before any command or input follows it. PowerShell keeps reading its commands through the old
+    # reader, which takes everything in the pipe when it reads a line: input sent before the child read the command
+    # became its next command (Windows CI 3434). A command therefore answers first, and input waits for that answer.
     $ready = 'harness_' + [guid]::NewGuid().ToString('N') + ':ready'
-    $Task.Process.StandardInput.WriteLine($script:PackTerminalPrelude + "[Console]::Out.WriteLine('$ready')")
+    $Task.Process.StandardInput.WriteLine($Command ? "[Console]::Out.WriteLine('$ready'); $Command" : $script:PackTerminalPrelude + "[Console]::Out.WriteLine('$ready')")
     $Task.Process.StandardInput.Flush()
     $watch = $Task.Clock.Elapsed()
     while (-not $Task.Stdout.Text.ToString().Contains($ready)) {
         $Task.Token.ThrowIfCancellationRequested()
         $Task.RunCancellation.Token.ThrowIfCancellationRequested()
-        if ($Task.Stdout.Finished -or $Task.Process.HasExited) {
+        # Finished means its output was read to the end; a command that exits at once has still answered first.
+        if ($Task.Stdout.Finished) {
             throw 'The PowerShell terminal exited before it was ready.'
         }
         if ($watch.Elapsed.TotalSeconds -ge $Task.Timeout) {

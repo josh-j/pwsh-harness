@@ -179,12 +179,19 @@ function Get-HarnessRenderModel {
                     foreach ($text in ($record.Text -split '\r\n|\n|\r')) {
                         $line = ''
                         foreach ($field in ((ConvertTo-HarnessSafeText $text) -split ' \| ')) {
-                            $next = $line ? "$line | $field" : $field
-                            if ($line -and (Get-TuiTextWidth $next) -gt $Width) {
-                                $parts.Add($line); $line = $field
-                            }
-                            else {
-                                $line = $next
+                            # A field wider than the row (the time breakdown) breaks after its commas, then at spaces.
+                            $separator = ' | '
+                            foreach ($item in ((Get-TuiTextWidth $field) -gt $Width ? ($field -split '(?<=,) ') : $field)) {
+                                foreach ($piece in ((Get-TuiTextWidth $item) -gt $Width ? ($item -split ' ') : $item)) {
+                                    $next = $line ? "$line$separator$piece" : $piece
+                                    if ($line -and (Get-TuiTextWidth $next) -gt $Width) {
+                                        $parts.Add($line); $line = $piece
+                                    }
+                                    else {
+                                        $line = $next
+                                    }
+                                    $separator = ' '
+                                }
                             }
                         }
                         $parts.Add($line)
@@ -454,7 +461,8 @@ function Get-HarnessRenderModel {
             $middle += $separator + $field
         }
     }
-    $status = Get-TuiSingleLine -Text ($prefix + $middle + $separator + $suffix) -Width $Width -Ascii $bar.Ascii
+    # A suffix as wide as the row leaves no middle; its separator alone showed as an empty field.
+    $status = Get-TuiSingleLine -Text ($prefix + ($middle ? $middle + $separator : '') + $suffix) -Width $Width -Ascii $bar.Ascii
     if ($Width -lt 40) {
         $step = $bar.Steps -replace '^steps:|^step\s+', ''
         $shortState = $runState -eq 'approval pending' ? 'review' : $runState

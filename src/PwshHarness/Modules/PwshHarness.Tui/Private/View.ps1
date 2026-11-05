@@ -288,7 +288,9 @@ function Format-TuiActionOutput {
     param($Result, [switch]$Plain)
     if (Test-TuiRecordProperty $Result 'AgentSummary') {
         if ($Result.AgentSummary.StopReason -ceq 'AwaitingApproval' -and (Test-TuiRecordProperty $Result 'OperationReview')) {
-            return $Result.OperationReview
+            # The TUI draws the pending operation and opens this review on Enter; as a record it repeated the whole
+            # review after each approval that reached the next operation.
+            return $Plain ? $Result.OperationReview : ''
         }
         return $Result.Text
     }
