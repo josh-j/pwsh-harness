@@ -537,8 +537,9 @@ function New-PowerShellToolCommand {
     $Tool.Command = @{ Source = $source; SourceHash = (Get-HarnessSha256 ([Text.Encoding]::UTF8.GetBytes($source))); EntryPath = '' }
     $Tool.Writes = $parsed -and (Test-PowerShellFileWrite -Source $source)
     # Only real risks mark a command (!): style and lint findings such as an unchecked native exit status are not
-    # risks here, because the agent sees every exit code.
-    $Tool.Risks = $special ? @('Command or task input runs with your account permissions; host approval and deadlines remain in force.') : @($script:Harness.TestCode((New-HarnessCodeBlock -Code $source), $Tool.State.Config).Diagnostics | Where-Object Source -CEQ 'Risk' | ForEach-Object Message)
+    # risks here, because the agent sees every exit code. The parse above already found them; running every critic
+    # spent 1.6-3.1 s of PSScriptAnalyzer per new command on Windows for findings this discarded.
+    $Tool.Risks = $special ? @('Command or task input runs with your account permissions; host approval and deadlines remain in force.') : @($parsed.Risks.Message)
     if ($Tool.Context.PSObject.Properties['AgentCommand']) {
         $Tool.CommandCwd = $Tool.Context.AgentCommand.Cwd
         $Tool.CommandParents = $Tool.Context.AgentCommand.Parents

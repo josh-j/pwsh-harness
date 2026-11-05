@@ -21,6 +21,7 @@ foreach ($typeName in $exportedTypes) {
 }
 $typeVersion = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($sources.ToArray()))
 $loaded = $accelerators::Get['HarnessRecord']
+$script:HarnessScriptBlocks = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
 . (Join-Path $PSScriptRoot 'Public/Get-HarnessScriptBlock.ps1')
 if (-not $loaded -or $loaded.GetField('SourceVersion')?.GetValue($null) -cne $typeVersion) {
     foreach ($typeName in $exportedTypes) {
