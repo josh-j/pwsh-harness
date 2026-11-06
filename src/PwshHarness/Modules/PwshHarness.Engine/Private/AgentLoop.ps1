@@ -1204,7 +1204,10 @@ function Send-EngineAgent {
         if ($turn.Config.SystemPrompt -cne $Store.Points.Settings.SystemPrompt.Default) {
             $instructions += "`n" + $turn.Config.SystemPrompt
         }
-        $turn.Config.SystemPrompt = $instructions + "`nEffective run mode: $($ticket.Run.Mode). Limits: $($State.Config.'Agent.MaxSteps') model steps, $($State.Config.'Agent.MaxToolCalls') tool calls, $($State.Config.'Agent.MaxRunSeconds') seconds. Submit concrete task edits and commands through the tools. The host enforces authorization: Approve requests exact-source review; Auto executes eligible granted actions."
+        $turn.Config.SystemPrompt = $instructions + "`nEach task's metadata states its run mode and limits. Submit concrete task edits and commands through the tools. The host enforces authorization: Approve requests exact-source review; Auto executes eligible granted actions."
+        # The mode and limits go with the task, not the instructions: a mode switch between runs would otherwise change
+        # the request's prefix and miss the provider's prompt cache for the whole history after it.
+        $turn | Add-Member NoteProperty RunNotice "Effective run mode: $($ticket.Run.Mode). Limits: $($State.Config.'Agent.MaxSteps') model steps, $($State.Config.'Agent.MaxToolCalls') tool calls, $($State.Config.'Agent.MaxRunSeconds') seconds."
         $loop = @{
             Tools = (Get-EngineAgentToolSnapshot $Store); Schemas = $null; Clock = $Store.Clock
             Lease = $ticket.Lease; Run = $ticket.Run; Turn = $turn; Settings = $record.Lease.Settings

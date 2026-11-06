@@ -43,7 +43,7 @@ function Resolve-EngineContextStage {
     }
     $time = $Turn.PSObject.Properties['TaskTime'] ? $Turn.TaskTime : [datetimeoffset]::Now.ToString('o')
     $Turn | Add-Member NoteProperty TaskTime $time -Force
-    $task = (Get-EngineAgentState $Turn.Store $Turn.Session).Loop ? "<USER_REQUEST>`n$($Turn.Prompt)`n</USER_REQUEST>`n<ADDITIONAL_METADATA>`nThe current local time is: $time.`n</ADDITIONAL_METADATA>" : $Turn.Prompt
+    $task = (Get-EngineAgentState $Turn.Store $Turn.Session).Loop ? "<USER_REQUEST>`n$($Turn.Prompt)`n</USER_REQUEST>`n<ADDITIONAL_METADATA>`nThe current local time is: $time.$($Turn.PSObject.Properties['RunNotice'] ? "`n$($Turn.RunNotice)" : '')`n</ADDITIONAL_METADATA>" : $Turn.Prompt
     $message = New-HarnessMessage user $task
     $message | Add-Member NoteProperty BudgetGroup 'task'
     $messages.Add($message)

@@ -86,6 +86,16 @@ function Set-TuiPlanView {
     $View.StatusBar.Plan = "plan $done/$($plan.Count)" + ($step ? ": $($step.Length -gt 32 ? $step.Substring(0, 31) + ($View.StatusBar.Ascii ? '...' : '…') : $step)" : '')
     $View.Dirty = $true
 }
+function Clear-TuiPlanView {
+    # A plan belongs to its run: a new run starts without one, and a finished run's answer closes it without a last
+    # update_plan, which would otherwise leave the status at the last reported progress, such as plan 0/5.
+    [CmdletBinding()]
+    param($View, [string]$EventName, $Payload)
+    if ($EventName -ceq 'AgentRunStarted' -or (Get-TuiDisplayValue (Get-TuiDisplayValue $Payload Summary) StopReason) -ceq 'Complete') {
+        $View.StatusBar.Plan = ''
+        $View.Dirty = $true
+    }
+}
 function Set-TuiViewSnapshot {
     [CmdletBinding()]
     param($View, $Snapshot, [switch]$Conversation)

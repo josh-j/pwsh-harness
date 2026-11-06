@@ -8,6 +8,7 @@ function Invoke-TuiFrontend {
     $setAgentView = ${function:Set-TuiAgentView}
     $setToolView = ${function:Update-TuiToolView}
     $setPlanView = ${function:Set-TuiPlanView}
+    $clearPlanView = ${function:Clear-TuiPlanView}
     $renderWorker = $null
     try {
         foreach ($eventName in @('TurnStarted', 'ChunkReceived', 'TurnCompleted', 'DiagnosticsProduced', 'HistoryTrimmed', 'HistoryCompacted', 'ActionCompleted', 'OperationPrepared', 'OperationTransitioned', 'StatusItem', 'Notice')) {
@@ -101,6 +102,16 @@ function Invoke-TuiFrontend {
                 }.GetNewClosure())
             $subscriptions.Add(@($eventName, $name))
         }
+        foreach ($eventName in @('AgentRunStarted', 'AgentRunStopped')) {
+            $name = 'view-run-' + [guid]::NewGuid().ToString('N')
+            $HarnessHost.Events.Subscribe($eventName, $name, {
+                    param($payload)
+                    if ($payload.SessionId -ceq $Session.SessionId) {
+                        & $clearPlanView $View $eventName $payload
+                    }
+                }.GetNewClosure())
+            $subscriptions.Add(@($eventName, $name))
+        }
         $render = ${function:Get-TuiActiveRenderModel}
         $readInput = ${function:Read-TuiFrontendBatch}
         $readRenderInput = ${function:Read-TuiRenderInput}
@@ -132,8 +143,10 @@ function Invoke-TuiFrontend {
             if ($LineMode) {
                 return
             }
-            # The spinner redraws the whole frame; on a long session it slows so redraws stay near a tenth of one core.
-            if ($View.SessionView.Busy -and $Terminal.Now() - $last.Spinner -ge [Math]::Max(100, 8 * $last.RenderMs)) {
+            # The spinner redraws the whole frame, so a slow frame slows it: redraws stay near 6% of one core. On the
+            # Windows console a frame took 21 ms (half of it the write), and at 8 frame times the display used 14% of
+            # a 19 s request wait.
+            if ($View.SessionView.Busy -and $Terminal.Now() - $last.Spinner -ge [Math]::Max(100, 16 * $last.RenderMs)) {
                 $View.Dirty = $true
                 $View.Spinner.Index++
                 $last.Spinner = $Terminal.Now()
