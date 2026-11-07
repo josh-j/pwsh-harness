@@ -60,7 +60,7 @@ function ConvertTo-FlashPresentationCall {
     $root = & $Agent.Root $Context
     $path = $Call.Name -ceq 'view_file' ? $arguments.AbsolutePath : $arguments.TargetFile
     if ($path) {
-        $path = & $Agent.ResolvePath $Context $path
+        $path = & $Agent.ResolvePath $Context $path -Create:($Call.Name -ceq 'write_to_file')
     }
     switch ($Call.Name) {
         grep_search {
@@ -100,7 +100,7 @@ function ConvertTo-FlashPresentationCall {
             if ($arguments.Append -and $arguments.Overwrite) {
                 throw 'Append and Overwrite cannot both be true.'
             }
-            $target = & $Agent.ReadTarget $Context $path
+            $target = & $Agent.ReadTarget $Context $path -Create
             $hash = $null
             if ($target.Exists) {
                 if (-not $arguments.Overwrite -and -not $arguments.Append) {

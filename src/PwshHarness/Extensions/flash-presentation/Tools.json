@@ -183,7 +183,7 @@
   },
   {
     "Name": "write_to_file",
-    "Description": "Create a file, or replace or append to an existing one. The parent folder must exist.\nAn existing file is changed only with Overwrite or Append, and only after you viewed it in this run. To change part of a file, use replace_file_content.",
+    "Description": "Create a file, or replace or append to an existing one. Missing folders are created.\nAn existing file is changed only with Overwrite or Append, and only after you viewed it in this run. To change part of a file, use replace_file_content.",
     "Parameters": {
       "additionalProperties": false,
       "properties": {

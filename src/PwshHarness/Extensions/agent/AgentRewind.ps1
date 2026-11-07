@@ -228,7 +228,7 @@ function Start-AgentRewind {
     if ($record.Active -and $record.Active.RunId -ceq $Run.Id) {
         return
     }
-    $record.Active = @{ RunId = $Run.Id; Root = $Root; State = [WeakReference]::new($Context.State); Start = [ordered]@{}; Partial = $true; Error = ''
+    $record.Active = @{ RunId = $Run.Id; Root = $Root; State = [WeakReference]::new($Context.State); Start = [ordered]@{}; Partial = $true; Error = ''; Folders = [Collections.Generic.List[string]]::new()
         Prompt = [string]$Context.State.LastPrompt; Time = [datetime]::UtcNow.ToString('o')
     }
     try {
@@ -250,6 +250,10 @@ function Add-AgentRewindEntry {
         if ($record.Active -and $record.Active.RunId -ceq $Tool.Run.Id -and -not $record.Active.Start.Contains($name)) {
             $record.Active.Start[$name] = $file.BeforeExists ? (Save-AgentRewindBlob -State $Tool.State -Record $record -Bytes ([byte[]]$file.BeforeBytes)) : $null
         }
+    }
+    # Undo removes the folders a write created once they are empty again.
+    foreach ($folder in @($record.Active -and $record.Active.RunId -ceq $Tool.Run.Id -and $Tool['Folders'] ? $Tool.Folders : @())) {
+        $record.Active.Folders.Add((ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Tool.Root, $folder))))
     }
 }
 function Stop-AgentRewind {
@@ -289,7 +293,7 @@ function Stop-AgentRewind {
                 $null = Save-AgentRewindBlob -State $state -Record $record -Bytes $bytes
             }
         }
-        $record.Checkpoints.Add([pscustomobject]@{ RunId = $active.RunId; Root = $active.Root; Partial = $active.Partial; Error = $active.Error; Prompt = $active.Prompt; Time = $active.Time; Changes = $changes })
+        $record.Checkpoints.Add([pscustomobject]@{ RunId = $active.RunId; Root = $active.Root; Partial = $active.Partial; Error = $active.Error; Prompt = $active.Prompt; Time = $active.Time; Changes = $changes; Folders = $active.Folders.ToArray() })
         if ($record.Checkpoints.Count -gt $script:PackRewindCheckpoints) {
             $record.Checkpoints.RemoveRange(0, $record.Checkpoints.Count - $script:PackRewindCheckpoints)
         }
@@ -376,7 +380,9 @@ function New-AgentUndoChange {
             $changes[$change.Path].End = $change.End
         }
     }
-    $Tool.Data = @{ runs = $runs; restored = @(); deleted = @(); skipped = @() }
+    $Tool.Data = @{ runs = $runs; restored = @(); deleted = @(); skipped = @(); removed_folders = @() }
+    # A journal from before folders were recorded has none.
+    $Tool.RemoveFolders = @($Tool.Checkpoints | ForEach-Object { $_.PSObject.Properties['Folders'] ? $_.Folders : @() } | Where-Object { $_ } | Select-Object -Unique)
     $Tool.Files = @(foreach ($change in @($changes.Values).Where({ $_.Start -cne $_.End })) {
             try {
                 $path = Resolve-AgentToolPath -State $Tool.State -Root $Tool.Root -Path $change.Path -Context $Tool.Context

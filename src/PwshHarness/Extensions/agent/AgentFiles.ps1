@@ -60,9 +60,10 @@ function Test-AgentReservedPathPart {
 }
 function Resolve-AgentToolPath {
     # -Inventory skips the per-path Git checks for a path taken from a Git listing that excluded ignored files,
-    # or from a walk of a root that a full check already found outside any repository.
+    # or from a walk of a root that a full check already found outside any repository. -Create allows missing folders,
+    # which a write creates; each folder name passed the checks above, and the nearest existing one must be a folder.
     [CmdletBinding()]
-    param($State, [string]$Root, [string]$Path, $Context, [switch]$Inventory, [switch]$InventoryRoot)
+    param($State, [string]$Root, [string]$Path, $Context, [switch]$Inventory, [switch]$InventoryRoot, [switch]$Create)
     if ($Path -match '[\p{Cc}\p{Cf}:]|^[\\/]|(^|[\\/])\.\.([\\/]|$)') {
         throw 'Tool path must be a bounded relative literal path without traversal, drives, providers or streams.'
     }
@@ -78,9 +79,14 @@ function Resolve-AgentToolPath {
         throw (New-AgentRefusal -Code ProtectedPath -Message 'Protected Git or credential administration root.' -Next 'The harness never reads or writes this path; continue without it.')
     }
     $full = $script:Harness.OperationControl.ResolvePath($Root, $Path)
-    if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($full))) {
+    $folder = [IO.Path]::GetDirectoryName($full)
+    while ($Create -and -not [IO.Directory]::Exists($folder) -and -not [IO.File]::Exists($folder)) {
+        $folder = [IO.Path]::GetDirectoryName($folder)
+    }
+    if (-not [IO.Directory]::Exists($folder)) {
         # Name the missing folder so a guessed path can be corrected.
-        throw "The folder for '$Path' does not exist; tool paths must be in existing folders. List or search a parent folder to find the right path."
+        throw ($Create ? "'$(ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Root, $folder)))' is a file, so '$Path' cannot be created inside it." :
+            "The folder for '$Path' does not exist; tool paths must be in existing folders. List or search a parent folder to find the right path.")
     }
     $comparison = Get-HarnessPathComparison
     foreach ($protected in @($script:Harness.ConfigService.GetPath(), $State.Config.ConfigPath, $State.Config.SessionDirectory, (Get-AgentRewindDirectory $State -Root))) {

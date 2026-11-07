@@ -103,5 +103,5 @@ function Resolve-AgentToolCallPath {
         $skill = $catalog.Skills[$name]
         return Resolve-AgentToolPath -State $State -Root $skill.Root -Path $skill.Relative -Context $Context
     }
-    Resolve-AgentToolPath -State $State -Root $Root -Path $Call.Arguments.path -Context $Context
+    Resolve-AgentToolPath -State $State -Root $Root -Path $Call.Arguments.path -Context $Context -Create:($Call.Name -ceq 'write')
 }

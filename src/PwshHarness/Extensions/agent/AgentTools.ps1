@@ -104,6 +104,12 @@ function Format-AgentToolReview {
     }
     $candidate = $tool.Candidate
     $parts = @("Tool: $($tool.Context.PSObject.Properties['PresentedCall'] ? $tool.Context.PresentedCall.Name : $tool.Call.Name); call: $($tool.Call.Id)", "Root: $($candidate.ContextRoot)", "Source SHA-256: $($candidate.SourceHash)")
+    if ($tool['RemoveFolders']) {
+        $parts += "Removes these folders the runs created, if empty: $($tool.RemoveFolders -join ', ')"
+    }
+    if ($tool['Folders']) {
+        $parts += "Creates folders: $(@($tool.Folders | ForEach-Object { ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($candidate.ContextRoot, $_)) }) -join ', ')"
+    }
     foreach ($file in $candidate.Files) {
         $parts += "$($file.Path)`nBefore: $($file.BeforeHash); exists: $($file.BeforeExists)`nAfter: $($false -eq $file['FinalExists'] ? 'deleted' : $file.FinalHash)`n--- current`n$([Text.Encoding]::UTF8.GetString([byte[]]$file.BeforeBytes))`n+++ proposed`n$([Text.Encoding]::UTF8.GetString([byte[]]$file.FinalBytes))"
     }
@@ -524,6 +530,9 @@ function New-AgentToolFileChange {
     }
     $Tool.Files = @(@{ Path = $Tool.Path; BeforeExists = $file.Exists; BeforeBytes = $file.Bytes; BeforeHash = $file.Hash; FinalBytes = $final; FinalHash = (Get-HarnessSha256 $final) })
     $Tool.Data = @{ before_sha256 = $file.Hash; after_sha256 = $Tool.Files[0].FinalHash; bytes_written = $final.Length }
+    if ($Tool['Folders']) {
+        $Tool.Data.created_folders = @($Tool.Folders | ForEach-Object { ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Tool.Root, $_)) })
+    }
     if ($unescaped) {
         $Tool.Data.note = 'The before text matched once each doubled backslash was made single, so the after text was changed the same way. Send backslashes as the file has them (one backslash is \\ in JSON).'
     }
@@ -576,7 +585,12 @@ function Assert-AgentToolContext {
     }
     $target = $Tool.Spec.Schema.ContainsKey('path') ? (Resolve-AgentToolCallPath -State $state -Root $Tool.Root -Call $Tool.Call -Context $Tool.Context) : $Tool.Root
     $current = Get-HarnessPathSnapshot $target -AllowMissing -NoHardLinks
-    if ($Tool.Parents -cne $current.Parents) {
+    $parents = $current.Parents
+    if ($Tool['Folders']) {
+        # A folder the write creates joins the parents as a physical directory; any other change fails the check.
+        $parents = @($parents -split "`n" | Where-Object { $line = $_; -not @($Tool.Folders).Where({ $line.StartsWith("${_}:", [StringComparison]::Ordinal) }).Count }) -join "`n"
+    }
+    if ($Tool.Parents -cne $parents) {
         throw 'Tool root or parents changed during review.'
     }
     if (-not [string]::Equals($Tool.SessionId, $state.SessionId, [StringComparison]::Ordinal) -or $Tool.Settings -cne ($state.Config | ConvertTo-Json -Depth 30 -Compress) -or
@@ -660,6 +674,11 @@ function Invoke-AgentToolCall {
     }
     $tool.Path = $tool.Spec.Schema.ContainsKey('path') ? (Resolve-AgentToolCallPath -State $state -Root $tool.Root -Call $Call -Context $Context) : $tool.Root
     $tool.Parents = (Get-HarnessPathSnapshot $tool.Path -AllowMissing -NoHardLinks).Parents
+    # The folders a write creates, outermost first; the parent check admits them once they exist.
+    $tool.Folders = @(for ($folder = [IO.Path]::GetDirectoryName($tool.Path); $folder -and -not [IO.Directory]::Exists($folder); $folder = [IO.Path]::GetDirectoryName($folder)) {
+            $folder
+        })
+    [array]::Reverse($tool.Folders)
     if ($tool.Spec.Schema.ContainsKey('path')) {
         $limit = $Call.Arguments.path.StartsWith('skill:', [StringComparison]::Ordinal) ? [Math]::Min(32768, $state.Config.'Agent.MaxFileBytes') : $state.Config.'Agent.MaxFileBytes'
         $tool.File = Read-HarnessTextFile $tool.Path $limit -AllowMissing -NoHardLinks
@@ -698,7 +717,20 @@ function Invoke-AgentToolFileChange {
     [CmdletBinding()]
     param($Tool, $Context)
     $complete = ${function:Complete-AgentToolCall}
-    $receipt = { $Tool.Result = & $complete $Tool.Context $Tool.Call $Tool.Data }.GetNewClosure()
+    $control = $script:Harness.OperationControl
+    $receipt = {
+        # Undo removes the folders its runs created once their files are gone; a nonrecursive delete keeps one that is not empty.
+        foreach ($folder in @($Tool['RemoveFolders'] ? ($Tool.RemoveFolders | Sort-Object Length -Descending) : @())) {
+            try {
+                [IO.Directory]::Delete($control.ResolvePath($Tool.Root, $folder), $false)
+                $Tool.Data.removed_folders += $folder
+            }
+            catch {
+                Write-Verbose "Kept folder ${folder}: $($_.Exception.Message)"
+            }
+        }
+        $Tool.Result = & $complete $Tool.Context $Tool.Call $Tool.Data
+    }.GetNewClosure()
     $script:Harness.OperationControl.ApplyFiles($Tool.Flow, $Context.Pump, $Context.CancellationToken, $receipt)
     $Tool.Data
 }
@@ -854,7 +886,7 @@ $pathRule = @{ Kind = 'String'; Min = 1; Max = 4096; Description = 'Context-rela
 $lineRule = @{ Kind = 'Number'; Min = 1; Max = [int]::MaxValue }
 $script:PackTools = @{
     read  = @{ Description = "Read UTF-8 text with numbered lines and whole-file sha256; remove the N: prefix before editing.`nDefault 300 lines, bounded by Agent.MaxReadBytes: read a shorter file whole; otherwise search, then read the lines you need. Truncation names the next start_line; skill:<name> loads listed guidance."; Schema = @{ path = (@{} + $pathRule); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'First line, inclusive; defaults to 1.' }); line_count = @{ Kind = 'Number'; Min = 1; Max = 2000; Default = 300; Description = 'Requested line count, 1-2000; defaults to 300.' } }; Prepare = ${function:Read-AgentToolData}; Role = 'tool-read' }
-    write = @{ Description = "Create a UTF-8 file with a null hash, or replace an entire existing file with its matching hash. Parents must exist.`nPrefer edit for partial changes. Returns hashes, bytes and available diagnostics."; Schema = @{ path = $pathRule; text = $string; expected_sha256 = (@{} + $hash + @{ Nullable = $true; Description = 'Existing file hash, or null for create-only. Required for write.' }) }; Prepare = ${function:New-AgentToolFileChange}; Execute = ${function:Invoke-AgentToolFileChange}; Role = 'tool-result' }
+    write = @{ Description = "Create a UTF-8 file with a null hash, or replace an entire existing file with its matching hash. Missing folders are created.`nPrefer edit for partial changes. Returns hashes, bytes and available diagnostics."; Schema = @{ path = $pathRule; text = $string; expected_sha256 = (@{} + $hash + @{ Nullable = $true; Description = 'Existing file hash, or null for create-only. Required for write.' }) }; Prepare = ${function:New-AgentToolFileChange}; Execute = ${function:Invoke-AgentToolFileChange}; Role = 'tool-result' }
     edit  = @{ Description = "Edit one file with one ordinal before match (optionally anchored), or 1-64 nonoverlapping original-line hunks in any order; each target must match once. One atomic change. Read first.`nOmitted expected_sha256 uses this run's observed hash; changed or unread files fail. Send several changes to one file as hunks of one edit. Returns hunks, hash and diagnostics."; Schema = @{ path = $pathRule; before = @{ Kind = 'String'; Min = 1; Description = 'Exact nonempty source text, unique within the optional line anchors.' }; after = $string; expected_sha256 = (@{} + $hash + @{ Optional = $true; Description = 'Optional after read in this run; explicit null is invalid. Stale files fail.' }); start_line = (@{} + $lineRule + @{ Default = 1; Description = 'Optional inclusive first line of the matching region.' }); end_line = (@{} + $lineRule + @{ Default = [int]::MaxValue; Description = 'Optional inclusive last line of the matching region.' }) }; Prepare = ${function:New-AgentToolFileChange}; Execute = ${function:Invoke-AgentToolFileChange}; Edit = $true; Role = 'tool-result' }
     pwsh  = @{ Description = "Run PowerShell in the context directory to search, build, test and inspect files. Each call starts a new pwsh process; run code directly, not through pwsh -Command. Unhandled cmdlet errors stop execution; handle expected failures explicitly. Check exit codes and stderr.`nRecursive search: Get-ChildItem -Recurse -File -Filter *.ps1 | Select-String -Pattern ...; ** is not recursive. Large output retains the head and tail; narrow commands to focus it. The harness sets time and output limits, so limit arguments such as timeout_ms are ignored."; Ignored = '^(?:max|limit|timeout)[A-Za-z_]{0,40}$'; Schema = @{ command = @{ Kind = 'String'; Min = 1; Max = 65536; Nonblank = $true; Description = 'Exact PowerShell source. Prefer bounded text output and focused checks.' } }; Prepare = ${function:New-AgentToolCommand}; Execute = ${function:Invoke-AgentToolProcess}; Role = 'tool-result' }
 }

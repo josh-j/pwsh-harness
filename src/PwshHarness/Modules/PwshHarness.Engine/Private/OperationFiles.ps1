@@ -53,6 +53,7 @@ function Invoke-EngineOperationFile {
         throw 'File replacements require a running authorized operation.'
     }
     $written = [Collections.Generic.List[object]]::new()
+    $folders = [Collections.Generic.List[string]]::new()
     try {
         foreach ($file in $record.Candidate.Files) {
             if ($Pump) {
@@ -60,6 +61,9 @@ function Invoke-EngineOperationFile {
             }
             Invoke-EngineOperationTransition -Store $Store -Handle $Handle -Signal Check -Token $Token -Checkpoint $file
             $parent = [IO.Path]::GetDirectoryName($file.Path)
+            for ($folder = $parent; $folder -and -not [IO.Directory]::Exists($folder); $folder = [IO.Path]::GetDirectoryName($folder)) {
+                $folders.Add($folder)
+            }
             if (-not [IO.Directory]::Exists($parent)) {
                 $null = [IO.Directory]::CreateDirectory($parent)
             }
@@ -95,6 +99,15 @@ function Invoke-EngineOperationFile {
             }
             catch {
                 $retained.Add($file.Path)
+            }
+        }
+        # Folders this operation created go too, innermost first; a nonrecursive delete keeps one that is not empty.
+        foreach ($folder in @($folders | Sort-Object Length -Descending)) {
+            try {
+                [IO.Directory]::Delete((Resolve-EngineOperationPath $record.Candidate.ContextRoot $folder), $false)
+            }
+            catch {
+                Write-Verbose "Kept created folder ${folder}: $($_.Exception.Message)"
             }
         }
         if ($retained.Count) {

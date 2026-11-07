@@ -28,12 +28,12 @@ function Get-AgentShell {
 # Hooks run in the registering extension and receive $script:PackPresentationHost for the pack's own operations.
 $script:PackPresentationHost = @{
     Root              = { param($Context) Get-HarnessOperationDirectory $Context.State }
-    ResolvePath       = { param($Context, $Path) Resolve-AgentPresentedPath $Context $Path }
+    ResolvePath       = { param($Context, $Path, [switch]$Create) Resolve-AgentPresentedPath $Context $Path -Create:$Create }
     FileUri           = { param($Path) [uri]::new([IO.Path]::GetFullPath((ConvertFrom-AgentPresentedUri $Path))).AbsoluteUri }
     ParseEditHunks    = { param($Value, $Names) ConvertFrom-AgentEditHunk $Value $Names }
     ReadTarget        = {
-        param($Context, $Path)
-        $physical = Resolve-AgentToolPath -State $Context.State -Root (Get-HarnessOperationDirectory $Context.State) -Path $Path -Context $Context
+        param($Context, $Path, [switch]$Create)
+        $physical = Resolve-AgentToolPath -State $Context.State -Root (Get-HarnessOperationDirectory $Context.State) -Path $Path -Context $Context -Create:$Create
         $file = Read-HarnessTextFile $physical $Context.State.Config.'Agent.MaxFileBytes' -AllowMissing -NoHardLinks
         @{ Exists = $file.Exists; Text = $file.Text; Physical = $physical }
     }
@@ -260,7 +260,7 @@ function ConvertFrom-AgentPresentedUri {
 }
 function Resolve-AgentPresentedPath {
     [CmdletBinding()]
-    param($Context, [string]$Path)
+    param($Context, [string]$Path, [switch]$Create)
     if (-not $Path -or $Path.Length -gt 4096) {
         throw 'Invalid tool path length.'
     }
@@ -294,7 +294,7 @@ function Resolve-AgentPresentedPath {
         # The workspace itself, often echoed with a trailing separator, is a search scope or command folder.
         return $relative
     }
-    $null = Resolve-AgentToolPath -State $Context.State -Root $root -Path $relative -Context $Context
+    $null = Resolve-AgentToolPath -State $Context.State -Root $root -Path $relative -Context $Context -Create:$Create
     $relative
 }
 function Invoke-AgentPresentedTool {
