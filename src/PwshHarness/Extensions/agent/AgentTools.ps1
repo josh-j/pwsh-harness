@@ -126,7 +126,7 @@ function Get-AgentDirectoryRule {
     # A nested AGENTS.md governs its directory: deliver it once per run with the first file read or changed
     # beneath it. Rules at or above the workspace root arrive with the run's instructions instead.
     [CmdletBinding()]
-    param($Context, $Call)
+    param($Context, $Call, [switch]$BeforeChange, [int]$MaximumCharacters = 32768)
     $observed = $null
     $relative = [string]$Call.Arguments.path
     if (-not $relative -or $relative.StartsWith('skill:', [StringComparison]::Ordinal) -or -not $Context.PSObject.Properties['AgentLease'] -or -not $Context.AgentLease -or
@@ -135,24 +135,48 @@ function Get-AgentDirectoryRule {
     }
     if (-not $observed.ContainsKey('Rules')) {
         $observed.Rules = [Collections.Generic.HashSet[string]]::new($IsWindows ? [StringComparer]::OrdinalIgnoreCase : [StringComparer]::Ordinal)
+        $observed.RuleSteps = @{}
     }
     $root = [IO.Path]::GetFullPath($observed.Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $sections = [Collections.Generic.List[string]]::new()
     $directory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($relative, $root))
     while ($directory -and $directory.StartsWith($root + [IO.Path]::DirectorySeparatorChar, (Get-HarnessPathComparison))) {
         $rule = Join-Path $directory 'AGENTS.md'
-        if ($observed.Rules.Add($directory) -and [IO.File]::Exists($rule)) {
+        $seen = $observed.Rules.Contains($directory)
+        # Results of one native batch reach the model together. A read earlier in this batch cannot
+        # authorize a write against instructions the model has not received yet.
+        $pending = $BeforeChange -and $seen -and $observed.RuleSteps[$directory] -ge $Context.AgentStep
+        if ((-not $seen -or $pending) -and [IO.File]::Exists($rule)) {
             $name = ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($root, $rule))
+            $permitted = $false
             try {
                 # The tool path policy keeps ignored, excluded and protected files out, as for any read.
-                $file = Read-HarnessTextFile (Resolve-AgentToolPath -State $Context.State -Root $root -Path $name -Context $Context) 65536 -NoHardLinks
-                $text = $file.Text.Length -gt 16000 ? $file.Text.Substring(0, 15970) + "`n[rules truncated]" : $file.Text
+                $physical = Resolve-AgentToolPath -State $Context.State -Root $root -Path $name -Context $Context
+                $permitted = $true
+                $file = Read-HarnessTextFile $physical 65536 -NoHardLinks
+                $text = $file.Text
                 if ($text.Trim()) {
-                    $sections.Insert(0, "--- $name ---`n$text")
+                    $section = "--- $name ---`n$text"
+                    if ($section.Length -gt 32000) {
+                        throw 'Directory instructions exceed the bounded delivery budget.'
+                    }
+                    if (($sections -join "`n").Length + $section.Length -gt $MaximumCharacters) {
+                        break
+                    }
+                    $sections.Insert(0, $section)
+                }
+                if (-not $seen) {
+                    $null = $observed.Rules.Add($directory)
+                    $observed.RuleSteps[$directory] = $Context.AgentStep
                 }
             }
             catch {
                 $Context.CancellationToken.ThrowIfCancellationRequested()
+                if ($BeforeChange -and $permitted) {
+                    $failure = New-AgentRefusal -Code DirectoryRulesRequired -Message "Change not executed: directory instructions at $name could not be delivered completely within the bounded UTF-8 read budget." -Next 'Read and simplify or split the applicable instruction file before retrying the change.'
+                    $failure.Data['AgentNotExecuted'] = $true
+                    throw $failure
+                }
             }
         }
         $directory = [IO.Path]::GetDirectoryName($directory)
@@ -245,6 +269,9 @@ function Complete-AgentToolCall {
             $first = [int]$model.start_line
             $model.context_lines = @($first, ($first + [int]$model.returned_lines - 1))
         }
+    }
+    if ($status -ceq 'ok' -and $Call.Name -ceq 'rename' -and $model['occurrences'] -gt 0) {
+        $model.context_change = $true
     }
     $feedback = Update-AgentToolFeedback -Context $Context -Call $Call -Model $model -Status $status -Key $contextKey
     if ($feedback) {
@@ -683,11 +710,57 @@ function Invoke-AgentToolCall {
         $limit = $Call.Arguments.path.StartsWith('skill:', [StringComparison]::Ordinal) ? [Math]::Min(32768, $state.Config.'Agent.MaxFileBytes') : $state.Config.'Agent.MaxFileBytes'
         $tool.File = Read-HarnessTextFile $tool.Path $limit -AllowMissing -NoHardLinks
     }
+    if ($run -and $Call.Name -cin @('write', 'edit')) {
+        $rules = Get-AgentDirectoryRule -Context $Context -Call $Call -BeforeChange
+        if ($rules) {
+            $failure = New-AgentRefusal -Code DirectoryRulesRequired -Message 'File change not executed: first review the directory instructions below.' -Next 'Apply these instructions and reissue the change in your next request.'
+            $failure.Data['AgentNotExecuted'] = $true
+            return Complete-AgentToolCall -Context $Context -Call $Call -Data @{ directory_rules = $rules } -Failure $failure
+        }
+    }
     if ($run -and $tool.Spec.Execute) {
         Start-AgentRewind -Context $Context -Run $run -Root $tool.Root
     }
     & $tool.Spec.Prepare $tool
     Assert-AgentToolContext $tool
+    if ($run -and $Call.Name -ceq 'pwsh' -and -not $Context.PSObject.Properties['ManagedTask']) {
+        $cwd = $tool.CommandCwd ? $tool.CommandCwd : $tool.Root
+        $scope = [IO.Path]::GetRelativePath($tool.Root, $cwd)
+        if ($scope -ceq '.') {
+            $scope = ''
+        }
+        $paths = @(Get-AgentWorkspaceListing -State $state -Root $tool.Root -Context $Context -Scope $scope -RequireComplete)
+        if ($paths.Count -gt $script:PackWorkspaceMaxFiles) {
+            throw (New-AgentRefusal -Code DirectoryRulesRequired -Message 'Command not executed: directory instruction discovery exceeds the workspace inventory bound.' -Next 'Use a narrower command working directory so its directory rules can be reviewed first.')
+        }
+        $rules = [Text.StringBuilder]::new()
+        $targets = @([IO.Path]::GetRelativePath($tool.Root, (Join-Path $cwd '.pwsh-harness-rules-probe'))) + @($paths | Where-Object { [IO.Path]::GetFileName($_) -ieq 'AGENTS.md' })
+        foreach ($path in $targets) {
+            $text = Get-AgentDirectoryRule -Context $Context -Call @{ Arguments = @{ path = $path } } -BeforeChange -MaximumCharacters (32768 - $rules.Length)
+            if ($text) {
+                $null = $rules.AppendLine($text)
+            }
+        }
+        if ($rules.Length) {
+            $failure = New-AgentRefusal -Code DirectoryRulesRequired -Message 'Command not executed: first review the directory instructions for its working directory and subtree.' -Next 'Apply these scoped instructions and reissue the command in your next request; more instructions may follow within the bounded delivery budget.'
+            $failure.Data['AgentNotExecuted'] = $true
+            return Complete-AgentToolCall -Context $Context -Call $Call -Data @{ directory_rules = $rules.ToString() } -Failure $failure
+        }
+    }
+    if ($run -and $Call.Name -ceq 'rename') {
+        $rules = [Text.StringBuilder]::new()
+        foreach ($file in $tool.Files) {
+            $text = Get-AgentDirectoryRule -Context $Context -Call @{ Arguments = @{ path = [IO.Path]::GetRelativePath($tool.Root, $file.Path) } } -BeforeChange -MaximumCharacters (32768 - $rules.Length)
+            if ($text) {
+                $null = $rules.AppendLine($text)
+            }
+        }
+        if ($rules.Length) {
+            $failure = New-AgentRefusal -Code DirectoryRulesRequired -Message 'Rename not executed: first review the directory instructions below.' -Next 'Apply these instructions and reissue the rename in your next request.'
+            $failure.Data['AgentNotExecuted'] = $true
+            return Complete-AgentToolCall -Context $Context -Call $Call -Data @{ directory_rules = $rules.ToString() } -Failure $failure
+        }
+    }
     if (-not $tool.Spec.Execute) {
         $result = Complete-AgentToolCall -Context $Context -Call $Call -Data $tool.Data
         if ($lease -and $tool.File -and $tool.File.Exists -and $result.Status -ceq 'ok') {
@@ -928,6 +1001,32 @@ function Get-AgentCompletionReview {
         $excerpt = Get-HarnessTextExcerpt ($script:Harness.OperationControl.ProtectText($Context.State, (@($findings) -join "`n"))) 4096
         $parts += "checks of the files you changed in this run report problems your changes introduced.`n$($excerpt.Text)`nFix them with focused edits and rerun the relevant check, or state why each should remain."
     }
+    if ($observed -and $observed.ContainsKey('SourceValidation')) {
+        $pending = foreach ($relative in @($observed.SourceValidation)) {
+            try {
+                $path = Resolve-AgentToolPath -State $Context.State -Root $observed.Root -Path $relative -Context $Context
+                $file = Read-HarnessTextFile $path $Context.State.Config.'Agent.MaxFileBytes' -AllowMissing -NoHardLinks
+                # A restored path is a requirement to inspect current source, never an old hash or baseline.
+                $diagnostics = $file.Exists ? @(Invoke-HarnessService -Harness $script:Harness -Name 'source.review' -Arguments @($Context, $path, $null, $file.Text)) : @()
+                if ($diagnostics.Count) {
+                    foreach ($diagnostic in $diagnostics | Select-Object -First 12) {
+                        "${relative}: $($diagnostic.Severity) $($diagnostic.Code) line $($diagnostic.Line): $($diagnostic.Message)"
+                    }
+                }
+                else {
+                    $null = $observed.SourceValidation.Remove($relative)
+                }
+            }
+            catch {
+                $Context.CancellationToken.ThrowIfCancellationRequested()
+                "${relative}: current source validation is unavailable; inspect it before claiming completion."
+            }
+        }
+        if ($pending) {
+            $excerpt = Get-HarnessTextExcerpt ($script:Harness.OperationControl.ProtectText($Context.State, ($pending -join "`n"))) 4096
+            $parts += "source files changed before the interruption still report problems in their current contents (the original comparison baseline was not restored).`n$($excerpt.Text)`nFix and recheck them, or explain which findings remain and why."
+        }
+    }
     $parts += @(Get-AgentFindingReview $Context)
     $parts += @(Get-AgentReviewOutcome $Context)
     $parts += @(Get-AgentCoverageReview $Context)
@@ -945,6 +1044,54 @@ function Get-AgentCompletionReview {
 function Invoke-AgentCompletionPolicy {
     [CmdletBinding()]
     param([string]$Moment, $View)
+    # Policy memory follows a stopped task across a fresh lease and host; fresh tasks start with empty memory.
+    $plan = $null
+    if ($script:PackRunPlans.TryGetValue($View.AgentLease, [ref]$plan)) {
+        $View.Memory.Plan = @($plan | ForEach-Object { @{ step = $_.Step; status = $_.Status } })
+    }
+    elseif ($View.Memory.Plan) {
+        $script:PackRunPlans.AddOrUpdate($View.AgentLease, @(ConvertTo-AgentRunPlan -Plan @($View.Memory.Plan)))
+    }
+    $observed = $null
+    $root = Get-HarnessOperationDirectory $View.State
+    $null = $script:PackToolObservations.TryGetValue($View.AgentLease, [ref]$observed)
+    if (-not $observed -and $View.Memory.SourceValidation -and $View.Memory.SourceValidation.Root -ceq $root) {
+        $observed = Get-AgentRunObservation -Context $View -Root $root
+        $observed.SourceValidation = [Collections.Generic.HashSet[string]]::new([StringComparer]::FromComparison((Get-HarnessPathComparison)))
+        foreach ($relative in @($View.Memory.SourceValidation.Paths | Select-Object -First 2000)) {
+            if ($relative -is [string] -and $relative.Length -le 4096 -and [IO.Path]::GetExtension($relative) -in @('.ps1', '.psm1', '.psd1')) {
+                try {
+                    $null = Resolve-AgentToolPath -State $View.State -Root $root -Path $relative -Context $View
+                    $null = $observed.SourceValidation.Add($relative)
+                }
+                catch {
+                    $View.CancellationToken.ThrowIfCancellationRequested()
+                }
+            }
+        }
+    }
+    if ($observed) {
+        $paths = @($observed.Changed.Values | ForEach-Object Relative | Where-Object { [IO.Path]::GetExtension($_) -in @('.ps1', '.psm1', '.psd1') })
+        if ($observed.ContainsKey('SourceValidation')) {
+            $paths += @($observed.SourceValidation)
+        }
+        $View.Memory.SourceValidation = @{ Root = $root; Paths = @($paths | Select-Object -Unique | Select-Object -First 2000) }
+    }
+    if ($script:PackToolObservations.TryGetValue($View.AgentLease, [ref]$observed) -and $observed.ContainsKey('Feedback')) {
+        $View.Memory.Verification = @{ Root = $observed.Root; Failures = $observed.Feedback.Failures; Commands = $observed.Feedback.Commands }
+    }
+    elseif ($View.Memory.Verification -and $View.Memory.Verification.Root -ceq (Get-HarnessOperationDirectory $View.State)) {
+        # Retain semantic command evidence, never source hashes or the authority to edit without rereading.
+        $observed = Get-AgentRunObservation -Context $View -Root (Get-HarnessOperationDirectory $View.State)
+        $feedback = @{ Reads = @{}; Noted = [Collections.Generic.HashSet[string]]::new(); Failures = @{}; Commands = [ordered]@{} }
+        foreach ($key in @($View.Memory.Verification.Failures.Keys | Select-Object -First 1024)) {
+            $feedback.Failures[$key] = $View.Memory.Verification.Failures[$key]
+        }
+        foreach ($key in @($View.Memory.Verification.Commands.Keys | Select-Object -First 64)) {
+            $feedback.Commands[$key] = $View.Memory.Verification.Commands[$key]
+        }
+        $observed.Feedback = $feedback
+    }
     if ($Moment -cne 'Completing' -or $View.Memory.Reviewed -or $View.StepsRemaining -le 0 -or $View.SecondsRemaining -le 0) {
         return
     }

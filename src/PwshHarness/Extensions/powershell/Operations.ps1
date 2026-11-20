@@ -121,7 +121,7 @@ function Test-PowerShellOperationBinding {
         throw 'Generated code changed. Prepare and review a new operation before approving it.'
     }
     if (-not [string]::Equals($Operation.WorkingDirectory, (Get-HarnessOperationDirectory $State), [StringComparison]::Ordinal) -or
-        $Operation.TimeoutSeconds -ne $State.Config.RunTimeoutSeconds) {
+        $Operation.TimeoutSeconds -ne $State.Config.RunTimeoutSeconds -or $Operation.Sandbox -cne (Get-PowerShellSandboxMode $State.Config)) {
         throw 'Execution settings changed. Prepare and review a new operation before approving it.'
     }
     if ($Operation.SaveEncoding -cne $State.Config.SaveEncoding) {
@@ -152,7 +152,7 @@ function Initialize-PowerShellOperationFlow {
         $null
     }
     $candidate = New-HarnessPreparedOperation -Id $Operation.Id -Kind $Operation.Kind -ContextRoot $Operation.WorkingDirectory -Files $files -Command $command -Risks $Operation.Risks -Source ($Operation.Result.CodeBlocks.Code | ConvertTo-Json -Compress) -CapturedSettings @{
-        SaveEncoding = $Operation.SaveEncoding; TimeoutSeconds = $Operation.TimeoutSeconds; Prompt = [string]$State.LastPrompt
+        SaveEncoding = $Operation.SaveEncoding; TimeoutSeconds = $Operation.TimeoutSeconds; Sandbox = $Operation.Sandbox; Prompt = [string]$State.LastPrompt
     }
     $Operation | Add-Member NoteProperty Flow ($script:Harness.OperationControl.Prepare($State, $validator, $Operation.TimeoutSeconds, $candidate))
 }

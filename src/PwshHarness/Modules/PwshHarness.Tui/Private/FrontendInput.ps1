@@ -267,7 +267,7 @@ function Invoke-TuiFrontendInput {
         $Text = $Text.Trim()
     }
     $command = $Text.StartsWith('/')
-    if ($Session.Busy -and $Text.StartsWith('/') -and $Text -notmatch '^/(approve|cancel|mode|agent|help|quit|exit)(?:\s|$)|^/config\s+set\s+Autonomy\s') {
+    if ($Session.Busy -and $Text.StartsWith('/') -and $Text -notmatch '^/(approve|cancel|mode|permissions|agent|help|quit|exit)(?:\s|$)|^/config\s+set\s+Autonomy\s') {
         $HarnessHost.AddTranscript($Session, 'notice', 'Wait for the run to finish or press Esc.', $null)
         Set-TuiViewSnapshot $View ($HarnessHost.GetConversationSnapshot($Session)) -Conversation
         return
@@ -580,7 +580,7 @@ function Read-TuiFrontendBatch {
             $View.StatusBar.Text = 'Note queued for the agent run'; $View.Dirty = $true
         }
         elseif ($action -and $action.Action -in @('Send', 'Review', 'Shortcut')) {
-            if ($action.Action -ceq 'Send' -and $action.Prompt.Trim() -match '^/(mode|agent)\s+\S|^/config\s+set\s+Autonomy\s') {
+            if ($action.Action -ceq 'Send' -and $action.Prompt.Trim() -match '^/(mode|permissions|agent)\s+\S|^/config\s+set\s+Autonomy\s') {
                 if ($Cancellation) {
                     $Cancellation.Cancel()
                 }

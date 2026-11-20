@@ -159,7 +159,11 @@ function Test-PowerShellCode {
 function Invoke-PowerShellExtractProcessor {
     [CmdletBinding()]
     param($Context)
-    $Context.Result.CodeBlocks = @(Get-PowerShellCodeBlock $Context.Result.Text -FenceLanguages $Context.Config.FenceLanguages)
+    $options = @{}
+    if ($Context.Config.ContainsKey('FenceLanguages')) {
+        $options.FenceLanguages = $Context.Config.FenceLanguages
+    }
+    $Context.Result.CodeBlocks = @(Get-PowerShellCodeBlock -Text $Context.Result.Text @options)
 }
 
 function New-PowerShellTargetProfile {

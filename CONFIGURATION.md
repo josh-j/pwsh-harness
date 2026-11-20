@@ -20,7 +20,8 @@ to save it. Do not copy other reference values into a working config: the `Agent
 budgets, `MaxTokens` and `ContextWindowTokens` replace the profile's larger
 limits (32 instead of 256 steps for Gemini Flash), `"Autonomy": "Approve"`
 turns off the interactive Auto start, and `SystemPrompt` freezes the prompt so
-later releases cannot improve it.
+later releases cannot improve it. Its explicit `ModelProfile` also stays pinned
+when switching models; omit that setting to select profiles automatically.
 
 Use your gateway's model identifier and URL. `/config` shows effective session
 values; `/config schema` shows declared names, types and base defaults. JSON file,
@@ -29,6 +30,32 @@ The full reference pins base budgets and uses local `./state` directories; its
 relative paths resolve from the process working directory, not the JSON file.
 `CommandCatalogPath` is blank to select the bundled catalog at its installed path.
 `ExtensionPaths: []` excludes additional extension directories.
+
+## Provider and model compatibility
+
+The bundled network adapter is `OpenAICompatible`; `Mock` is the offline adapter.
+For a different service, keep `Provider=OpenAICompatible` and select that service's
+`BaseUrl`, exact `Model` identifier and credential. Base URLs may include the
+terminal `/v1` segment; the adapter adds that segment only once for versioned
+resources and preserves any preceding path prefix. The endpoint must implement
+OpenAI-style chat completions with SSE. Native vendor-specific request protocols
+and Responses-only endpoints need an adapter; changing a provider name is not enough.
+
+Known model names select their bundled profile automatically. Unlisted models use
+generic limits and omit profile-specific reasoning unless you explicitly choose
+`ModelProfile`. Explicit file, environment and parameter values still win. When
+switching models, inherited defaults follow the new selection while explicit
+settings remain in force. An explicitly selected profile stays pinned. Set the
+actual context and output limits for a model the harness does not recognize;
+those limits cannot be inferred from an arbitrary gateway model id.
+
+Tool-capable models get the closed host-approved tool set. Explicit tool-API
+rejection can fall back to text proposals; it does not create native tool support
+or provide identical agent behavior. Authentication, model-not-found and unrelated
+protocol errors remain errors. The network adapter currently requires a nonempty
+Bearer credential even for a keyless local endpoint; such an endpoint needs a
+non-secret placeholder credential if it accepts one. Saved secrets remain bound
+to the selected origin. No live-service compatibility matrix has been qualified.
 
 `Analyzer.Enabled` and `Analyzer.Format` accept `"auto"`, `true` or `false`.
 The strings `"on"` and `"off"` are invalid. `Analyzer` is the separate Boolean
@@ -43,18 +70,88 @@ plaintext file on Linux/macOS. Saving a key requires the user's explicit request
 
 `Start-PwshHarness` starts interactive sessions in Auto, which runs the
 host-approved tools without individual execution confirmations. Select Approve
-with `-Autonomy Approve`, `/mode Approve` or a saved `"Autonomy": "Approve"`.
+with `-Autonomy Approve`, `/permissions approve` or a saved `"Autonomy": "Approve"`;
+`-Autonomy ReadOnly` or a saved `"Autonomy": "ReadOnly"` selects inspection only.
 `Invoke-PwshHarness` returns proposals unless given `-Agent` or `-Autonomy`.
-Configuration, the environment or a restored session never enables Auto: a
-configured `"Autonomy": "Auto"` is ignored with a warning and the session stays
-in Approve (the example generator rejects it outright). Extension installation and loading still
-require source-bound approval.
+Engine sessions begin in Approve; Auto comes from an explicit frontend route,
+including the interactive startup default. Configuration, environment and restored
+data alone never grant Auto. Saving Auto is refused, and a hand-written Auto
+configuration warns and grants no authority; interactive startup can still apply
+its normal Auto default. The reference example deliberately selects Approve.
+Extension installation and loading require source-bound approval in every mode.
 
 Exact workspace search is local, read-only and bounded, and is on by default so
 the agent avoids shell search proposals and their execution reviews. Disable it
 with `/config set Agent.CodeSearchExact false`. Ranked and hybrid search remain separately enabled; hybrid
 requires explicit embedding model/pricing and a spending bound. Batch independent
 searches and reads to reduce model round trips.
+
+## Project workflows
+
+`/permissions` shows the effective mode; `readonly`, `approve` and `auto` change it
+for this conversation. `/plan [task]` and `/review [scope]` select ReadOnly and
+submit the supplied task; bare `/plan` waits for your planning prompt. ReadOnly
+allows file inspection, search and planning tools, but blocks command execution
+and file changes, including unadvertised model calls and manual execution routes.
+`/plan off` selects Approve; select `/permissions auto` explicitly for autonomous
+implementation. This mode controls harness effects; it does not sandbox installed
+PowerShell extensions, which remain trusted code in the harness process.
+
+`/resume` lists saved sessions newest first; `/resume N`, `/resume last` and
+`/resume session-id` select one and revoke earlier Auto authority. `/compact`
+creates a new continuation session from bounded task and evidence extracts and
+selects Approve. It refuses active work and pending approval. Earlier persisted
+journals remain unchanged; `/archives [session-id]` retrieves retained evidence.
+With `-NoPersist`, evidence remains only in this host until its session is released,
+with a limit of eight archived sessions or 64 MiB; reaching it refuses compaction
+without removing evidence. `Session.MaxAuditBytes` and `Session.MaxAuditRecords`
+still bound the active journal. Compaction preserves an extract, so reread omitted
+source and check remaining work before editing or claiming completion.
+
+`/diff [staged|unstaged|all]` displays a bounded inspection of staged, unstaged and
+eligible untracked files, respecting ignored, excluded and protected paths.
+`/context diff [off|staged|unstaged|all]` controls diff text in future model prompts;
+bare `/context diff` toggles it. Inspection does not change this setting.
+
+Root AGENTS.md loads even when Git ignores that exact instruction file, while
+`.agentsignore`, user exclusions and protected-path checks still apply. Non-Git
+ancestor discovery is limited to eight directories and stops at protected roots.
+Nested instructions are delivered once per run before the first applicable change
+or command; a read and change in one tool batch still waits for another model
+request. Oversized instruction files or incomplete discovery refuse the effect
+with guidance. Start a fresh run after changing already delivered instructions.
+Skills added, updated or removed in the same session refresh on the next request.
+
+## Optional command sandbox
+
+The provider must resolve outside the writable workspace. Workspace providers,
+links into it and executables with multiple hardlinks are refused, which can also
+exclude Windows system installations until native qualification is complete.
+
+`Run.Sandbox` accepts `Off` (default) or `Workspace`. Enable it with
+`/config set Run.Sandbox "Workspace"` or `"Run.Sandbox": "Workspace"` in JSON.
+It confines child commands; file tools retain their own workspace checks and
+extensions continue to run in-process. The selected mode is bound to reviewed
+operations: changing it requires a fresh review. Missing prerequisites or startup
+failures refuse execution; they never fall back to an unsandboxed command.
+
+On Linux, Workspace requires `bwrap` (bubblewrap) and enabled user namespaces. It
+mounts the workspace writable and required system runtimes read-only, hides host
+home and runtime sockets, filters inherited environment variables and disables
+network access. Commands needing network, home credentials or external writable
+directories will need a different workflow.
+
+On Windows it requires Windows 11 24H2 (build 26100) or later, Windows Sandbox
+enabled and its `wsb` CLI available. The workspace must be a local-drive directory
+below the drive root, separate from runtime, system and broker folders. The guest
+maps the workspace writable and the PowerShell runtime/control files read-only;
+network and clipboard redirection are disabled. Native Windows Sandbox execution
+remains pending validation; Windows prerequisite-refusal paths and broker behavior
+have offline coverage. Treat this Windows provider as experimental.
+
+Workspace refuses persistent terminals (`RunPersistent`); use bounded commands.
+Unsupported platforms also refuse Workspace. Selecting `Off` deliberately returns
+commands to your account's ordinary permissions.
 
 ## Installation and paths
 
@@ -111,11 +208,10 @@ or keep the sent prefix identical so the provider can cache it.
   and wall time. Lower steps and tool calls to bound a runaway task.
 - `Agent.CheckInToolCalls` (default 25) and `Agent.CheckInTokens` (default
   250,000) add a progress check every that many tool calls or charged tokens
-  (whichever level is further along; `0` turns that trigger off). The first
-  check asks the model to stop and report what it found; the second tells it to
-  answer without more tool calls. A review or fix task that is still making
-  progress is not interrupted at the first level. Lower both for cheaper,
-  shorter investigations.
+  (whichever level is further along; `0` turns that trigger off). Checks ask for
+  a brief progress report and continuation of remaining requested work. They do
+  not instruct the agent to stop an unfinished task. Use the explicit token,
+  step, call and time limits above to bound an investigation.
 - `Agent.StallSteps` (0 to 64, default 4) sends a "change approach" message
   after that many steps that add no new evidence or changes; `0` disables it.
   It fires at most twice per run.
@@ -287,7 +383,7 @@ tool-calling agent; "chat turn" means a single request/response turn.
 | `Provider` | string | `OpenAICompatible` | Registered provider name. Change only with another provider extension. |
 | `Model` | string | `gemini-3.8-flash` | Model id or profile name sent to the gateway. Use your gateway's identifier. |
 | `BaseUrl` | URL or empty | empty (`OPENAI_BASE_URL`, else asked at start) | Gateway origin, for example `https://openrouter.ai/api`. Credentials are never sent over non-loopback HTTP. |
-| `ModelProfile` | string | `gemini-3.8-flash` | Named profile supplying budgets, context window, reasoning effort and tool presentation. Match it to the model. |
+| `ModelProfile` | string | `gemini-3.8-flash` | Automatically matched named profile supplying budgets, context window, reasoning effort and tool presentation. Unlisted models use generic defaults; an explicit selection stays pinned. |
 | `ApiKeyEnvironment` | string | `OPENAI_API_KEY` | Name of the environment variable holding the key. The key itself is never stored in config. |
 | `SecretName` | string | empty | Secret name for the optional SecretManagement `Get-Secret` lookup. |
 | `Temperature` | 0 to 2 | `0.2` | Sampling temperature. The bundled Gemini profile omits it from requests, so it has no effect there. |
@@ -366,12 +462,13 @@ Entries match `[A-Za-z0-9._:/*-]`, up to 128 characters.
 | `Continuation.MaxResultChars` | 1 to 1,048,576 | `1000` | Characters kept per carried result. |
 | `Lessons` | `off`, `record`, `prompt` | `record` | Workspace lessons store and use. |
 | `RunTimeoutSeconds` | integer > 0 | `60` | Command timeout for chat-turn runs. |
+| `Run.Sandbox` | `Off`, `Workspace` | `Off` | Optional child-command OS confinement; see platform prerequisites above. Persistent terminals are refused in Workspace. |
 
 ### Autonomy, prompts and generation
 
 | Setting | Type, range | Default | Meaning and when to change |
 | --- | --- | --- | --- |
-| `Autonomy` | `Approve`, `Auto` | `Approve` | Keep `Approve` in files; Auto comes only from a user action. |
+| `Autonomy` | `Approve`, `Auto`, `ReadOnly` | `Approve` | Files may select Approve or ReadOnly; Auto comes only from a frontend user route, including interactive startup. |
 | `SystemPrompt` | string | bundled prompt | Replaced by agent instructions in agent runs; see cost notes. |
 | `SystemPromptMode` | `System`, `User` | `System` | Send instructions as a system or a user message. |
 | `Behavior` | `code`, `auto`, `chat` | `auto` | Chat prompt style: always script, decide, or conversational. |

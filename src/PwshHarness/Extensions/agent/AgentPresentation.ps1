@@ -401,7 +401,7 @@ function Add-AgentPrompt {
         $Request.AgentTools = @(& $presentation.AdvertisedSchemas $Request.Config (Get-AgentShell $Request.Config)) + $registered
     }
     $Request.AgentTools = @($Request.AgentTools) + @($presentation ? (& $presentation.SearchSchemas $Request.Config) : (Get-AgentSearchSchema $Request.Config)) + @(Get-AgentWorkSchema)
-    $skills = $Request.Config.UseToolsApi ? (Format-AgentSkillPrompt (Get-AgentSkillCatalog $Request.State $Request.Pump) $presentation) : ''
+    $skills = $Request.Config.UseToolsApi ? (Format-AgentSkillPrompt (Get-AgentSkillCatalog -State $Request.State -Pump $Request.Pump -Refresh) $presentation) : ''
     $root = Get-HarnessOperationDirectory $Request.State
     $scratch = Get-AgentRunScratch $Request.State
     $scratchNote = $scratch ? "`nScratch directory for this run: $scratch. Keep throwaway probe scripts, sample data and notes there instead of the workspace; it is deleted when the run ends. File tools change workspace files only, so create and run scratch files with run_command." : ''

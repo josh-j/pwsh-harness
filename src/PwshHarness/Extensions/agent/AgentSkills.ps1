@@ -2,13 +2,13 @@
 $script:PackSkillCache = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
 function Get-AgentSkillCatalog {
     [CmdletBinding()]
-    param($State, [scriptblock]$Pump)
+    param($State, [scriptblock]$Pump, [switch]$Refresh)
     $root = Get-HarnessOperationDirectory $State
     $user = [IO.Path]::GetDirectoryName($script:Harness.ConfigService.GetPath())
     $scope = @($State.SessionId, $root, $user, $State.Config.ConfigPath, $State.Config.SessionDirectory, $State.Config.'Agent.MaxFileBytes',
         $State.Context.IncludeFiles.ToArray(), $State.Context.ExcludeFiles.ToArray()) | ConvertTo-Json -Depth 5 -Compress
     $catalog = $null
-    if ($script:PackSkillCache.TryGetValue($State, [ref]$catalog) -and $catalog.Scope -ceq $scope) {
+    if (-not $Refresh -and $script:PackSkillCache.TryGetValue($State, [ref]$catalog) -and $catalog.Scope -ceq $scope) {
         return $catalog
     }
     $query = [pscustomobject]@{ Pump = $Pump; CancellationToken = ($State.Cancellation ? $State.Cancellation.Token : [Threading.CancellationToken]::None) }
@@ -96,7 +96,7 @@ function Resolve-AgentToolCallPath {
     param($State, [string]$Root, $Call, $Context)
     if ($Call.Name -ceq 'read' -and $Call.Arguments.path -cmatch '^skill:([a-z0-9]+(?:-[a-z0-9]+)*)$') {
         $name = $Matches[1]
-        $catalog = Get-AgentSkillCatalog $State $Context.Pump
+        $catalog = Get-AgentSkillCatalog -State $State -Pump $Context.Pump -Refresh:(-not $State.Busy)
         if (-not $catalog.Skills.ContainsKey($name)) {
             throw 'Unknown or unavailable skill.'
         }

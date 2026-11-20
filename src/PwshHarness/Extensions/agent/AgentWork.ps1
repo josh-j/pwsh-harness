@@ -40,20 +40,26 @@ function Add-AgentInspected {
         $null = $script:PackDelegateReads.Add($Physical)
     }
 }
-function Update-AgentRunPlan {
+function ConvertTo-AgentRunPlan {
     [CmdletBinding()]
-    param($Context, $Call)
-    $null = Get-AgentRunObservation $Context (Get-HarnessOperationDirectory $Context.State)
-    $plan = @(foreach ($item in @($Call.Arguments.plan)) {
+    param([object[]]$Plan, [string]$Explanation = '')
+    $steps = @(foreach ($item in $Plan) {
             if ($item -isnot [Collections.IDictionary] -or @($item.Keys | Where-Object { $_ -cnotin @('step', 'status') }).Count -or $item.step -isnot [string] -or
                 [string]::IsNullOrWhiteSpace($item.step) -or $item.step.Length -gt 300 -or $item.status -cnotin @('pending', 'in_progress', 'completed')) {
                 throw 'Each plan step needs a nonblank step of at most 300 characters and a pending, in_progress or completed status.'
             }
             @{ Step = $item.step; Status = $item.status }
         })
-    if ($plan.Count -lt 1 -or $plan.Count -gt 20 -or @($plan | Where-Object { $_.Status -ceq 'in_progress' }).Count -gt 1 -or ([string]$Call.Arguments.explanation).Length -gt 1000) {
+    if ($steps.Count -lt 1 -or $steps.Count -gt 20 -or @($steps | Where-Object { $_.Status -ceq 'in_progress' }).Count -gt 1 -or $Explanation.Length -gt 1000) {
         throw 'A plan has 1-20 steps, at most one in_progress, and an explanation of at most 1000 characters.'
     }
+    $steps
+}
+function Update-AgentRunPlan {
+    [CmdletBinding()]
+    param($Context, $Call)
+    $null = Get-AgentRunObservation $Context (Get-HarnessOperationDirectory $Context.State)
+    $plan = @(ConvertTo-AgentRunPlan -Plan @($Call.Arguments.plan) -Explanation ([string]$Call.Arguments.explanation))
     $script:PackRunPlans.AddOrUpdate($Context.AgentLease, $plan)
     $marks = @{ pending = '[ ]'; in_progress = '[>]'; completed = '[x]' }
     $lines = @($Call.Arguments.explanation | Where-Object { $_ }) + @($plan | ForEach-Object { "$($marks[$_.Status]) $($_.Step)" })
@@ -469,10 +475,21 @@ function Get-AgentVerificationReview {
     [CmdletBinding()]
     param($Context)
     $observed = $null
-    if ($Context.PSObject.Properties['Answer'] -and $script:PackToolObservations.TryGetValue($Context.AgentLease, [ref]$observed) -and
-        $observed.ContainsKey('Feedback') -and $observed.Feedback.Failures.Count -and
-        $Context.Answer -notmatch '(?i)\b(fail(?:ed|ure|ures)?|block(?:ed)?|refus(?:ed|al)|reject(?:ed|ion)?|cancel(?:led|ed)?|timed? out|unsuccessful|not (?:run|verified|completed)|(?:could|did) not (?:run|verify|complete|finish|execute)|(?:ran|run|selected|executed) (?:no|zero|0) tests|no tests (?:ran|run|were run))\b' -and
-        $Context.Answer -notmatch '(?i)\b(?:exit(?:ed)?(?:\s+with)?(?:\s+(?:code|status))?|exit_?(?:code|status))\b\s*(?:[:=]\s*)?[+-]?[1-9]\d*\b') {
+    if (-not $Context.PSObject.Properties['Answer'] -or -not $script:PackToolObservations.TryGetValue($Context.AgentLease, [ref]$observed) -or
+        -not $observed.ContainsKey('Feedback') -or -not $observed.Feedback.Failures.Count) {
+        return
+    }
+    # An outcome statement discloses a failed attempt; a feature name ("failure handling") or negated failure does not.
+    $answer = ([string]$Context.Answer).Replace('*', '').Replace('`', '')
+    $answer = $answer -replace '(?i)\b(?:no|zero|without|not (?:one|any|a single))\s+(?:[\w-]+\s+){0,5}(?:fail(?:ed|ing)|failures?|blocked|refused|rejected|cancelled|timed out)\b', ''
+    $answer = $answer -replace '(?i)\b(?:(?:did|does|has|have|was|were)\s+not|never|not)\s+(?:fail(?:ed|ing)?|exit(?:ed)?(?:\s+with)?(?:\s+(?:code|status))?\s*[:=]?\s*[+-]?[1-9]\d*)\b', ''
+    $subject = '(?:tests?|checks?|commands?|builds?|verification|validation|invocations?|executions?|attempts?|selections?|runners?|runs?|calls?)'
+    $outcome = '(?:fail(?:ed|ing)|blocked|refused|rejected|cancel(?:led|ed)|timed? out|unsuccessful)'
+    $disclosed = $answer -match '(?i)\b(?:exit(?:ed)?(?:\s+with)?(?:\s+(?:code|status))?|exit_?(?:code|status))\b\s*(?:[:=]\s*)?[+-]?[1-9]\d*\b' -or
+    $answer -match "(?i)\b$subject\b(?:\s+\d+)?\s+(?:(?:has|have|had|is|are|was|were|remains?|still|also|initially|unexpectedly|then|later|now)\s+)*(?:(?:completed|succeeded)\s+(?:or|but)\s+)?$outcome\b" -or
+    $answer -match "(?im)(?:^|[.!?;])\s*$outcome(?:\s*[:;.!?]|$|\s+(?:because|by|due to|with)\b)" -or
+    $answer -match '(?i)\b(not (?:run|verified|completed)|(?:could|did) not (?:run|verify|complete|finish|execute)|(?:ran|run|selected|executed) (?:no|zero|0) tests|no tests (?:ran|run|were run))\b'
+    if (-not $disclosed) {
         $excerpt = Get-HarnessTextExcerpt (($observed.Feedback.Failures.Values | Select-Object -First 8) -join "`n") 2048
         "your answer omits unsuccessful command attempts observed in this run.`n$($excerpt.Text)`nName each blocked, failed or unfinished check and its reason in one short line, not a section. A refused selection ran no tests. Report only observed passing results; do not run broader checks merely to replace a missing result."
     }

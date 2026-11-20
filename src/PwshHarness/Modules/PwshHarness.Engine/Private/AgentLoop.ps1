@@ -404,9 +404,15 @@ function Save-EngineAgentResume {
     # was counted when it was sent but did not complete, so the resumed request takes its number.
     [CmdletBinding()]
     param($Record, $Loop, [switch]$Failed)
-    $Record.Resume = @{ Prompt = $Loop.Turn.Prompt; Exchange = $Loop.Turn.Exchange.ToArray(); Ids = @($Loop.Ids); RunId = $Loop.Run.Id
+    # Checkpointing moves completed exchange messages into BaseMessages. Retain that prefix too,
+    # excluding system instructions, which are rebuilt from the live host on resume.
+    $progress = @{} + $Loop.Progress
+    $progress.Seen = @($Loop.Progress.Seen)
+    $Record.Resume = @{ Prompt = $Loop.Turn.Prompt; BaseMessages = @($Loop.Turn.BaseMessages | Select-Object -Skip 1); Exchange = $Loop.Turn.Exchange.ToArray(); Ids = @($Loop.Ids); RunId = $Loop.Run.Id
         TaskTime = $Loop.Turn.PSObject.Properties['TaskTime'] ? [string]$Loop.Turn.TaskTime : ''; Steps = [Math]::Max(0, $Loop.Steps - [int][bool]$Failed); ToolCalls = $Loop.ToolCalls; ChargedTokens = $Loop.ChargedTokens; Policy = $Loop.PolicyState
         Friction = @{} + (Get-EngineAgentFriction $Loop) + @{ Open = @($Loop.Friction.Open); Signatures = @($Loop.Friction.Signatures) }
+        Progress = $progress
+        SingleCalls = $Loop.SingleCalls; LastCalls = @($Loop.LastCalls); ToolRepairs = $Loop.ToolRepairs
     }
 }
 function Test-EngineAgentReload {
@@ -503,6 +509,8 @@ function Export-EngineAgentResume {
     $exchange = @(ConvertTo-EngineMessageRecord @($resume.Exchange))
     [ordered]@{ Version = 1; Prompt = $resume.Prompt; RunId = $resume.RunId; Ids = @($resume.Ids); TaskTime = $resume['TaskTime']; Steps = $resume.Steps; ToolCalls = $resume.ToolCalls
         ChargedTokens = $resume.ChargedTokens; Policy = $resume.Policy; Friction = $resume['Friction']; Exchange = @($exchange)
+        BaseMessages = @($resume['BaseMessages'] ? @(ConvertTo-EngineMessageRecord @($resume.BaseMessages)) : @())
+        Progress = $resume['Progress']; SingleCalls = $resume['SingleCalls']; LastCalls = $resume['LastCalls']; ToolRepairs = $resume['ToolRepairs']
     } | ConvertTo-Json -Depth 64 -Compress
 }
 function Import-EngineAgentResume {
@@ -514,10 +522,11 @@ function Import-EngineAgentResume {
         throw 'Unsupported agent resume data.'
     }
     $exchange = @(ConvertFrom-EngineMessageRecord @($data.Exchange))
-    (Get-EngineAgentState $Store $State).Resume = @{ Prompt = [string]$data.Prompt; Exchange = @($exchange); Ids = @($data.Ids); RunId = [string]$data.RunId
+    (Get-EngineAgentState $Store $State).Resume = @{ Prompt = [string]$data.Prompt; BaseMessages = @($data['BaseMessages'] ? @(ConvertFrom-EngineMessageRecord @($data.BaseMessages)) : @()); Exchange = @($exchange); Ids = @($data.Ids); RunId = [string]$data.RunId
         TaskTime = [string]$data['TaskTime']; Steps = [int]$data.Steps; ToolCalls = [int]$data.ToolCalls; ChargedTokens = [long]$data.ChargedTokens
         Policy   = ($data['Policy'] -is [Collections.IDictionary] ? $data['Policy'] : ($data['Reviewed'] ? @{ 'completion-review' = @{ Reviewed = $true } } : @{}))
         Friction = $data['Friction']
+        Progress = $data['Progress']; SingleCalls = $data['SingleCalls']; LastCalls = $data['LastCalls']; ToolRepairs = $data['ToolRepairs']
     }
     [string]$data.Prompt
 }
@@ -842,6 +851,8 @@ function Invoke-EngineAgentContinuation {
                 }
                 continue
             }
+            # A corrected batch ends this malformed-call sequence; later mistakes get their own bounded repair.
+            $loop.ToolRepairs = 0
             $loop.Calls = $validated
             $loop.SingleCalls = $validated.Count -eq 1 ? $loop.SingleCalls + 1 : 0
             $loop.LastCalls = [string[]]@($validated | ForEach-Object Name)
@@ -1109,6 +1120,7 @@ function Invoke-EngineAgentDelegate {
             if ($loop.ToolCalls + $validated.Count -gt $loop.Settings.'Agent.MaxToolCalls') {
                 $stop = 'ToolLimit'; break
             }
+            $loop.ToolRepairs = 0
             $loop.Calls = $validated
             # Recorded like the run's own calls, so the log shows what the sub-agent asked for.
             Add-EngineTranscript -State $Context.State -Role 'agent-calls' -Text '' -Metadata @{ RunId = $loop.Run.Id; Calls = $validated; Delegated = $true }
@@ -1204,7 +1216,7 @@ function Send-EngineAgent {
         if ($turn.Config.SystemPrompt -cne $Store.Points.Settings.SystemPrompt.Default) {
             $instructions += "`n" + $turn.Config.SystemPrompt
         }
-        $turn.Config.SystemPrompt = $instructions + "`nEach task's metadata states its run mode and limits. Submit concrete task edits and commands through the tools. The host enforces authorization: Approve requests exact-source review; Auto executes eligible granted actions."
+        $turn.Config.SystemPrompt = $instructions + "`nEach task's metadata states its run mode and limits. The host enforces authorization: ReadOnly permits inspection and planning only, with no commands or file changes; Approve requests exact-source review; Auto executes eligible granted actions."
         # The mode and limits go with the task, not the instructions: a mode switch between runs would otherwise change
         # the request's prefix and miss the provider's prompt cache for the whole history after it.
         $turn | Add-Member NoteProperty RunNotice "Effective run mode: $($ticket.Run.Mode). Limits: $($State.Config.'Agent.MaxSteps') model steps, $($State.Config.'Agent.MaxToolCalls') tool calls, $($State.Config.'Agent.MaxRunSeconds') seconds."
@@ -1226,6 +1238,14 @@ function Send-EngineAgent {
                         throw 'Request middleware proposed an undeclared tool.'
                     }
                 }
+                if ($loop.Run.Mode -ceq 'ReadOnly') {
+                    $request.AgentTools = @($request.AgentTools | Where-Object { $loop.Tools[$_.Name].Policy -ceq 'ReadOnly' })
+                    foreach ($name in @($loop.Tools.Keys)) {
+                        if ($loop.Tools[$name].Policy -cne 'ReadOnly') {
+                            $loop.Tools.Remove($name)
+                        }
+                    }
+                }
                 $loop.Schemas = New-HarnessFrozen $request.AgentTools
             }
             $request.AgentTools = $loop.Schemas
@@ -1243,6 +1263,13 @@ function Send-EngineAgent {
         }
         Resolve-EngineContextStage $turn -Resume:([bool]$resumed)
         if ($resumed) {
+            if ($resumed['BaseMessages']) {
+                $task = $turn.BaseMessages[-1]
+                $turn.BaseMessages = @($turn.BaseMessages[0]) + @(foreach ($message in $resumed.BaseMessages) {
+                        # Effective mode/limits are descriptive live metadata, never restored activation authority.
+                        ($message.PSObject.Properties['BudgetGroup'] -and $message.BudgetGroup -ceq 'task') ? $task : $message
+                    })
+            }
             # The stopped run's completed steps continue as this run's exchange.
             foreach ($message in $resumed.Exchange) {
                 $turn.Exchange.Add($message)
@@ -1251,6 +1278,15 @@ function Send-EngineAgent {
             $loop.Steps = [int]$resumed['Steps']; $loop.ToolCalls = [int]$resumed['ToolCalls']
             $loop.ChargedTokens = [long]$resumed['ChargedTokens']; $loop.PolicyState = $resumed['Policy'] -is [Collections.IDictionary] ? $resumed['Policy'] : @{}
             $loop.Friction = New-EngineAgentFriction $resumed['Friction']
+            if ($resumed['Progress'] -is [Collections.IDictionary]) {
+                foreach ($name in @('Evidence', 'Changes', 'Passed', 'StallSteps')) {
+                    $loop.Progress[$name] = [Math]::Max(0, [int]$resumed.Progress[$name])
+                }
+                $loop.Progress.LastChanged = [bool]$resumed.Progress['LastChanged']; $loop.Progress.LastStep = [string]$resumed.Progress['LastStep']
+                $loop.Progress.Seen.UnionWith([string[]]@($resumed.Progress['Seen'] | Select-Object -First 4096))
+            }
+            $loop.SingleCalls = [Math]::Max(0, [int]$resumed['SingleCalls']); $loop.LastCalls = [string[]]@($resumed['LastCalls'])
+            $loop.ToolRepairs = [Math]::Clamp([int]$resumed['ToolRepairs'], 0, 2)
             Add-EngineTranscript -State $State -Role 'notice' -Text "Resuming run $($resumed.RunId) after $($resumed.Exchange.Count) completed exchange messages." -Metadata $null
             if ($resumed.Exchange.Count) {
                 $turn.RequestKind = 'Agent'

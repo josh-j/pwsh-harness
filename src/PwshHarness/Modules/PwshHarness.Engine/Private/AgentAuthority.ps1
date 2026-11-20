@@ -5,7 +5,7 @@ function Initialize-EngineAgentState {
     # Session/config/transcript data are never an activation credential.
     $Session.Config.Autonomy = 'Approve'
     $record = [pscustomobject]@{
-        Epoch = 0L; Activation = $null; Lease = $null; ConversationId = [string]$Session.SessionId
+        Epoch = 0L; Activation = $null; ReadOnly = $false; Lease = $null; ConversationId = [string]$Session.SessionId
         Transcript = $Session.Transcript; Config = $Session.Config; RevocationReason = ''; Loop = $null; Resume = $null; HistoryCache = $null
     }
     $Store.AgentStates.Add($Session, $record)
@@ -24,6 +24,7 @@ function Clear-EngineAgentAuthority {
     param($Session, $Record, [string]$Reason)
     $Record.Epoch++
     $Record.Activation = $null
+    $Record.ReadOnly = $false
     $Record.RevocationReason = $Reason
     $Session.Config.Autonomy = 'Approve'
     if ($Record.Lease) {
@@ -87,7 +88,7 @@ function Update-EngineAgentAuthority {
         Clear-EngineAgentAuthority -Session $Session -Record $record -Reason 'ModeChanged'
     }
     if (-not $record.Activation) {
-        $Session.Config.Autonomy = 'Approve'
+        $Session.Config.Autonomy = $record.ReadOnly ? 'ReadOnly' : 'Approve'
     }
     if ($record.Lease) {
         $Session.Busy = $true
@@ -105,7 +106,7 @@ function Get-EngineAgentSnapshot {
                     'Auto'
                 }
                 else {
-                    'Approve'
+                    $record.ReadOnly ? 'ReadOnly' : 'Approve'
                 }); Epoch    = $record.Epoch
             ActivationSource = $(if ($record.Activation) {
                     $record.Activation.Source
@@ -171,7 +172,7 @@ function New-EngineAgentControl {
         & $assertOwner $Store $Session
         $record = & $getRecord $Store $Session
         # Default is the interactive frontend's own start-up selection; models, extensions and restored data have no route.
-        if ($Mode -cnotin @('Approve', 'Auto') -or $Source -cnotin @('Parameter', 'Options', 'Command', 'Default')) {
+        if ($Mode -cnotin @('Approve', 'Auto', 'ReadOnly') -or $Source -cnotin @('Parameter', 'Options', 'Command', 'Default')) {
             throw 'Mode selection requires a user Parameter, Options, Command or frontend Default route.'
         }
         & $stopSuspended $Store $Session
@@ -198,8 +199,15 @@ function New-EngineAgentControl {
             $Session.Config.'Agent.Enabled' = $true
             $Session.Config.Autonomy = 'Auto'
         }
-        elseif ($Session.Cancellation) {
-            $Session.Cancellation.Cancel()
+        else {
+            $record.ReadOnly = $Mode -ceq 'ReadOnly'
+            $Session.Config.Autonomy = $Mode
+            if ($record.ReadOnly) {
+                $Session.Config.'Agent.Enabled' = $true
+            }
+            if ($Session.Cancellation) {
+                $Session.Cancellation.Cancel()
+            }
         }
         & $snapshot $Store $Session
     }.GetNewClosure()

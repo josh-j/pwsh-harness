@@ -194,7 +194,8 @@ function Invoke-TuiFrontend {
             }
             $pendingActions.Clear()
             while (-not $View.Quit) {
-                $line = Read-TuiLine -Prompt ('[' + $HarnessHost.AgentControl.GetState($Session).Mode.ToUpperInvariant() + '] pwsh> ') -View $View -Terminal $Terminal
+                $sandboxLabel = $Session.Config['Run.Sandbox'] -ceq 'Workspace' ? ' [sandbox:workspace requested]' : ''
+                $line = Read-TuiLine -Prompt ('[' + $HarnessHost.AgentControl.GetState($Session).Mode.ToUpperInvariant() + ']' + $sandboxLabel + ' pwsh> ') -View $View -Terminal $Terminal
                 if ($null -eq $line) {
                     break
                 }

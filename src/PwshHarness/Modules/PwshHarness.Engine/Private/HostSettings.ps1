@@ -46,6 +46,7 @@ function New-EngineHostStore {
         AgentTools        = $null
     }
     $store.NativeContextPaths = [Runtime.CompilerServices.ConditionalWeakTable[object, string]]::new()
+    $store.ConfigProfiles = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
     foreach ($category in @('Providers', 'RequestMiddleware', 'ResponseProcessors', 'Critics', 'Fixers', 'TokenEstimators', 'RepairPolicies', 'Commands', 'Actions',
             'Services', 'Examples', 'SamplingPolicies', 'QueryExpanders', 'Chunkers', 'Retrievers', 'Embedders', 'HistoryCompactors', 'ContextSources', 'Renderers', 'Highlighters', 'AgentTools', 'RunPolicies', 'Languages', 'Events', 'Settings', 'TargetProfiles', 'EventSchemas')) {
         $store.Points[$category] = @{}
@@ -160,7 +161,7 @@ function New-EngineHostStore {
     $store.Points.Settings['Session.MaxAuditBytes'].Validator = { param($v) $v -ge 1024 -and $v -le 268435456 }
     $store.Points.Settings['Session.MaxAuditRecords'].Validator = { param($v) $v -ge 16 -and $v -le 65536 }
     $store.Points.Settings.MaxTokens.Validator = { param($v) $v -gt 0 }
-    $store.Points.Settings.Autonomy.Validator = { param($v) $v -cin @('Approve', 'Auto') }
+    $store.Points.Settings.Autonomy.Validator = { param($v) $v -cin @('Approve', 'Auto', 'ReadOnly') }
     foreach ($name in @('Agent.MaxFileBytes', 'Agent.MaxCaptureBytes')) {
         $store.Points.Settings[$name].Validator = { param($v) $v -ge 1 -and $v -le 16777216 }
     }

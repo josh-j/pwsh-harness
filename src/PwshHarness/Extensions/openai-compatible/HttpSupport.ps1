@@ -118,7 +118,7 @@ function Assert-OpenAIStreamProgress {
         return
     }
     $firstByte = $Progress.First -and $Progress.Clock.Elapsed.TotalSeconds -ge $Progress.FirstByteLimit
-    if ($firstByte -or $Progress.Clock.Elapsed.TotalSeconds - $Progress.Last -ge $Progress.Limit) {
+    if ($firstByte -or (-not $Progress.First -and $Progress.Clock.Elapsed.TotalSeconds - $Progress.Last -ge $Progress.Limit)) {
         $failure = [TimeoutException]::new($firstByte ? "Provider sent no model chunk within $($Progress.FirstByteLimit) seconds." : "Provider stream made no model progress for $($Progress.Limit) seconds.")
         $failure.Data['AgentStopReason'] = 'ProviderStall'
         $failure.Data['FailureOrigin'] = $firstByte ? 'RequestTimeout' : 'StreamIdleTimeout'

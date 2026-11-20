@@ -12,5 +12,6 @@ function Get-HarnessRunSetting {
         WorkingDirectory = Get-HarnessOperationDirectory $State
         TimeoutSeconds   = $State.Config[$timeoutSetting]
         TimeoutSetting   = $timeoutSetting
+        Sandbox          = $State.Config['Run.Sandbox'] ? [string]$State.Config['Run.Sandbox'] : 'Off'
     }
 }

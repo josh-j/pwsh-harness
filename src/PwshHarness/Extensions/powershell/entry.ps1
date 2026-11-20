@@ -73,6 +73,7 @@ foreach ($block in Get-HarnessScriptBlock -Path $files.ForEach({ Join-Path $PSSc
     $Harness.Settings.Declare('AutoRepairAttempts', [int], 2, { param($v) $v -ge 0 }, 'PWSH_HARNESS_AUTO_REPAIR')
     $Harness.Settings.Declare('VerificationTimeoutSeconds', [int], 180, { param($v) $v -gt 0 })
     $Harness.Settings.Declare('Run.InlineCommandMaxChars', [int], 4096, { param($v) $v -ge 0 -and $v -le 8192 })
+    $Harness.Settings.Declare('Run.Sandbox', [string], 'Off', { param($v) $v -cin @('Off', 'Workspace') })
     $promptRoot = Join-Path (Invoke-HarnessService -Harness $Harness -Name 'host.data-root' -Arguments @() -Required) 'Prompts'
     $prompt = [IO.File]::ReadAllText((Join-Path $promptRoot 'system.md'))
     $script:PackBehaviorPrompts = @{ code = $prompt.Trim() }

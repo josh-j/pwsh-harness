@@ -101,9 +101,45 @@ function Test-GitContextRepositoryCandidate {
     $false
 }
 
+function Read-GitContextProcessOutput {
+    [CmdletBinding()]
+    param($Process, $Request, [int]$MaximumBytes)
+    $captures = @(foreach ($reader in @($Process.StandardOutput, $Process.StandardError)) {
+            $buffer = [char[]]::new(4096)
+            @{ Reader = $reader; Buffer = $buffer; Pending = $reader.ReadAsync([Memory[char]]::new($buffer)).AsTask(); Done = $false; Text = [Text.StringBuilder]::new(); Bytes = 0 }
+        })
+    $watch = Start-GitContextClock
+    $truncated = $false
+    while (-not $Process.HasExited -or @($captures | Where-Object { -not $_.Done }).Count) {
+        Invoke-HarnessCheckpoint $Request
+        if ($watch.ElapsedMilliseconds -ge 5000) {
+            throw 'Git context query timed out.'
+        }
+        foreach ($capture in $captures | Where-Object { -not $_.Done -and $_.Pending.IsCompleted }) {
+            $count = $capture.Pending.GetAwaiter().GetResult()
+            if (-not $count) {
+                $capture.Done = $true
+                continue
+            }
+            $text = [string]::new($capture.Buffer, 0, $count)
+            $part = Get-HarnessTextExcerpt -Text $text -MaxBytes ([Math]::Max(0, $MaximumBytes - $capture.Bytes))
+            $null = $capture.Text.Append($part.Text)
+            $capture.Bytes += [Text.Encoding]::UTF8.GetByteCount($part.Text)
+            if ($part.Truncated -and $capture -eq $captures[0]) {
+                $truncated = $true
+                if (-not $Process.HasExited) {
+                    $Process.Kill($true)
+                }
+            }
+            $capture.Pending = $capture.Reader.ReadAsync([Memory[char]]::new($capture.Buffer)).AsTask()
+        }
+        $null = $Process.WaitForExit(10)
+    }
+    @{ Text = $captures[0].Text.ToString(); ExitCode = $Process.ExitCode; Truncated = $truncated }
+}
 function Invoke-GitContextGit {
     [CmdletBinding()]
-    param([string]$Path, [string[]]$Arguments, $Request = $script:DiscoveryRequest, [switch]$RawOutput, [switch]$Result)
+    param([string]$Path, [string[]]$Arguments, $Request = $script:DiscoveryRequest, [switch]$RawOutput, [switch]$Result, [int]$MaximumBytes = 0)
     $git = Get-Command git -CommandType Application -ErrorAction Ignore | Select-Object -First 1
     if (-not $git) {
         return $null
@@ -129,6 +165,13 @@ function Invoke-GitContextGit {
     $started = $false
     try {
         $started = $process.Start()
+        if ($MaximumBytes -gt 0) {
+            $bounded = Read-GitContextProcessOutput -Process $process -Request $Request -MaximumBytes $MaximumBytes
+            if ($Result) {
+                return $bounded
+            }
+            return $bounded.Text
+        }
         $outputTask = $process.StandardOutput.ReadToEndAsync()
         $errorTask = $process.StandardError.ReadToEndAsync()
         $readCompletion = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($outputTask, $errorTask))

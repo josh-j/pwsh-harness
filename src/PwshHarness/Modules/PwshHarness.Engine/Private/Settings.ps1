@@ -76,11 +76,76 @@ function Copy-EngineSessionConfig {
     foreach ($name in $Parameters.Keys) {
         $copy[$name] = $Parameters[$name]
     }
+    $derived = $null
+    if ($Store.ConfigProfiles.TryGetValue($Config, [ref]$derived)) {
+        $automatic = @{} + $derived
+        foreach ($name in @($automatic.Keys)) {
+            # Equal explicit overrides remain explicit; direct mutations differing from the last derived value do too.
+            if ($Parameters.ContainsKey($name) -or $automatic[$name] -cne (ConvertTo-Json -InputObject $Config[$name] -Depth 30 -Compress)) {
+                $automatic.Remove($name)
+            }
+        }
+        if ($Parameters.ContainsKey('Model') -or $Parameters.ContainsKey('ModelProfile')) {
+            $explicit = @{}
+            foreach ($name in $copy.Keys | Where-Object { -not $automatic.ContainsKey($_) }) {
+                $explicit[$name] = $true
+            }
+            Set-EngineConfigProfile -Store $Store -Config $copy -Explicit $explicit -Declarations $Store.Points.Settings
+        }
+        else {
+            $Store.ConfigProfiles.Add($copy, $automatic)
+        }
+    }
+    elseif ($Parameters.ContainsKey('Model') -or $Parameters.ContainsKey('ModelProfile')) {
+        $explicit = @{}
+        foreach ($name in $copy.Keys) {
+            $explicit[$name] = $true
+        }
+        Set-EngineConfigProfile -Store $Store -Config $copy -Explicit $explicit -Declarations $Store.Points.Settings
+    }
     if ($Parameters.ContainsKey('ContextPath')) {
         $null = $Store.NativeContextPaths.Remove($copy)
         $copy.ContextPath = Resolve-EngineConfigContextPath -Store $Store -Config $copy
     }
     $copy
+}
+function Set-EngineConfigProfile {
+    # Apply only profile-owned defaults. Provenance stays private and follows config copies, never serialized settings.
+    [CmdletBinding()]
+    param($Store, [hashtable]$Config, [hashtable]$Explicit, [hashtable]$Declarations)
+    if (-not $Explicit.ContainsKey('ModelProfile')) {
+        $matched = @($Store.Profiles.Values | Where-Object { $_.Model -and $Config.Model -match ('(^|/)' + [regex]::Escape($_.Model) + '(?:$|-)') } | Sort-Object Name)
+        $Config.ModelProfile = $matched.Count ? $matched[0].Name : ($Config.Model ? '' : $Declarations.ModelProfile.Default)
+    }
+    $selected = Get-EngineProfile -Store $Store -Config $Config
+    $automatic = @{}
+    foreach ($name in @('ModelProfile', 'Model', 'Temperature', 'MaxTokens', 'Agent.MaxSteps', 'Agent.MaxRunSeconds', 'Agent.MaxToolCalls',
+            'Agent.InputTokenBudget', 'Agent.MaxReadBytes', 'Agent.MaxTotalTokens', 'Agent.CompactTokens')) {
+        if ($name -cne 'ModelProfile' -and -not $Explicit.ContainsKey($name)) {
+            $value = $selected ? ($name -ceq 'MaxTokens' ? $selected.MaxOutputTokens : $selected.$name) : $null
+            if ($selected -and $null -ne $value -and (-not $name.StartsWith('Agent.') -or $value)) {
+                $Config[$name] = $value
+            }
+            elseif ($name -cne 'Model' -and $Declarations.ContainsKey($name)) {
+                $Config[$name] = Copy-EngineConfigValue $Declarations[$name].Default
+            }
+        }
+        if (-not $Explicit.ContainsKey($name)) {
+            $automatic[$name] = ConvertTo-Json -InputObject $Config[$name] -Depth 30 -Compress
+        }
+    }
+    if (-not $Explicit.ContainsKey('FenceLanguages')) {
+        if ($selected) {
+            $Config.FenceLanguages = Copy-EngineConfigValue $selected.FenceLanguages
+        }
+        else {
+            $Config.Remove('FenceLanguages')
+        }
+        $automatic.FenceLanguages = ConvertTo-Json -InputObject $Config['FenceLanguages'] -Depth 30 -Compress
+    }
+    $Config.Presentation = $selected -and $selected.Model -and $Config.Model -match ('(^|/)' + [regex]::Escape($selected.Model) + '(?:$|-)') ? $selected.Presentation : ''
+    $automatic.Presentation = ConvertTo-Json -InputObject $Config.Presentation -Depth 30 -Compress
+    $Store.ConfigProfiles.AddOrUpdate($Config, $automatic)
 }
 function Resolve-EngineConfigPath {
     [CmdletBinding()]
@@ -119,6 +184,7 @@ function Resolve-EngineSetting {
     $builtin = $enabled | Where-Object { $Store.Known.ContainsKey($_.Extension) -and $Store.Known[$_.Extension].Source -ceq 'builtin' } | Select-Object -First 1
     $fallback = @{ Provider = ($connection ? $connection.Name : ($builtin ? $builtin.Name : '')); Model = ($connection ? $connection.Defaults.Model : '') }
     $values = @{}
+    $explicit = @{}
     foreach ($name in $Declarations.Keys) {
         $spec = $Declarations[$name]
         $value = $spec.Default
@@ -155,6 +221,9 @@ function Resolve-EngineSetting {
         if ($Parameters.ContainsKey($name)) {
             $value = $Parameters[$name]
             $contextSource = $Parameters
+        }
+        if ($file.ContainsKey($name) -or $Store.Parameters.ContainsKey($name) -or $Parameters.ContainsKey($name) -or ($null -ne $environment -and $environment -ne '')) {
+            $explicit[$name] = $true
         }
         if ($spec.Type -eq [bool] -and $value -is [string]) {
             $value = [bool]::Parse($value)
@@ -221,40 +290,11 @@ function Resolve-EngineSetting {
             }
             elseif (-not $Declarations.ContainsKey($name)) {
                 $values[$name] = Copy-EngineConfigValue $layer[$name]
+                $explicit[$name] = $true
             }
         }
     }
-    # Unless a profile is chosen explicitly, the profile describing the configured model replaces the default one.
-    $profileEnv = $Declarations.ContainsKey('ModelProfile') ? (Get-EngineSettingEnvironmentName -Store $Store -Name ModelProfile -Override $Declarations.ModelProfile.Env) : ''
-    if ($values.Model -and -not ($file.ContainsKey('ModelProfile') -or $Store.Parameters.ContainsKey('ModelProfile') -or
-            $Parameters.ContainsKey('ModelProfile') -or ($profileEnv -and [Environment]::GetEnvironmentVariable($profileEnv)))) {
-        $matched = @($Store.Profiles.Values | Where-Object { $_.Model -and $values.Model -match ('(^|/)' + [regex]::Escape($_.Model) + '(?:$|-)') } | Sort-Object Name)
-        if ($matched) {
-            $values.ModelProfile = $matched[0].Name
-        }
-    }
-    if ($values.ModelProfile) {
-        $modelProfile = Get-EngineProfile $Store $values
-        foreach ($name in @('Model', 'Temperature', 'MaxTokens', 'Agent.MaxSteps', 'Agent.MaxRunSeconds', 'Agent.MaxToolCalls',
-                'Agent.InputTokenBudget', 'Agent.MaxReadBytes', 'Agent.MaxTotalTokens', 'Agent.CompactTokens')) {
-            if ($name.StartsWith('Agent.') -and -not $modelProfile.$name) {
-                continue
-            }
-            $envName = Get-EngineSettingEnvironmentName -Store $Store -Name $name -Override $Declarations[$name].Env
-            if (-not $file.ContainsKey($name) -and -not $Store.Parameters.ContainsKey($name) -and
-                -not $Parameters.ContainsKey($name) -and -not [Environment]::GetEnvironmentVariable($envName)) {
-                $values[$name] = if ($name -eq 'MaxTokens') {
-                    $modelProfile.MaxOutputTokens
-                }
-                else {
-                    $modelProfile.$name
-                }
-            }
-        }
-        $values.FenceLanguages = $modelProfile.FenceLanguages
-        # The default profile applies to every model; its tool presentation only to the model the profile describes, including provider-prefixed and dated names.
-        $values.Presentation = $modelProfile.Model -and $values.Model -match ('(^|/)' + [regex]::Escape($modelProfile.Model) + '(?:$|-)') ? $modelProfile.Presentation : ''
-    }
+    Set-EngineConfigProfile -Store $Store -Config $values -Explicit $explicit -Declarations $Declarations
     $values.ConfigPath = $Path
     $Store.NativeContextPaths.Add($values, $values.ContextPath)
     $values

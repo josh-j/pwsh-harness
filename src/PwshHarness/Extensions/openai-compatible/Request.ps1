@@ -391,7 +391,12 @@ function Get-OpenAIGatewayUri {
         $failure.Data['UserMessage'] = $failure.Message; $failure.Data['RetryInput'] = $false
         throw $failure
     }
-    [uri]($BaseUrl.TrimEnd('/') + $Resource)
+    $base = $BaseUrl.TrimEnd('/')
+    # Accept either a gateway root or its literal versioned API root; keep every preceding path segment.
+    if ($base.EndsWith('/v1', [StringComparison]::Ordinal) -and $Resource.StartsWith('/v1/', [StringComparison]::Ordinal)) {
+        $Resource = $Resource.Substring(3)
+    }
+    [uri]($base + $Resource)
 }
 function Get-OpenAIApiKey {
     [CmdletBinding()]

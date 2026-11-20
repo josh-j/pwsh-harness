@@ -22,6 +22,9 @@ function Invoke-EngineOperationTransition {
         throw 'Unknown operation identity or foreign host.'
     }
     Assert-EngineSessionOwner $Store $record.Session
+    if ($Signal -in @('Approve', 'Start') -and (Get-EngineAgentSnapshot $Store $record.Session).Mode -ceq 'ReadOnly') {
+        throw 'ReadOnly mode does not permit executing prepared operations. Select Approve or Auto explicitly.'
+    }
     if ($AutomaticLease) {
         $null = $Store.Host.AgentControl.AssertRun($record.Session, $AutomaticLease, $true)
         if ($Signal -cne 'Approve' -or -not $record.Candidate -or $record.Candidate.Kind -cnotin @('write', 'edit', 'rename', 'pwsh')) {

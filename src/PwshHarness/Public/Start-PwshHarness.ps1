@@ -5,7 +5,7 @@ function Start-PwshHarness {
     Start the terminal assistant with explicit user actions.
     #>
     [CmdletBinding()]
-    param([switch]$NoTui, [string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey, [switch]$SaveConfig, [switch]$Agent, [ValidateSet('Approve', 'Auto')][string]$Autonomy, [string]$ConfigPath, [hashtable]$Options = @{}, [string]$Resume,
+    param([switch]$NoTui, [string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey, [switch]$SaveConfig, [switch]$Agent, [ValidateSet('Approve', 'Auto', 'ReadOnly')][string]$Autonomy, [string]$ConfigPath, [hashtable]$Options = @{}, [string]$Resume,
         [string]$Path, [string[]]$IncludeFiles = @(), [switch]$IncludeDiff, [string]$Renderer = 'Default', [switch]$NoPersist, [object]$HarnessHost)
     $arguments = @{} + $PSBoundParameters
     $arguments.Remove('Agent')
@@ -55,10 +55,13 @@ function Start-PwshHarness {
         }
         $source = $selection.Source
         if (-not $selectedMode -and $Options['Agent.Enabled'] -ne $false) {
-            # Interactive sessions start in Auto unless the user disabled the agent or saved Autonomy=Approve.
+            # Interactive sessions start in Auto unless disabled or a restrictive mode was saved.
             $saved = $HarnessHost.ConfigService.GetPath($ConfigPath)
             $saved = [IO.File]::Exists($saved) ? ([IO.File]::ReadAllText($saved) | ConvertFrom-Json -AsHashtable)['Autonomy'] : $null
-            if ($saved -cne 'Approve') {
+            if ($saved -ceq 'ReadOnly') {
+                $selectedMode = 'ReadOnly'; $source = 'Default'
+            }
+            elseif ($saved -cne 'Approve') {
                 $selectedMode = 'Auto'; $source = 'Default'
             }
         }

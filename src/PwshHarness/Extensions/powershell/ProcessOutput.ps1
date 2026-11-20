@@ -254,6 +254,14 @@ function Close-PowerShellRunTask {
         }
     }
     Remove-PowerShellRunScript $Task
+    if ($Task.Sandbox) {
+        try {
+            Close-PowerShellSandbox -Task $Task
+        }
+        catch {
+            $Task.CleanupErrors.Add($_)
+        }
+    }
 }
 function Remove-PowerShellRunScript {
     [CmdletBinding()]

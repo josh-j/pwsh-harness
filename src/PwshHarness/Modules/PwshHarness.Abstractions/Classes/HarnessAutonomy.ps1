@@ -3,4 +3,5 @@
 enum HarnessAutonomy {
     Approve
     Auto
+    ReadOnly
 }

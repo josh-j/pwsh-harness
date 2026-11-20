@@ -1,4 +1,5 @@
 . (Join-Path $PSScriptRoot 'ProcessOutput.ps1')
+. (Join-Path $PSScriptRoot 'Sandbox.ps1')
 function Get-PowerShellLastCode {
     [CmdletBinding()]
     param([object]$State, [object]$CodeBlock)
@@ -50,7 +51,7 @@ function Get-PowerShellRunReview {
     if (@($Context.State.LastResult.Edits | Where-Object Rule -EQ 'Analyzer.Format').Count) {
         'Formatting was applied before review. Approval binds the formatted candidate.'
     }
-    "Working directory: $($Context.ReviewData.WorkingDirectory)`nTimeout: $($Context.ReviewData.TimeoutSeconds) seconds$(if ($WhatIf) { "`nMode: -WhatIf" })"
+    "Working directory: $($Context.ReviewData.WorkingDirectory)`nTimeout: $($Context.ReviewData.TimeoutSeconds) seconds`nOS sandbox: $($Context.ReviewData.Sandbox)$(if ($WhatIf) { "`nMode: -WhatIf" })"
 }
 function Invoke-PowerShellRun {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSupportsShouldProcess', '', Justification = 'WhatIf and Confirm are harness action arguments forwarded to the run gate, not cmdlet common parameters.')]
@@ -71,6 +72,19 @@ function Invoke-PowerShellRun {
     }
     $runTimeoutSeconds = $ReviewedSettings.TimeoutSeconds
     $workingDirectory = $ReviewedSettings.WorkingDirectory
+    $sandboxMode = $ReviewedSettings.PSObject.Properties['Sandbox'] ? [string]$ReviewedSettings.Sandbox : 'Off'
+    $sandboxBinding = $null
+    if ($sandboxMode -cne 'Off') {
+        $sandboxRoot = Get-HarnessOperationDirectory $State
+        $separator = [IO.Path]::DirectorySeparatorChar
+        $comparison = $IsWindows ? [StringComparison]::OrdinalIgnoreCase : [StringComparison]::Ordinal
+        if (-not $workingDirectory.Equals($sandboxRoot, $comparison) -and -not $workingDirectory.StartsWith($sandboxRoot.TrimEnd($separator) + $separator, $comparison)) {
+            throw 'Sandbox command working directory must remain inside the captured workspace.'
+        }
+        $sandboxBinding = @{ Root = $sandboxRoot; RootIdentity = (Get-HarnessPathSnapshot -Path $sandboxRoot -NoHardLinks).Parents
+            WorkingDirectory = $workingDirectory; WorkingDirectoryIdentity = (Get-HarnessPathSnapshot -Path $workingDirectory -NoHardLinks).Parents
+        }
+    }
     $code = Get-PowerShellLastCode $State $CodeBlock
     $validation = $Shell -ceq 'PowerShell' ? (Test-PowerShellCode $code -NoAnalyzer) : @{ Valid = -not $WhatIf; Risks = @() }
     if (-not $validation.Valid) {
@@ -110,7 +124,7 @@ function Invoke-PowerShellRun {
         $warningText = 'No known AST risk patterns found. This is not a security guarantee.'
     }
     $confirmation = "Run generated code in a child pwsh -NoProfile process$(if ($WhatIf) { ' with -WhatIf' })?`n" +
-    "Working directory: $workingDirectory`nTimeout: $runTimeoutSeconds seconds`n$warningText`nThe child has your account permissions. Type RUN to confirm."
+    "Working directory: $workingDirectory`nTimeout: $runTimeoutSeconds seconds`nOS sandbox: $sandboxMode`n$warningText`n$(if ($sandboxMode -ceq 'Off') { 'The child has your account permissions.' } else { 'Only the workspace is shared writable; network access is disabled.' }) Type RUN to confirm."
     if (-not $Confirm) {
         $Confirm = { param($message) (Read-Host $message) -ceq 'RUN' }
     }
@@ -122,9 +136,14 @@ function Invoke-PowerShellRun {
         $State.Cancellation.Token.ThrowIfCancellationRequested()
     }
     if (-not [string]::Equals([string]$State.Config.ContextPath, $ReviewedSettings.ContextPath, [StringComparison]::Ordinal) -or
-        $State.Config[$ReviewedSettings.TimeoutSetting] -ne $runTimeoutSeconds) {
-        throw 'Execution settings changed during action review. Review the working directory and timeout again before running.'
+        $State.Config[$ReviewedSettings.TimeoutSetting] -ne $runTimeoutSeconds -or
+        (Get-PowerShellSandboxMode $State.Config) -cne $sandboxMode) {
+        throw 'Execution settings changed during action review. Review the working directory, timeout and OS sandbox again before running.'
     }
+    if ($sandboxMode -cne 'Off' -and $Terminal) {
+        throw 'Workspace OS sandbox does not support persistent terminals. Use a bounded command without RunPersistent. No command was started.'
+    }
+    Assert-PowerShellSandboxBinding -Binding $sandboxBinding
     $inline = $Shell -ceq 'PowerShell' -and -not $Terminal -and -not $ScriptPath -and -not $WhatIf -and $code.Length -le $State.Config.'Run.InlineCommandMaxChars' -and $code -match '^\s*# harness-command\r?\n'
     $scriptFile = Join-Path ([IO.Path]::GetTempPath()) ("pwsh-harness-" + [guid]::NewGuid().ToString('N') + '.ps1')
     if ($ScriptPath) {
@@ -151,6 +170,7 @@ function Invoke-PowerShellRun {
         ScriptPath = $ScriptPath; ScriptFile = $scriptFile; Watch = $watch; Budget = $captureBudget
         MaxCaptureBytes = $MaxCaptureBytes; WhatIf = [bool]$WhatIf; Closed = $false; CommandFinished = $false; TemporaryScripts = [Collections.Generic.List[string]]::new()
         RunCancellation = $State.Cancellation; Token = $CancellationToken; Timeout = $runTimeoutSeconds; TimeoutSetting = $ReviewedSettings.TimeoutSetting; Timer = $null
+        SandboxBinding = $sandboxBinding
     }
     $State.Busy = $true
     $deferred = $false
@@ -204,10 +224,12 @@ function Invoke-PowerShellRun {
         $start.Environment['GIT_TERMINAL_PROMPT'] = '0'
         $start.Environment['GCM_INTERACTIVE'] = 'never'
         Remove-PowerShellChildCredential $start $State.Config
+        Set-PowerShellSandboxStart -Start $start -Root (Get-HarnessOperationDirectory $State) -ScriptFile ($inline ? '' : $Task.ScriptFile) -Mode $sandboxMode -Task $task
         $task.Persistent = [bool]$Terminal
         if ($Terminal -and $Terminal.Task) {
             $task.TemporaryScripts = $Terminal.Task.TemporaryScripts
             $task.Process = $Terminal.Task.Process
+            $Task.Started = $true
             $task.Stdout = $Terminal.Task.Stdout; $task.Stderr = $Terminal.Task.Stderr
             foreach ($capture in @($task.Stdout, $task.Stderr)) {
                 $null = $capture.Text.Clear(); $capture.Budget = $task.Budget
@@ -216,14 +238,15 @@ function Invoke-PowerShellRun {
         else {
             $Task.Process = [Diagnostics.Process]::new()
             $Task.Process.StartInfo = $start
+            Assert-PowerShellSandboxBinding -Binding $sandboxBinding
             $null = $Task.Process.Start()
+            $Task.Started = $true
             $Task.Stdout = New-PowerShellRunCapture $Task.Process.StandardOutput $Task.Budget
             $Task.Stderr = New-PowerShellRunCapture $Task.Process.StandardError $Task.Budget
             if ($Terminal -and $Shell -ceq 'PowerShell') {
                 Wait-PowerShellTerminalReady $Task
             }
         }
-        $Task.Started = $true
         if (-not $AllowInput -and -not $Terminal) {
             $task.Process.StandardInput.Close()
         }

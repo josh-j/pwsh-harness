@@ -103,7 +103,7 @@ function New-HarnessHost {
             throw 'Use /trust inspect|revoke <extension>, /trust approve Tool|Credential <extension> <name-or-origin> <source-sha256>, or /trust auto <extension> <tool> <source-sha256>.'
         }.GetNewClosure(), 'Review and grant extension tool or credential capabilities; explicit user input only.')
     $agentControl = $hostInstance.AgentControl
-    foreach ($name in @('mode', 'agent')) {
+    foreach ($name in @('mode', 'agent', 'permissions')) {
         $command = $name
         $hostInstance.Commands.Add($name, {
                 param($context)
@@ -126,9 +126,10 @@ function New-HarnessHost {
                 }
                 if ($context.Arguments) {
                     # Typed mode names are case-insensitive; the engine accepts only the canonical names.
-                    $selected = @('Approve', 'Auto') | Where-Object { $_ -eq $context.Arguments.Trim() }
+                    $inputMode = $context.Arguments.Trim().Replace('-', '')
+                    $selected = @('Approve', 'Auto', 'ReadOnly') | Where-Object { $_ -eq $inputMode }
                     if (-not $selected) {
-                        throw 'Use /mode approve or /mode auto.'
+                        throw 'Use /permissions readonly, /permissions approve or /permissions auto.'
                     }
                     $null = $agentControl.SelectMode($context.State, $selected, 'Command')
                 }
@@ -138,14 +139,49 @@ function New-HarnessHost {
                     }
                     else {
                         ''
+                    }) + $(if ($mode.Mode -ceq 'ReadOnly') {
+                        '. Inspection and planning only; commands and file changes are blocked.'
                     })
-            }.GetNewClosure(), ('Show or change /' + $name + ' for this conversation.'), $(if ($name -eq 'mode') {
-                    '/mode Approve|Auto'
+            }.GetNewClosure(), ('Show or change /' + $name + ' for this conversation.'), $(if ($name -in @('mode', 'permissions')) {
+                    '/' + $name + ' ReadOnly|Approve|Auto'
                 }
                 else {
                     '/agent on|off'
                 }))
     }
+    foreach ($name in @('plan', 'review')) {
+        $command = $name
+        $hostInstance.Commands.Add($name, {
+                param($context)
+                if ($context.UserInitiated -cne $true) {
+                    throw 'Planning and review commands require explicit user input.'
+                }
+                if ($context.State.Busy) {
+                    throw 'Cancel active work and wait for it to finish before starting a plan or review.'
+                }
+                if ($command -ceq 'plan' -and $context.Arguments -ieq 'off') {
+                    $null = $agentControl.SelectMode($context.State, 'Approve', 'Command')
+                    return 'Planning ended. Mode: APPROVE. Use /permissions auto for autonomous implementation.'
+                }
+                $null = $agentControl.SelectMode($context.State, 'ReadOnly', 'Command')
+                if ($command -ceq 'plan' -and -not $context.Arguments) {
+                    return 'Mode: READONLY. Describe the task to investigate and plan; commands and file changes are blocked. /plan off selects Approve.'
+                }
+                $prompt = $command -ceq 'review' ? ('Review ' + ($context.Arguments ? $context.Arguments : 'the working tree changes') + '. Report concrete findings and evidence without changing files or running commands.') : ('Investigate and plan this task without changing files or running commands: ' + $context.Arguments)
+                [pscustomobject]@{ Action = 'Send'; Prompt = $prompt; DisplayPrompt = ('/' + $command + ' ' + $context.Arguments).TrimEnd() }
+            }.GetNewClosure(), ('Inspect and ' + $name + ' in host-enforced ReadOnly mode.'), ('/' + $name + ' [task or scope]'))
+    }
+    $hostInstance.Commands.Add('compact', {
+            param($context)
+            if ($context.UserInitiated -cne $true) {
+                throw 'Compaction requires explicit user input.'
+            }
+            $hostInstance.CompactConversation($context.State)
+        }.GetNewClosure(), 'Compact into a continuation session while preserving the saved source journal; pending approvals must be cancelled first.')
+    $hostInstance.Commands.Add('archives', {
+            param($context)
+            $hostInstance.GetConversationArchive($context.State, $context.Arguments) | ConvertTo-Json -Depth 12
+        }.GetNewClosure(), 'List retained session evidence, or read a retained session: /archives [session-id].')
     $hostInstance.Commands.Add('remember', {
             param($context)
             # Only the user writes standing rules: a model or extension cannot make itself persistent instructions.

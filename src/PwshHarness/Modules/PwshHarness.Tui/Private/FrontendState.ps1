@@ -222,6 +222,7 @@ function Set-TuiViewSnapshot {
             }) + ($project.Included.Count -gt 0 ? " files:$($project.Included.Count)" : '')
     }
     $bar.StatusItems = @{} + $Snapshot.Context.StatusItems
+    $bar.StatusItems['Execution'] = $Snapshot.Config['Run.Sandbox'] -ceq 'Workspace' ? 'sandbox:workspace(requested)' : 'shell:account'
     $bar.StatusText = ($bar.StatusItems.Values -join ' ')
     $View.Dirty = $true
 }

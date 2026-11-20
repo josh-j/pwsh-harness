@@ -108,6 +108,9 @@ function Invoke-EngineHostAction {
     }
     Assert-HarnessCodeBlock $Block
     $entry = $store.Points.Actions[$Name]
+    if ($entry.RequiresConfirmation -and (Get-EngineAgentSnapshot $Store $State).Mode -ceq 'ReadOnly') {
+        throw 'ReadOnly mode does not permit actions that change files or execute code. Select Approve or Auto explicitly.'
+    }
     if ($entry.RequiresConfirmation) {
         Assert-EngineSessionIdle $State
     }

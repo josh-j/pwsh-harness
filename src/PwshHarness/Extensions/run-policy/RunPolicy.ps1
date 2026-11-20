@@ -19,24 +19,22 @@ function Get-RunPolicyCheckInMessage {
         return
     }
     # A run whose last step added evidence (a review) or a change (a fix that has started changing files) is making
-    # progress; its first check-in waits until progress stops. A question is answered at the first level.
+    # progress. Reviews wait while evidence arrives; a fix defers its first check-in after changes start.
+    # Questions keep their scheduled progress reports.
     $kind = Get-RunPolicyTaskKind $View
-    if ($level -eq 1 -and $View.Progress.StallSteps -eq 0 -and $View.Step -gt 0 -and ($kind -ceq 'review' -or ($kind -ceq 'fix' -and $View.Progress.Changes))) {
+    if ($View.Progress.StallSteps -eq 0 -and $View.Step -gt 0 -and ($kind -ceq 'review' -or ($level -eq 1 -and $kind -ceq 'fix' -and $View.Progress.Changes))) {
         return
     }
     $View.Memory.CheckIns = $level
-    $ask = $level -eq 1 ? 'Stop and report to the user now: what you found so far and what you would check next.' : 'Answer the user now with your findings; do not make more tool calls first.'
-    if ($level -eq 1 -and $View.Headless -and $kind -ceq 'fix' -and -not $View.Progress.Changes) {
-        # Asked to report, unattended fixes ended on a proposal with nothing changed (command-errors, 2026-10-30).
-        $ask = 'No file has changed yet and the user cannot answer. Make the change now with what you know and let a check correct it; answer without a change only if you cannot tell what to change.'
-    }
+    # A heuristic classification must never turn a progress update into an instruction to abandon unfinished work.
+    $ask = 'Briefly report your progress, then continue any remaining requested work and verify it. Finish when the request is fulfilled, or explain the concrete blocker if you cannot proceed. Stay within the requested scope; a read-only or explanation request does not ask for file changes.'
     # The spend is what the provider reported; reservations only gate admission. A provider that reports no usage
     # falls back to the admission estimate.
     $reported = [long]$View.Usage.InputTokens + [long]$View.Usage.OutputTokens
     $tokens = $reported -gt 0 ? $reported : [long]$View.ChargedTokens
     $cost = $View.Usage.Cost
     $spent = "$($View.ToolCalls) tool calls and about $([Math]::Round($tokens / 1000))k tokens$($cost ? (' ($' + ([double]$cost).ToString('0.00', [Globalization.CultureInfo]::InvariantCulture) + ')') : '')"
-    @{ Kind = 'CheckIn'; Text = "<EPHEMERAL_MESSAGE>`nProgress check: this run has used $spent. $ask Continue without reporting only if you are partway through changes the user asked for.`n</EPHEMERAL_MESSAGE>" }
+    @{ Kind = 'CheckIn'; Text = "<EPHEMERAL_MESSAGE>`nProgress check: this run has used $spent. $ask`n</EPHEMERAL_MESSAGE>" }
 }
 function Get-RunPolicyBatchMessage {
     # Every step resends the whole exchange, so independent calls made one per step multiply the run's cost.
@@ -88,13 +86,23 @@ function Get-RunPolicyTaskKind {
     [OutputType([string])]
     param([Parameter(Mandatory)]$View)
     $prompt = [string]$View.State.LastPrompt
-    # "Do not change any files" names a change verb but forbids changes; "do not change the input" constrains a change.
-    $readOnly = $prompt -match "(?i)\b(?:do not|don't|never|without)\s+(?:chang|modif|edit|touch|writ)\w*\s+(?:any\s+|the\s+)?(?:files?|code|source|anything|repo|repository|working tree)\b"
+    # Absolute prohibitions differ from scope constraints such as "without modifying files outside src".
+    $restriction = "(?i)\b(?:do not|don't|never|without)\s+(?:chang|modif|edit|touch|writ|fix)\w*\s+(?:any\s+|the\s+)?(?:files?|code|source|anything|repo|repository|working tree)\b"
+    $readOnly = $prompt -match ($restriction + '(?!\s+(?:outside|except|other\s+than|beyond|in|inside|under)\b)')
     # A task statement often describes the defect and then states the behavior in imperative sentences ("Stop on
     # unhandled errors", "Mark the view dirty"); those weaker verbs count only at a sentence start, in a prompt with
     # no question mark or review word.
-    $imperative = '(?im)(?:^|[.!:;]\s+)(?:please\s+)?(?:stop|return|preserve|keep|mark|merge|parse|read|handle|support|ensure|allow|prevent|avoid|enable|disable|set|move|split|extend|improve|restore|reject|refuse|accept|use|respect|treat|prefer|apply|expose|exclude|skip|ignore|validate|raise|throw|emit|limit|clear|reset|redraw|show|hide)\b'
-    if (-not $readOnly -and $prompt -match '(?i)\b(?:fix|implement|add|change|update|refactor|rename|remove|delete|create|write|make|build|repair|convert|migrate|replace)\b') {
+    $imperative = '(?im)(?:^|[.!:;]\s+)(?:please\s+)?(?:stop|return|preserve|keep|mark|merge|parse|handle|support|ensure|allow|prevent|avoid|enable|disable|set|move|split|extend|improve|restore|reject|refuse|accept|respect|treat|prefer|apply|expose|exclude|skip|ignore|validate|raise|throw|emit|limit|clear|reset|redraw|show|hide)\b'
+    $changeVerb = '(?:fix|implement|add|edit|change|update|refactor|rename|remove|delete|create|write|make|build|repair|convert|migrate|replace)'
+    $intent = ($prompt -replace $restriction, '') -replace "(?i)\b(?:do not|don't|never|without)\s+$changeVerb\b", ''
+    # "How do I fix ...?" asks for an explanation. A later "Fix it" or "and fix it" still requests a change.
+    if ($prompt -match '(?i)^\s*(?:(?:how|why|what|where|when)\b|(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:explain|describe|(?:show|tell)\s+me)\b)' -and
+        $prompt -notmatch "(?im)(?:[.!?;]\s+|,\s*(?:then\s+)?|\b(?:and|then)\s+)(?:please\s+)?$changeVerb\b") {
+        return 'question'
+    }
+    if (-not $readOnly -and ($intent -match "(?i)\b$changeVerb\b" -or
+            $intent -match '(?i)\bget\b[^.!?;\r\n]{0,180}\b(?:working|passing|running|to\s+(?:work|pass|run))\b' -or
+            $intent -match '(?i)\bcontinue\s+(?:working|(?:implement|fix|edit|refactor|updat|chang|writ)ing)\b')) {
         'fix'
     }
     elseif ($prompt -match '(?i)\b(?:bugs?|defects?|issues?|review|inspect)\b') {
@@ -141,19 +149,19 @@ function Get-RunPolicyKeepGoingMessage {
     @{ Kind = 'KeepGoing'; Text = 'You did not call any tools. You should continue calling tools until you have completed your task. If the task is complete, provide the final answer. Remember that the user cannot answer any questions.' }
 }
 function Get-RunPolicyUnchangedMessage {
-    # An unattended change request that answers without changing a file is asked once to make the change: a live run
+    # An unattended or interactive Auto change request that answers without a change is asked once to make it: a live run
     # ended on "next I would add it" with nothing done, and no one could reply to the proposal.
     [CmdletBinding()]
     [OutputType([hashtable])]
     param([Parameter(Mandatory)]$View)
-    if (-not $View.Headless -or $View.Memory.Unchanged -or $View.Progress.Changes -or [string]::IsNullOrWhiteSpace($View.Answer) -or (Get-RunPolicyTaskKind $View) -cne 'fix') {
+    if ((-not $View.Headless -and $View.State.Config.Autonomy -cne 'Auto') -or $View.Memory.Unchanged -or $View.Progress.Changes -or [string]::IsNullOrWhiteSpace($View.Answer) -or (Get-RunPolicyTaskKind $View) -cne 'fix') {
         return
     }
     $View.Memory.Unchanged = $true
-    @{ Kind = 'Unchanged'; Text = "<EPHEMERAL_MESSAGE>`nThe user asked for a change and cannot answer questions, but this run has not changed any file. Make the change now and verify it. If no change is needed, or a command already made it, say so in your final answer.`n</EPHEMERAL_MESSAGE>" }
+    @{ Kind = 'Unchanged'; Text = "<EPHEMERAL_MESSAGE>`nThe user asked for a change, but this run has not changed any file. Continue the requested work and verify it. If no change is needed, a command already made it, or a concrete blocker prevents it, explain that in your final answer.`n</EPHEMERAL_MESSAGE>" }
 }
 function Get-RunPolicyUnfinishedMessage {
-    # An unattended change whose answer says the work is unfinished is asked once to continue: Luna runs stopped on
+    # An unattended or interactive Auto change whose answer says the work is unfinished is asked once to continue: Luna runs stopped on
     # "the focused test still fails ... the next fix should" (h-hist-18) and on a test they knew was broken (h-hist-15)
     # with most of their steps unused, and on "The focused test **failed** ... needs debugging" (h-hist-20). A test
     # that failed before the fix is not unfinished work.
@@ -161,12 +169,12 @@ function Get-RunPolicyUnfinishedMessage {
     [OutputType([hashtable])]
     param([Parameter(Mandatory)]$View)
     $pattern = '(?i)\b(?:(?:is|remains)\s+(?:still\s+)?not\s+(?:yet\s+)?(?:complete|completed|done|finished)|(?:is|remains)\s+(?:incomplete|unverified)|still\s+fail(?:s|ing)?|(?:test|check)s?\s+failed\b(?!\s+(?:before|without))|needs?\s+(?:more\s+|further\s+)?debugging|the\s+next\s+fix\s+(?:should|would|is))\b'
-    if (-not $View.Headless -or $View.Memory.Unfinished -or -not $View.Progress.Changes -or $View.StepsRemaining -le 0 -or
+    if ((-not $View.Headless -and $View.State.Config.Autonomy -cne 'Auto') -or $View.Memory.Unfinished -or -not $View.Progress.Changes -or $View.StepsRemaining -le 0 -or
         ([string]$View.Answer).Replace('*', '') -notmatch $pattern -or (Get-RunPolicyTaskKind $View) -cne 'fix') {
         return
     }
     $View.Memory.Unfinished = $true
-    @{ Kind = 'Unfinished'; Text = "<EPHEMERAL_MESSAGE>`nYour answer says the work is not finished (`"$($Matches[0])`"), and the user cannot answer questions. Continue now: make the next change you described and rerun its check. If it cannot be done, say why in your final answer.`n</EPHEMERAL_MESSAGE>" }
+    @{ Kind = 'Unfinished'; Text = "<EPHEMERAL_MESSAGE>`nYour answer says the work is not finished (`"$($Matches[0])`"). Continue the requested work: fix the remaining problem and rerun its check. If a concrete blocker prevents that, explain it in your final answer.`n</EPHEMERAL_MESSAGE>" }
 }
 function Invoke-RunPolicySteering {
     [CmdletBinding()]

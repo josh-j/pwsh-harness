@@ -238,7 +238,7 @@ function New-PowerShellOperation {
                 ''
             })
         WorkingDirectory = Get-HarnessOperationDirectory $State; TimeoutSeconds = $State.Config.RunTimeoutSeconds
-        SaveEncoding  = $State.Config.SaveEncoding
+        SaveEncoding  = $State.Config.SaveEncoding; Sandbox = Get-PowerShellSandboxMode $State.Config
         Id            = [guid]::NewGuid().ToString('N')
         ResultHash = Get-PowerShellResultHash $State.LastResult; Risks = $risks.ToArray(); Result = $State.LastResult; Completed = $false
     }

@@ -176,7 +176,7 @@ function Get-AgentWorkspaceListing {
     # otherwise every file without following links, capped just above $script:PackWorkspaceMaxFiles. Excluded and
     # .agentsignore paths are left out unless the user included them.
     [CmdletBinding()]
-    param($State, [string]$Root, $Context, [string]$Scope = '')
+    param($State, [string]$Root, $Context, [string]$Scope = '', [switch]$RequireComplete)
     $scopePath = $Scope ? (Resolve-AgentToolPath -State $State -Root $Root -Path $Scope -Context $Context -InventoryRoot) : $Root
     $Scope = ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Root, $scopePath))
     $pathspec = $Scope -cne '.' ? @('--', (':(literal)' + $Scope)) : @()
@@ -218,6 +218,11 @@ function Get-AgentWorkspaceListing {
                 $files.Add((ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($Root, $item.FullName))))
             }
         }
+    }
+    if ($RequireComplete -and $files.Count -gt $script:PackWorkspaceMaxFiles) {
+        $failure = New-AgentRefusal -Code DirectoryRulesRequired -Message 'Command not executed: directory instruction discovery exceeds the filesystem inventory bound.' -Next 'Use a narrower command working directory so its directory rules can be reviewed first.'
+        $failure.Data['AgentNotExecuted'] = $true
+        throw $failure
     }
     @($files | Where-Object { & $permitted $_ })
 }

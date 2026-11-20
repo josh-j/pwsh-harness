@@ -52,6 +52,9 @@ function Invoke-EngineAgentTool {
     param($Store, $Loop, $Context, $Call)
     $entry = $Loop.Tools[$Call.Name]
     try {
+        if ($Loop.Run.Mode -ceq 'ReadOnly' -and $entry.Policy -cne 'ReadOnly') {
+            throw 'ReadOnly mode does not permit commands or file changes. Select Approve or Auto explicitly to implement the plan.'
+        }
         $auto = $Loop.Run.Mode -ceq 'Auto'
         $initialHash = $entry.Builtin ? '' : (Get-EngineExtensionSourceHash $Store $entry.Extension)
         Assert-EngineAgentToolAuthority -Store $Store -Entry $entry -Auto $auto -SourceHash $initialHash

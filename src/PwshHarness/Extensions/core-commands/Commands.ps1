@@ -214,10 +214,24 @@ function Initialize-CoreCommandCommand {
     $script:Harness.Commands.Add('resume', {
             param($c)
             if (-not $c.Arguments) {
-                return (Get-CoreCommandSession -Config $c.State.Config | Out-String)
+                $sessions = @(Get-CoreCommandSession -Config $c.State.Config | Sort-Object LastWriteTime, BaseName -Descending)
+                if (-not $sessions.Count) {
+                    return 'No saved sessions.'
+                }
+                $number = 0
+                return ((@('Saved sessions, newest first; /resume N, /resume last, or /resume session-id:') + @($sessions | ForEach-Object { $number++; "$number. $($_.BaseName)  $($_.LastWriteTime)" })) -join "`n")
             }
             if ($c.State.Busy) {
                 throw 'Cannot resume another conversation while an operation is running. Cancel it and wait for it to finish.'
+            }
+            $sessions = @(Get-CoreCommandSession -Config $c.State.Config | Sort-Object LastWriteTime, BaseName -Descending)
+            if (-not @($sessions | Where-Object BaseName -CEQ $c.Arguments).Count) {
+                if ($c.Arguments -ceq 'last' -and $sessions.Count) {
+                    $c.Arguments = $sessions[0].BaseName
+                }
+                elseif ($c.Arguments -cmatch '\A[1-9][0-9]{0,5}\z' -and [int]$c.Arguments -le $sessions.Count) {
+                    $c.Arguments = $sessions[[int]$c.Arguments - 1].BaseName
+                }
             }
             $entries = @(Get-CoreCommandSession -Id $c.Arguments -Config $c.State.Config)
             $script:Harness.Events.Publish('ext.core-commands.ConversationReset', @{ SessionId = $c.State.SessionId })
@@ -239,7 +253,7 @@ function Initialize-CoreCommandCommand {
             }
             $script:Harness.Events.Publish('ext.core-commands.ConversationRestored', @{ SessionId = $c.State.SessionId })
             "Resumed $($c.Arguments)."
-        }, 'List sessions or /resume session-id.')
+        }, 'List numbered sessions or /resume N|last|session-id.')
 }
 function Invoke-CoreCommandConfigCommand {
     [CmdletBinding()]

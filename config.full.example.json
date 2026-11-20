@@ -99,6 +99,7 @@
   "RetryCount": 3,
   "RetryMaxSeconds": 30.0,
   "Run.InlineCommandMaxChars": 4096,
+  "Run.Sandbox": "Off",
   "RunTimeoutSeconds": 60,
   "SaveEncoding": "utf8NoBOM",
   "Scaffold": true,

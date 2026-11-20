@@ -6,7 +6,7 @@ function Invoke-PwshHarness {
     #>
     [CmdletBinding()]
     [OutputType([HarnessTurnResult], [string])]
-    param([Parameter(Mandatory)][string]$Prompt, [string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey, [switch]$SaveConfig, [switch]$NoValidate, [switch]$PassThru, [switch]$Agent, [ValidateSet('Approve', 'Auto')][string]$Autonomy,
+    param([Parameter(Mandatory)][string]$Prompt, [string]$Provider, [string]$Model, [string]$BaseUrl, [ValidateSet('code', 'auto', 'chat')][string]$Behavior, [Security.SecureString]$ApiKey, [switch]$SaveConfig, [switch]$NoValidate, [switch]$PassThru, [switch]$Agent, [ValidateSet('Approve', 'Auto', 'ReadOnly')][string]$Autonomy,
         [hashtable]$Config, [string]$ConfigPath, [string]$Path, [string[]]$IncludeFiles = @(), [switch]$IncludeDiff,
         [hashtable]$Options = @{}, [object]$State, [object]$HarnessHost, [scriptblock]$OnToken,
         [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None)

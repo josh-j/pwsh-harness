@@ -4,7 +4,7 @@
 class HarnessAgentRun : HarnessRecord {
     [string]$Id
     [string]$SessionId
-    [ValidateSet('Approve', 'Auto', IgnoreCase = $false, ErrorMessage = 'Invalid agent run identity, mode, root, epoch or UTC deadline.')][string]$Mode
+    [ValidateSet('Approve', 'Auto', 'ReadOnly', IgnoreCase = $false, ErrorMessage = 'Invalid agent run identity, mode, root, epoch or UTC deadline.')][string]$Mode
     [long]$Epoch
     [string]$ContextRoot
     [datetime]$StartedUtc

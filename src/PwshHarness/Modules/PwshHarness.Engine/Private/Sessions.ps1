@@ -25,7 +25,7 @@ function Assert-EngineAuditAdmission {
     param($State, [long]$AdditionalBytes = 0)
     $size = Get-EngineAuditSize $State
     if ($size.Bytes + $AdditionalBytes -ge $State.Config.'Session.MaxAuditBytes' -or $size.Records -ge $State.Config.'Session.MaxAuditRecords') {
-        $failure = [InvalidOperationException]::new('Session audit limit reached. Existing evidence and pending approvals are retained. Use /export path.md or keep the saved journal, then start a new session or explicitly raise Session.MaxAuditBytes / Session.MaxAuditRecords. No new work was started.')
+        $failure = [InvalidOperationException]::new('Session audit limit reached. Existing evidence and pending approvals are retained. Cancel pending work and use /compact to continue with bounded context while retaining earlier evidence, or /export path.md and start a new session. No new work was started.')
         $failure.Data['FailureOrigin'] = 'SessionAuditLimit'
         $failure.Data['AgentStopReason'] = 'AuditLimit'
         throw $failure

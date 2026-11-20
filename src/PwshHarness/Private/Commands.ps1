@@ -21,7 +21,7 @@ function Resolve-HarnessAgentSelection {
     $Options.Remove('Autonomy')
     if ($mode) {
         # Mode names are case-insensitive input; everything after this compares the canonical name.
-        $mode = @(@('Approve', 'Auto') | Where-Object { $_ -eq [string]$mode }) + @([string]$mode) | Select-Object -First 1
+        $mode = @(@('Approve', 'Auto', 'ReadOnly') | Where-Object { $_ -eq [string]$mode }) + @([string]$mode) | Select-Object -First 1
     }
     if ($BoundParameters.ContainsKey('SaveConfig') -and $BoundParameters['SaveConfig'] -and $mode -ceq 'Auto') {
         throw 'Autonomy=Auto cannot be persisted; select it explicitly for each conversation.'
@@ -29,7 +29,7 @@ function Resolve-HarnessAgentSelection {
     if ($BoundParameters.ContainsKey('Agent')) {
         $Options['Agent.Enabled'] = [bool]$BoundParameters['Agent']
     }
-    if ($mode -ceq 'Auto') {
+    if ($mode -cin @('Auto', 'ReadOnly')) {
         $Options['Agent.Enabled'] = $true
     }
     [pscustomobject]@{ Mode = $mode; Source = $source; Options = $Options }

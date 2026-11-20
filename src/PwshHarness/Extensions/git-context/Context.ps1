@@ -96,13 +96,23 @@ function Get-GitContextGitContext {
     $reason = Get-GitContextRootReason $root
     $comparison = Get-HarnessPathComparison
     $explicit = @($Request.Config.RagPaths | Where-Object { [IO.Path]::GetFullPath($_).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).Equals($root.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $comparison) }).Count -gt 0
+    $tracked = $null
     if ($isRepository -and -not $reason -and -not $explicit) {
-        $probe = Get-GitContextListing $root -Limit 5001 -Depth 2 -Request $Request
-        if ($probe.Entries.Count -gt 5000) {
-            $reason = 'more than 5000 entries at the top two levels; explicit indexing required'
+        # Dependency folders ignored by Git must not exhaust discovery before source is considered.
+        $tracked = Invoke-GitContextGit $root @('ls-files', '--cached', '--others', '--exclude-standard', '-z') -RawOutput
+        $entries = [Collections.Generic.HashSet[string]]::new([StringComparer]::FromComparison($comparison))
+        foreach ($name in $tracked -split "`0" | Where-Object { $_ }) {
+            $parts = $name.Split('/', 3)
+            $null = $entries.Add($parts[0])
+            if ($parts.Count -gt 1) {
+                $null = $entries.Add($parts[0] + '/' + $parts[1])
+            }
+            if ($entries.Count -gt 5000) {
+                break
+            }
         }
-        elseif ($probe.Truncated) {
-            $reason = 'directory discovery budget exceeded; explicit indexing required'
+        if ($entries.Count -gt 5000) {
+            $reason = 'more than 5000 eligible entries at the top two levels; explicit indexing required'
         }
     }
     $autoIndexAllowed = $isRepository -and (-not $reason -or $explicit)
@@ -145,7 +155,9 @@ function Get-GitContextGitContext {
         if ($areas) {
             $scope += "`n$areas"
         }
-        $tracked = Invoke-GitContextGit $root @('ls-files', '--cached', '--others', '--exclude-standard', '-z') -RawOutput
+        if ($null -eq $tracked) {
+            $tracked = Invoke-GitContextGit $root @('ls-files', '--cached', '--others', '--exclude-standard', '-z') -RawOutput
+        }
         $files = @($tracked -split "`0" |
                 Where-Object {
                     $_ -and
@@ -188,6 +200,36 @@ function Get-GitContextGitContext {
         })
     $selected = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
     $stableFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    if ($Request.Agent) {
+        # Rules are explicitly named instruction files, even when Git ignores them. This exception never
+        # adds neighboring ignored files to the inventory, and still honors exclusions and .agentsignore.
+        $directory = $requestedPath
+        for ($level = 0; $directory -and $level -lt 8; $level++) {
+            if (Get-GitContextRootReason $directory) {
+                break
+            }
+            $rule = Join-Path $directory 'AGENTS.md'
+            $relative = ConvertTo-HarnessSlashPath ([IO.Path]::GetRelativePath($root, $rule))
+            $hidden = @(Get-GitContextAgentsIgnore $directory | Where-Object { (New-HarnessContextPathPattern -Pattern $_ -Root $directory).IsMatch('AGENTS.md') })
+            if (-not $hidden.Count -and [IO.File]::Exists($rule)) {
+                try {
+                    $null = Get-HarnessPathSnapshot -Path $rule -NoHardLinks
+                    $selected[$relative] = 10
+                    $null = $stableFiles.Add($relative)
+                }
+                catch {
+                    $Request.CancellationToken.ThrowIfCancellationRequested()
+                }
+            }
+            if ($isRepository -and $directory.Equals($root, $comparison)) {
+                break
+            }
+            $directory = [IO.Path]::GetDirectoryName($directory)
+        }
+        if ($level -eq 8 -and $directory) {
+            $items.Add([pscustomobject]@{ Name = 'Instructions'; Content = 'Ancestor instruction discovery stopped after eight directories; explicitly add any higher project instructions that apply.'; Priority = 0; Kind = 'Metadata'; Stability = 'Volatile' })
+        }
+    }
     if ($Request.AutoFiles -or $Request.Agent) {
         foreach ($file in $files) {
             Invoke-HarnessCheckpoint $Request
@@ -201,7 +243,7 @@ function Get-GitContextGitContext {
                     $isManifest = $data.ContainsKey('FunctionsToExport') -or $data.ContainsKey('PowerShellVersion')
                 }
                 catch {
-                    $isManifest = $false 
+                    $isManifest = $false
                 }
             }
             if ($isConvention -or $isReadme -or $isManifest) {
@@ -226,7 +268,7 @@ function Get-GitContextGitContext {
         ConvertTo-HarnessSlashPath $Request.Query
     }
     else {
-        '' 
+        ''
     }
     $queryFiles = if ($autoIndexAllowed) {
         $known = [Collections.Generic.HashSet[string]]::new([string[]]@($files), [StringComparer]::Ordinal)
@@ -239,13 +281,13 @@ function Get-GitContextGitContext {
         $tracked.ToArray()
     }
     else {
-        $files 
+        $files
     }
     $leafCounts = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
     foreach ($file in $queryFiles) {
         $leaf = [IO.Path]::GetFileName($file)
         if (-not $leafCounts.ContainsKey($leaf)) {
-            $leafCounts[$leaf] = 0 
+            $leafCounts[$leaf] = 0
         }
         $leafCounts[$leaf]++
     }
@@ -271,7 +313,7 @@ function Get-GitContextGitContext {
         $unique = $leafCounts[$leaf] -eq 1
         $names = @($file)
         if ($unique) {
-            $names += $leaf 
+            $names += $leaf
         }
         foreach ($name in $names) {
             $pattern = '(?<![\w./\\-])' + [regex]::Escape($name) + '(?![\w/\\-]|\.[\w])'
@@ -354,10 +396,10 @@ function Get-GitContextGitContext {
                             '(unspecified)'
                         }
                         $moduleVersion = if ($manifest.ContainsKey('ModuleVersion')) {
-                            [string]$manifest.ModuleVersion 
+                            [string]$manifest.ModuleVersion
                         }
                         else {
-                            '(unspecified)' 
+                            '(unspecified)'
                         }
                         $content = "Manifest summary: PowerShellVersion=$version; Name=$([IO.Path]::GetFileNameWithoutExtension($file)); Version=$moduleVersion; FunctionsToExport=$exports"
                     }
@@ -390,10 +432,10 @@ function Get-GitContextGitContext {
                 Priority  = $selected[$file]
                 Kind      = 'File'
                 Stability = if ($stableFile) {
-                    'Stable' 
+                    'Stable'
                 }
                 else {
-                    'Volatile' 
+                    'Volatile'
                 }
             })
     }
@@ -510,6 +552,119 @@ function Resolve-GitContextContextSelection {
     $selectedFiles
 }
 
+function Set-GitContextDiffMode {
+    [CmdletBinding()]
+    param($State, [string]$Mode)
+    if ($Mode -and $Mode -notin @('off', 'staged', 'unstaged', 'all')) {
+        throw 'Usage: /context diff [off|staged|unstaged|all]'
+    }
+    if ($Mode -ceq 'off') {
+        $State.Context.IncludeDiff = $false
+    }
+    elseif (-not $Mode) {
+        $State.Context.IncludeDiff = -not $State.Context.IncludeDiff
+    }
+    elseif ($State.Context.IncludeDiff -and $State.Context.DiffMode -ceq $Mode) {
+        $State.Context.IncludeDiff = $false
+    }
+    else {
+        $State.Context.DiffMode = $Mode
+        $State.Context.IncludeDiff = $true
+    }
+    $null = Get-GitContextProjectContext $State
+    "Diff inclusion: $($State.Context.IncludeDiff ? $State.Context.DiffMode + ' for subsequent turns' : 'off')."
+}
+function Get-GitContextWorkingDiff {
+    [CmdletBinding()]
+    param($Context, [string]$Mode = 'all')
+    $state = $Context.State
+    $root = Invoke-GitContextGit -Path (Get-HarnessOperationDirectory $state) -Arguments @('rev-parse', '--show-toplevel') -Request $Context
+    if (-not $root) {
+        return 'No Git repository in the active workspace.'
+    }
+    $hidden = @(Get-GitContextAgentsIgnore $root) + @($state.Context.ExcludeFiles)
+    $ignored = [Collections.Generic.HashSet[string]]::new([string[]]@((Invoke-GitContextGit -Path $root -Arguments @('ls-files', '--cached', '--ignored', '--exclude-standard', '-z') -Request $Context -RawOutput) -split "`0"), [StringComparer]::Ordinal)
+    $safe = {
+        param($Name)
+        if (-not $Name -or $Name -match '[\p{Cc}\p{Cf}]|(^|/)(\.git|\.ssh|\.env[^/]*|credentials[^/]*|\.credentials-[^/]*|extension-grants\.json|id_(rsa|dsa|ecdsa|ed25519)(?:_sk)?|\.git-credentials|\.netrc|\.npmrc|\.pypirc)(/|$)|\.(pfx|p12|pem|key|jks|kdbx)$' -or $ignored.Contains($Name)) {
+            return $false
+        }
+        foreach ($pattern in $hidden) {
+            $pattern = ConvertTo-HarnessContextPattern -Root $root -Pattern $pattern
+            if ((New-HarnessContextPathPattern -Pattern $pattern -Root $root).IsMatch($Name) -or $Name.StartsWith($pattern.TrimEnd('/') + '/', (Get-HarnessPathComparison))) {
+                return $false
+            }
+        }
+        $full = [IO.Path]::GetFullPath($Name, $root)
+        foreach ($protected in @($script:Harness.ConfigService.GetPath(), $state.Config.ConfigPath, $state.Config.SessionDirectory, $state.Config.DataDirectory)) {
+            if ($protected) {
+                $protected = [IO.Path]::GetFullPath($protected)
+                if ($full.Equals($protected, (Get-HarnessPathComparison)) -or $full.StartsWith($protected.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar, (Get-HarnessPathComparison))) {
+                    return $false
+                }
+            }
+        }
+        try {
+            $null = Get-HarnessPathSnapshot -Path (Join-Path $root $Name) -AllowMissing -NoHardLinks
+        }
+        catch {
+            return $false
+        }
+        $true
+    }
+    $text = [Text.StringBuilder]::new()
+    $limit = [Math]::Min(32768, $state.Config.'Agent.MaxReadBytes')
+    foreach ($kind in @('staged', 'unstaged', 'untracked')) {
+        if ($Mode -cne 'all' -and $kind -cne $Mode) {
+            continue
+        }
+        $query = $kind -ceq 'untracked' ? @('ls-files', '--others', '--exclude-standard', '-z') : @('diff', '--name-only', '-z')
+        if ($kind -ceq 'staged') {
+            $query += '--cached'
+        }
+        $names = @((Invoke-GitContextGit -Path $root -Arguments $query -Request $Context -RawOutput) -split "`0" | Where-Object { & $safe $_ })
+        if (-not $names.Count) {
+            continue
+        }
+        $null = $text.AppendLine("$kind changes:")
+        if ($kind -ceq 'untracked') {
+            foreach ($name in $names | Select-Object -First 200) {
+                try {
+                    $file = Read-HarnessTextFile -Path (Join-Path $root $name) -MaximumBytes $state.Config.'Agent.MaxFileBytes' -NoHardLinks
+                }
+                catch {
+                    $Context.CancellationToken.ThrowIfCancellationRequested()
+                    $null = $text.AppendLine("+++ $name [content skipped: not bounded regular UTF-8 text]")
+                    continue
+                }
+                $part = Get-HarnessTextExcerpt -Text ("+++ $name (untracked)`n" + $file.Text + "`n") -MaxBytes ([Math]::Max(0, $limit - [Text.Encoding]::UTF8.GetByteCount($text.ToString())))
+                $null = $text.Append($part.Text)
+                if ($part.Truncated) {
+                    $null = $text.AppendLine("`n[Diff truncated; inspect a narrower path with file tools.]"); break
+                }
+            }
+        }
+        else {
+            $arguments = @('diff', '--no-ext-diff', '--no-textconv') + @($kind -ceq 'staged' ? @('--cached') : @()) + @('--') + @($names | Select-Object -First 200 | ForEach-Object { ':(literal)' + $_ })
+            $part = Invoke-GitContextGit -Path $root -Arguments $arguments -Request $Context -MaximumBytes ([Math]::Max(1, $limit - [Text.Encoding]::UTF8.GetByteCount($text.ToString()))) -Result
+            if ($part.ExitCode -ne 0 -and -not $part.Truncated) {
+                throw 'Cannot inspect the working-tree diff.'
+            }
+            $null = $text.AppendLine($part.Text)
+            if ($part.Truncated) {
+                $null = $text.AppendLine('[Diff truncated; inspect a narrower path with file tools.]')
+            }
+        }
+        if ($names.Count -gt 200) {
+            $null = $text.AppendLine('[Diff truncated: first 200 eligible paths.]')
+        }
+        if ([Text.Encoding]::UTF8.GetByteCount($text.ToString()) -ge $limit) {
+            break
+        }
+    }
+    $display = $text.Length ? $text.ToString() : 'No eligible working-tree changes.'
+    $script:Harness.OperationControl.ProtectText($state, $display)
+}
 function Initialize-GitContextContextCommand {
     # Use the public extension seam; core Commands.ps1 does not own these registrations.
     [CmdletBinding()]
@@ -565,6 +720,12 @@ function Initialize-GitContextContextCommand {
         }, 'Drop matching files; all clears file selections, automatic file content, and diff inclusion.')
     $script:Harness.Commands.Add('context', {
             param($c)
+            if ($c.Arguments -match '^diff(?:\s+(off|staged|unstaged|all))?$') {
+                return Set-GitContextDiffMode -State $c.State -Mode ([string]$Matches[1])
+            }
+            if ($c.Arguments) {
+                throw 'Usage: /context [diff [off|staged|unstaged|all]]'
+            }
             $context = Get-GitContextProjectContext $c.State
             $included = if ($context.Project) {
                 $context.Project.Included -join ', '
@@ -583,29 +744,15 @@ function Initialize-GitContextContextCommand {
                     })
                 "Diff: $(if ($context.IncludeDiff) { $context.DiffMode } else { 'off' })"
             ) -join "`n"
-        }, 'List included sections/files, estimated tokens/budget, truncation, and diff mode.')
+        }, 'List context; /context diff [off|staged|unstaged|all] controls future prompt inclusion.')
     $script:Harness.Commands.Add('diff', {
             param($c)
             $mode = $c.Arguments.ToLowerInvariant()
             if ($mode -and $mode -notin @('staged', 'unstaged', 'all')) {
                 throw 'Usage: /diff [staged|unstaged|all]'
             }
-            if (-not $mode) {
-                $c.State.Context.IncludeDiff = -not $c.State.Context.IncludeDiff
-            }
-            elseif ($c.State.Context.IncludeDiff -and $c.State.Context.DiffMode -eq $mode) {
-                $c.State.Context.IncludeDiff = $false
-            }
-            else {
-                $c.State.Context.DiffMode = $mode
-                $c.State.Context.IncludeDiff = $true
-            }
-            $null = Get-GitContextProjectContext $c.State
-            if (-not $c.State.Context.IncludeDiff) {
-                return 'Diff inclusion: off.'
-            }
-            "Diff inclusion: $($c.State.Context.DiffMode) for subsequent turns."
-        }, 'Toggle diff inclusion; choose staged, unstaged, or all. Repeat the mode to turn it off.')
+            Get-GitContextWorkingDiff -Context $c -Mode ($mode ? $mode : 'all')
+        }, 'Inspect bounded staged, unstaged and untracked changes; /context diff controls prompt inclusion.')
     $script:Harness.Commands.Add('tree', {
             param($c)
             $depth = 3
