@@ -1,4 +1,30 @@
 #Requires -Version 7.6
+function Get-OpenAIThoughtSignature {
+    [CmdletBinding()]
+    param($Extra, [string[]]$Redact = @(), [switch]$AllowThought)
+    if ($Extra -isnot [Collections.IDictionary] -or $Extra.psbase.Count -ne 1 -or 'google' -cnotin @($Extra.psbase.Keys) -or
+        $Extra.google -isnot [Collections.IDictionary] -or -not $Extra.google.psbase.Count -or
+        @($Extra.google.psbase.Keys | Where-Object { $_ -cne 'thought_signature' -and (-not $AllowThought -or $_ -cne 'thought') }).Count -or
+        ($Extra.google.ContainsKey('thought') -and $Extra.google.thought -isnot [bool])) {
+        throw 'Invalid Google signature field.'
+    }
+    if (-not $Extra.google.ContainsKey('thought_signature')) {
+        return ''
+    }
+    $signature = $Extra.google.thought_signature
+    if ($signature -isnot [string] -or -not $signature.Length) {
+        throw 'Invalid Google signature field.'
+    }
+    if ([Text.Encoding]::UTF8.GetByteCount($signature) -gt 2097152) {
+        throw 'Google signature exceeds the size limit.'
+    }
+    if ((Protect-HarnessText $signature $Redact) -cne $signature) {
+        $failure = [InvalidOperationException]::new('Google signature contains a credential.')
+        $failure.Data['ProtectedCredential'] = $true
+        throw $failure
+    }
+    $signature
+}
 function Add-OpenAIToolDelta {
     [CmdletBinding()]
     param([hashtable]$Calls, $StreamEvent, [bool]$Enabled, [switch]$Agent)
@@ -25,17 +51,59 @@ function Add-OpenAIToolDelta {
             throw 'Invalid tool call array.'
         }
         foreach ($delta in $choice.delta.tool_calls) {
-            if ($delta -isnot [Collections.IDictionary] -or -not $delta.ContainsKey('index') -or
+            $argumentDelta = $null
+            $signatureDelta = $null
+            $signatureGrowth = 0
+            $inferred = $false
+            if ($delta -is [Collections.IDictionary] -and -not $delta.ContainsKey('index')) {
+                # Google's compatibility endpoint can emit whole calls without indices. Infer only a fresh,
+                # complete, self-identifying call; a partial delta has no trustworthy correlation target.
+                if ($delta.id -isnot [string] -or $delta.id -cnotmatch '^[A-Za-z0-9_-]{1,128}$' -or $delta.type -cne 'function' -or
+                    $delta.function -isnot [Collections.IDictionary] -or $delta.function.name -isnot [string] -or -not $delta.function.name.Trim() -or
+                    $delta.function.arguments -isnot [string] -or @($Calls.Values | Where-Object Id -CEQ $delta.id).Count) {
+                    throw 'An indexless tool call must be complete and have a fresh identity.'
+                }
+                if (($Agent -and [Text.Encoding]::UTF8.GetByteCount($delta.function.arguments) -gt 2097152) -or
+                    (-not $Agent -and $delta.function.arguments.Length -gt 1048576)) {
+                    throw 'Tool arguments exceed the size limit.'
+                }
+                $document = [Text.Json.JsonDocument]::Parse($delta.function.arguments)
+                try {
+                    if ($document.RootElement.ValueKind -ne 'Object') {
+                        throw 'Tool arguments must be an object.'
+                    }
+                    Assert-OpenAIToolJson -Value $document.RootElement
+                }
+                finally {
+                    $document.Dispose()
+                }
+                if ($Calls.ContainsKey($Calls.Count)) {
+                    throw 'Ambiguous indexless tool call order.'
+                }
+                $delta = @{} + $delta
+                $delta.index = $Calls.Count
+                $inferred = $true
+            }
+            if ($delta -isnot [Collections.IDictionary] -or
                 $delta.index -isnot [long] -and $delta.index -isnot [int] -or $delta.index -lt 0 -or $delta.index -ge ($Agent ? 8 : 64)) {
                 throw 'Invalid tool call index.'
             }
             $index = [int]$delta.index
             if (-not $Calls.ContainsKey($index)) {
-                $Calls[$index] = @{ Id = ''; Name = ''; Arguments = [Text.StringBuilder]::new(); ArgumentDeltas = 0; Bytes = 0; Encoder = [Text.Encoding]::UTF8.GetEncoder() }
+                $Calls[$index] = @{ Id = ''; Name = ''; Arguments = [Text.StringBuilder]::new(); ArgumentDeltas = 0; Bytes = 0; Encoder = [Text.Encoding]::UTF8.GetEncoder(); Signature = ''; SignatureBytes = 0 }
+            }
+            if ($inferred) {
+                $Calls[$index].Id = $delta.id
+            }
+            elseif (-not $Agent -and $delta.ContainsKey('id') -and $delta.id -is [string] -and $delta.id -cmatch '^[A-Za-z0-9_-]{1,128}$') {
+                if ($Calls[$index].Id -and $Calls[$index].Id -cne $delta.id) {
+                    throw 'Tool call ID changed.'
+                }
+                $Calls[$index].Id = $delta.id
             }
             if ($Agent) {
-                if (@($delta.Keys | Where-Object { $_ -cnotin @('index', 'id', 'type', 'function') }).Count -or
-                    ($delta.function -and @($delta.function.Keys | Where-Object { $_ -cnotin @('name', 'arguments') }).Count)) {
+                if (@($delta.psbase.Keys | Where-Object { $_ -cnotin @('index', 'id', 'type', 'function', 'extra_content') }).Count -or
+                    ($delta.function -and @($delta.function.psbase.Keys | Where-Object { $_ -cnotin @('name', 'arguments') }).Count)) {
                     throw 'Unknown tool call field.'
                 }
                 if ($delta.ContainsKey('id')) {
@@ -45,6 +113,15 @@ function Add-OpenAIToolDelta {
                     }
                     $Calls[$index].Id = $delta.id
                 }
+            }
+            if ($delta.ContainsKey('extra_content')) {
+                $signature = Get-OpenAIThoughtSignature -Extra $delta.extra_content
+                # Signatures are opaque complete values, not argument deltas. Identical repeats are harmless.
+                if ($Calls[$index].Signature -and $Calls[$index].Signature -cne $signature) {
+                    throw 'Tool signature changed.'
+                }
+                $signatureDelta = $signature
+                $signatureGrowth = [Text.Encoding]::UTF8.GetByteCount($signature) - $Calls[$index].SignatureBytes
             }
             if ($delta.ContainsKey('type') -and $delta.type -cne 'function') {
                 throw 'Unsupported tool call type.'
@@ -63,17 +140,26 @@ function Add-OpenAIToolDelta {
                     }
                     $count = $Calls[$index].Encoder.GetByteCount($function.arguments.ToCharArray(), 0, $function.arguments.Length, $false)
                     $Calls[$index].Bytes += $count
-                    $total = $Agent ? 0 : $function.arguments.Length
-                    foreach ($call in $Calls.Values) {
-                        $total += $Agent ? $call.Bytes : $call.Arguments.Length
-                    }
-                    if (($Agent -and ($Calls[$index].Bytes -gt 2097152 -or $total -gt 8388608)) -or
-                        (-not $Agent -and $total -gt 1048576)) {
-                        throw 'Tool arguments exceed the size limit.'
-                    }
-                    $null = $Calls[$index].Arguments.Append($function.arguments)
-                    $Calls[$index].ArgumentDeltas++
+                    $argumentDelta = $function.arguments
                 }
+            }
+            $total = $Agent ? $signatureGrowth : ($null -ne $argumentDelta ? $argumentDelta.Length : 0)
+            $wireBytes = $signatureGrowth
+            foreach ($call in $Calls.Values) {
+                $total += $Agent ? ($call.Bytes + $call.SignatureBytes) : $call.Arguments.Length
+                $wireBytes += $call.Bytes + $call.SignatureBytes
+            }
+            if (($Agent -and ($Calls[$index].Bytes + $Calls[$index].SignatureBytes + $signatureGrowth -gt 2097152 -or $total -gt 8388608)) -or
+                (-not $Agent -and ($total -gt 1048576 -or $Calls[$index].Bytes + $Calls[$index].SignatureBytes + $signatureGrowth -gt 2097152 -or $wireBytes -gt 8388608))) {
+                throw 'Tool arguments exceed the size limit.'
+            }
+            if ($null -ne $argumentDelta) {
+                $null = $Calls[$index].Arguments.Append($argumentDelta)
+                $Calls[$index].ArgumentDeltas++
+            }
+            if ($null -ne $signatureDelta) {
+                $Calls[$index].Signature = $signatureDelta
+                $Calls[$index].SignatureBytes += $signatureGrowth
             }
         }
     }
@@ -113,7 +199,8 @@ function ConvertFrom-OpenAIAgentCall {
             throw 'Unknown tool or duplicate/missing tool call ID.'
         }
         $json = $call.Arguments.ToString()
-        if ((Protect-HarnessText ($call.Id + $call.Name + $json) $Redact) -cne ($call.Id + $call.Name + $json)) {
+        $protected = $call.Id + $call.Name + $json + $call['Signature']
+        if ((Protect-HarnessText $protected $Redact) -cne $protected) {
             $failure = [InvalidOperationException]::new('Agent tool call contains a credential.')
             $failure.Data['ProtectedCredential'] = $true
             throw $failure
@@ -124,7 +211,7 @@ function ConvertFrom-OpenAIAgentCall {
                 throw 'Tool arguments must be an object.'
             }
             Assert-OpenAIToolJson $document.RootElement
-            $arguments = $call.Arguments.ToString() | ConvertFrom-Json -AsHashtable -Depth 30 -ErrorAction Stop
+            $arguments = $call.Arguments.ToString() | ConvertFrom-Json -AsHashtable -Depth 30 -DateKind String -ErrorAction Stop
             New-HarnessFrozen (New-HarnessToolCall -Id $call.Id -Name $call.Name -Arguments $arguments)
         }
         finally {
@@ -141,7 +228,7 @@ function ConvertFrom-OpenAIToolProposal {
         }
         return ''
     }
-    if ($FinishReason -cne 'tool_calls') {
+    if ($FinishReason -cnotin @('tool_calls', 'stop')) {
         throw 'Incomplete tool call response; no operation prepared.'
     }
     $blocks = [Collections.Generic.List[string]]::new()
@@ -150,8 +237,11 @@ function ConvertFrom-OpenAIToolProposal {
         if ($call.Name -cne 'prepare_powershell') {
             throw 'Unsupported model tool; no operation prepared.'
         }
+        if ($call['Signature'] -and (Protect-HarnessText $call['Signature'] $Redact) -cne $call['Signature']) {
+            throw 'Google signature contains a credential.'
+        }
         try {
-            $proposalData = $call.Arguments.ToString() | ConvertFrom-Json -AsHashtable -Depth 30 -ErrorAction Stop
+            $proposalData = $call.Arguments.ToString() | ConvertFrom-Json -AsHashtable -Depth 30 -DateKind String -ErrorAction Stop
         }
         catch {
             throw 'Invalid tool argument JSON; no operation prepared.'

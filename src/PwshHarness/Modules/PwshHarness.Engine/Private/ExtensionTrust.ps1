@@ -33,11 +33,11 @@ function Assert-EngineCredentialAccess {
     [CmdletBinding()]
     param($Store, [string]$Extension, $Session, $Config, [bool]$Trusted, [string[]]$Origins)
     $origin = Get-HarnessCredentialOrigin $Config.BaseUrl
-    if (-not $Trusted) {
+    if (-not $Trusted -or $Origins.Count) {
         $scope = $Store.CredentialScope
         if ($origin -cnotin $Origins -or -not $scope -or $scope.Extension -cne $Extension -or
             -not [object]::ReferenceEquals($scope.Session, $Session) -or $scope.Origin -cne $origin -or
-            -not (Test-EngineExtensionGrant -Store $Store -Extension $Extension -Kind Credential -Name $origin)) {
+            (-not $Trusted -and -not (Test-EngineExtensionGrant -Store $Store -Extension $Extension -Kind Credential -Name $origin))) {
             throw 'Credential origin requires source-bound approval and an active provider request.'
         }
     }

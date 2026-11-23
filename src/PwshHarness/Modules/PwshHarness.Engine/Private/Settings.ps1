@@ -180,12 +180,18 @@ function Resolve-EngineSetting {
         $Providers = $Store.Points.Providers
     }
     $enabled = @($Providers.Values | Where-Object { $_.Extension -notin $Store.Config.Extensions.Disabled } | Sort-Object Name)
-    $connection = $enabled | Where-Object { $_['Defaults'] } | Select-Object -First 1
+    $connections = @($enabled | Where-Object { $_['Defaults'] })
+    $connection = $connections | Where-Object { $_.Name -ceq $Store['PreferredProvider'] } | Select-Object -First 1
+    if (-not $connection) {
+        $connection = $connections | Select-Object -First 1
+    }
     $builtin = $enabled | Where-Object { $Store.Known.ContainsKey($_.Extension) -and $Store.Known[$_.Extension].Source -ceq 'builtin' } | Select-Object -First 1
     $fallback = @{ Provider = ($connection ? $connection.Name : ($builtin ? $builtin.Name : '')); Model = ($connection ? $connection.Defaults.Model : '') }
     $values = @{}
     $explicit = @{}
-    foreach ($name in $Declarations.Keys) {
+    # Resolve the user's provider first; its defaults must not depend on hashtable or provider-name ordering.
+    $names = @($Declarations.Keys | Where-Object { $_ -ceq 'Provider' }) + @($Declarations.Keys | Where-Object { $_ -cne 'Provider' })
+    foreach ($name in $names) {
         $spec = $Declarations[$name]
         $value = $spec.Default
         $contextSource = $null
@@ -275,6 +281,15 @@ function Resolve-EngineSetting {
             $value = Resolve-EngineConfigContextPath -Store $Store -Config $contextSource
         }
         $values[$name] = $scalar ? $value : (Copy-EngineConfigValue $value)
+        if ($name -ceq 'Provider' -and $Providers.ContainsKey($value) -and $Providers[$value]['Defaults']) {
+            $connection = $Providers[$value]
+            $fallback.Model = $connection.Defaults.Model
+        }
+        elseif ($name -ceq 'Provider' -and $value -and -not $Providers.ContainsKey($value)) {
+            # A selected provider may load later in the transaction; another provider's environment is inactive.
+            $connection = $null
+            $fallback.Model = ''
+        }
     }
     if ($values.Autonomy -ceq 'Auto') {
         Write-EngineFault -Store $Store -Extension configuration -Point Autonomy -Failure 'Autonomy=Auto in configuration is inactive; explicit user activation is required.' -Warning

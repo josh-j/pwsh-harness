@@ -1,7 +1,54 @@
 #Requires -Version 7.6
 $script:ReasoningTurns = [Runtime.CompilerServices.ConditionalWeakTable[object, object]]::new()
+function Get-OpenAIPrivatePattern {
+    [CmdletBinding()]
+    param($Cache, $Calls, $Parts, $Details)
+    $values = [Collections.Generic.List[object]]::new()
+    $turns = @($Cache ? @($Cache.Turns.Values) : @())
+    foreach ($turn in $turns) {
+        foreach ($signature in @($turn['Signatures'] ? @($turn['Signatures'].Values) : @())) {
+            $values.Add($signature)
+        }
+        $values.Add($turn['MessageSignature'])
+        foreach ($part in @($turn['GoogleParts'] ? $turn['GoogleParts'] : @())) {
+            $values.Add($part.Signature)
+            if ($part.Thought) {
+                $values.Add($part.Text)
+            }
+        }
+        foreach ($detail in $turn.Details) {
+            foreach ($key in @('text', 'summary', 'data', 'signature')) {
+                $values.Add($detail[$key])
+            }
+        }
+    }
+    foreach ($call in @($Calls ? @($Calls.Values) : @())) {
+        $values.Add($call['Signature'])
+    }
+    foreach ($part in @($Parts ? $Parts : @())) {
+        $values.Add($part.Signature)
+        if ($part.Thought) {
+            $values.Add($part.Text)
+        }
+    }
+    foreach ($detail in @($Details ? @($Details.Values) : @())) {
+        foreach ($key in @('text', 'summary', 'data', 'signature')) {
+            $values.Add($detail[$key])
+        }
+    }
+    $patterns = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($value in $values) {
+        if ($value -is [Text.StringBuilder] -and $value.Length) {
+            $null = $patterns.Add($value.ToString(0, [Math]::Min(128, $value.Length)))
+        }
+        elseif ($value -is [string] -and $value.Length) {
+            $null = $patterns.Add($value.Substring(0, [Math]::Min(128, $value.Length)))
+        }
+    }
+    $patterns
+}
 function Invoke-OpenAIReasoningHandoff {
-    # Carries a session's native replay cache (reasoning details, text and exact call arguments) across a host reload.
+    # Carries a session's private native replay cache across a host reload; opaque signatures never enter messages.
     [CmdletBinding()]
     param([string]$Action, $State, $Data)
     $cache = $null
@@ -15,12 +62,89 @@ function Invoke-OpenAIReasoningHandoff {
     foreach ($key in $Data.Turns.Keys) {
         $turn = $Data.Turns[$key]
         $arguments = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+        $argumentBytes = 0L
         if ($turn.Arguments -is [Collections.IDictionary]) {
             foreach ($id in $turn.Arguments.Keys) {
-                $arguments[[string]$id] = [string]$turn.Arguments[$id]
+                $json = [string]$turn.Arguments[$id]
+                $bytes = [Text.Encoding]::UTF8.GetByteCount($json)
+                $argumentBytes += $bytes
+                if ($arguments.Count -ge 64 -or $bytes -gt 2097152 -or $argumentBytes -gt 8388608) {
+                    throw 'Tool arguments exceed the handoff size limit.'
+                }
+                $arguments[[string]$id] = $json
             }
         }
-        $turns[[string]$key] = @{ Details = @($turn.Details); Text = [string]$turn.Text; Arguments = $arguments }
+        $signatures = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+        $proposals = @()
+        if ($turn['Proposals']) {
+            if ($turn['Proposals'] -isnot [Collections.IList] -or $turn['Proposals'].Count -gt 64 -or
+                [long](($arguments.Values | Measure-Object Length -Sum).Sum) -gt 1048576) {
+                throw 'Invalid proposal replay handoff.'
+            }
+            $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            $proposals = @(foreach ($item in $turn['Proposals']) {
+                    if ($item -isnot [Collections.IDictionary] -or $item.Count -ne 2 -or @($item.Keys | Where-Object { $_ -cnotin @('Id', 'Proposal') }).Count -or
+                        $item.Id -isnot [string] -or $item.Id -cnotmatch '^[A-Za-z0-9_-]{1,128}$' -or -not $ids.Add($item.Id) -or
+                        $item.Proposal -isnot [string] -or -not $arguments.ContainsKey($item.Id)) {
+                        throw 'Invalid proposal replay handoff.'
+                    }
+                    $call = @{ Name = 'prepare_powershell'; Arguments = [Text.StringBuilder]::new($arguments[$item.Id]) }
+                    $prepared = ConvertFrom-OpenAIToolProposal -Calls @{ 0 = $call } -FinishReason stop -Redact @()
+                    if ($prepared -cne $item.Proposal) {
+                        throw 'Proposal replay handoff does not match the original call.'
+                    }
+                    @{ Id = $item.Id; Proposal = $prepared }
+                })
+        }
+        $signatureBytes = [long]0
+        foreach ($json in $arguments.Values) {
+            $signatureBytes += [Text.Encoding]::UTF8.GetByteCount($json)
+        }
+        if ($turn['Signatures'] -is [Collections.IDictionary]) {
+            foreach ($id in $turn['Signatures'].Keys) {
+                $signature = $turn['Signatures'][$id]
+                if ($signature -isnot [string] -or -not $signature.Length -or -not $arguments.ContainsKey([string]$id) -or
+                    [Text.Encoding]::UTF8.GetByteCount($signature) + [Text.Encoding]::UTF8.GetByteCount($arguments[[string]$id]) -gt 2097152 -or $signatures.Count -ge ($proposals.Count ? 64 : 8)) {
+                    throw 'Invalid Google tool signature handoff.'
+                }
+                $signatureBytes += [Text.Encoding]::UTF8.GetByteCount($signature)
+                if ($signatureBytes -gt 8388608) {
+                    throw 'Google tool signatures exceed the handoff size limit.'
+                }
+                $signatures[[string]$id] = $signature
+            }
+        }
+        $messageSignature = $turn['MessageSignature']
+        if ($null -ne $messageSignature -and $messageSignature -isnot [string]) {
+            throw 'Invalid Google assistant signature handoff.'
+        }
+        $messageSignature = [string]$messageSignature
+        if ($messageSignature) {
+            $bytes = [Text.Encoding]::UTF8.GetByteCount($messageSignature)
+            if ($bytes -gt 2097152 -or $signatureBytes + $bytes -gt 8388608) {
+                throw 'Google assistant signature exceeds the handoff size limit.'
+            }
+            $signatureBytes += $bytes
+        }
+        $parts = @()
+        if ($turn['GoogleParts']) {
+            if ($turn['GoogleParts'] -isnot [Collections.IList] -or $turn['GoogleParts'].Count -gt 1024) {
+                throw 'Invalid Google content handoff.'
+            }
+            $parts = @(foreach ($part in $turn['GoogleParts']) {
+                    if ($part -isnot [Collections.IDictionary] -or $part.Count -ne 3 -or @($part.Keys | Where-Object { $_ -cnotin @('Thought', 'Text', 'Signature') }).Count -or
+                        $part.Thought -isnot [bool] -or $part.Text -isnot [string] -or $part.Signature -isnot [string]) {
+                        throw 'Invalid Google content handoff.'
+                    }
+                    $bytes = [Text.Encoding]::UTF8.GetByteCount($part.Text) + [Text.Encoding]::UTF8.GetByteCount($part.Signature)
+                    $signatureBytes += $bytes
+                    if ($bytes -gt 2097152 -or $signatureBytes -gt 8388608) {
+                        throw 'Google content exceeds the handoff size limit.'
+                    }
+                    @{ Thought = $part.Thought; Text = $part.Text; Signature = $part.Signature }
+                })
+        }
+        $turns[[string]$key] = @{ Details = @($turn.Details); Text = [string]$turn.Text; Arguments = $arguments; Signatures = $signatures; MessageSignature = $messageSignature; GoogleParts = $parts; Proposals = $proposals }
     }
     $null = $script:ReasoningTurns.Remove($State)
     $script:ReasoningTurns.Add($State, @{ Scope = $Data.Scope; Turns = $turns })
@@ -146,12 +270,12 @@ function New-OpenAIRequestBody {
     $retained = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $model = $Context.Model ? $Context.Model : $Context.Config.Model
     $cacheKey = $Context.PSObject.Properties['ProviderCacheKey'] ? $Context.ProviderCacheKey : $Context.State
-    $null = $agent -and $cacheKey -and $script:ReasoningTurns.TryGetValue($cacheKey, [ref]$cache)
+    $null = $cacheKey -and $script:ReasoningTurns.TryGetValue($cacheKey, [ref]$cache)
     if ($cache -and -not (Test-OpenAIReasoningScope -Scope $cache.Scope -BaseUrl $Context.Config.BaseUrl -Model $model)) {
         $cache = $null
     }
-    if ($agent) {
-        $source = if ($Context.PSObject.Properties['AgentMessages']) {
+    if ($agent -or @($Context.Messages | Where-Object { $_.PSObject.Properties['NativeBatch'] -or ($_ -is [Collections.IDictionary] -and $_.ContainsKey('NativeBatch')) }).Count) {
+        $source = if ($agent -and $Context.PSObject.Properties['AgentMessages']) {
             $Context.AgentMessages
         }
         else {
@@ -164,6 +288,7 @@ function New-OpenAIRequestBody {
                 $assistant = @{ role = 'assistant'; content = $batch.Text }
                 if ($batch.ProviderData) {
                     $assistant.provider_turn = $batch.ProviderData.Turn
+                    $assistant.provider_signed = [bool]$batch.ProviderData['HadSignature']
                 }
                 if ($batch.Calls.Count) {
                     $assistant.tool_calls = @(foreach ($call in $batch.Calls) {
@@ -187,7 +312,7 @@ function New-OpenAIRequestBody {
                             call_id = $result.CallId; tool = $result.Tool; status = $result.Status; data = (Get-HarnessToolModelData -Data $result.Data)
                             error = $result.Error; truncated = $result.Truncated; transcript_record_id = $result.TranscriptRecordId
                         })
-                    @{ role = 'tool'; tool_call_id = $result.CallId; content = $content }
+                    @{ role = 'tool'; tool_call_id = $result.CallId; content = $content; provider_turn = $assistant.provider_turn; provider_signed = $assistant['provider_signed'] }
                 }
             }
         }
@@ -196,34 +321,84 @@ function New-OpenAIRequestBody {
                     throw 'Invalid agent message role.'
                 }
                 $wire = [ordered]@{ role = [string]$message.role; content = $message.content }
+                # A process restart deliberately loses private signatures. Preserve the useful exchange as
+                # plain context rather than emitting signed native calls without their required signature.
+                $missingSignature = $message['provider_signed'] -and (-not $cache -or -not $cache.Turns.ContainsKey([string]$message.provider_turn))
+                $googleParts = @()
+                $proposalReplies = @()
                 if ($message.role -ceq 'assistant' -and $message.provider_turn) {
                     $null = $retained.Add([string]$message.provider_turn)
-                    if ($cache -and -not $DisableTools -and $cache.Turns.ContainsKey($message.provider_turn)) {
-                        if ($cache.Turns[$message.provider_turn].Details.Count) {
+                    if ($cache -and $cache.Turns.ContainsKey($message.provider_turn)) {
+                        $saved = $cache.Turns[$message.provider_turn]
+                        $proposalReplies = -not $agent -and -not $DisableTools -and $Context.Config.UseToolsApi ? @($saved['Proposals']) : @()
+                        # Proposal signatures belong to the original calls, never to rendered PowerShell.
+                        $proposalSuppressed = $saved['Proposals'] -and -not $proposalReplies.Count
+                        if ($proposalSuppressed) {
+                            $wire
+                            continue
+                        }
+                        if (-not $DisableTools -and $cache.Turns[$message.provider_turn].Details.Count) {
                             $wire.reasoning_details = $cache.Turns[$message.provider_turn].Details
                         }
+                        if (-not $DisableTools -or -not $message.tool_calls) {
+                            if ($cache.Turns[$message.provider_turn]['MessageSignature']) {
+                                $wire.extra_content = @{ google = @{ thought_signature = $cache.Turns[$message.provider_turn]['MessageSignature'] } }
+                            }
+                            $googleParts = @($cache.Turns[$message.provider_turn]['GoogleParts'] ? $cache.Turns[$message.provider_turn]['GoogleParts'] : @())
+                        }
                         $wire.content = $cache.Turns[$message.provider_turn].Text
+                        if ($proposalReplies.Count) {
+                            $wire.tool_calls = @(foreach ($reply in $proposalReplies) {
+                                    $call = @{ id = $reply.Id; type = 'function'; function = @{ name = 'prepare_powershell'; arguments = $saved.Arguments[$reply.Id] } }
+                                    if ($saved['Signatures'] -and $saved['Signatures'].ContainsKey($reply.Id)) {
+                                        $call.extra_content = @{ google = @{ thought_signature = $saved['Signatures'][$reply.Id] } }
+                                    }
+                                    $call
+                                })
+                        }
                     }
                 }
                 if ($message.role -ceq 'assistant' -and $message.tool_calls) {
                     $wire.tool_calls = @(foreach ($call in $message.tool_calls) {
-                            @{ id = [string]$call.id; type = 'function'; function = @{
+                            $native = @{ id = [string]$call.id; type = 'function'; function = @{
                                     name = [string]$call.function.name; arguments = [string]$call.function.arguments
                                 }
                             }
+                            $turn = ($cache -and -not $DisableTools -and $message.provider_turn) ? $cache.Turns[$message.provider_turn] : $null
+                            if ($turn -and $turn['Signatures'] -and $turn['Signatures'].ContainsKey([string]$call.id)) {
+                                $native.extra_content = @{ google = @{ thought_signature = $turn['Signatures'][[string]$call.id] } }
+                            }
+                            $native
                         })
                 }
                 if ($message.role -ceq 'tool') {
                     $wire.tool_call_id = [string]$message.tool_call_id
                 }
-                if ($DisableTools -and ($wire.Contains('tool_calls') -or $wire.role -ceq 'tool')) {
+                if (($DisableTools -or $missingSignature) -and ($wire.Contains('tool_calls') -or $wire.role -ceq 'tool')) {
                     $wire.content = [string]$wire.content + "`n" + ($wire.Contains('tool_calls') ?
                         (ConvertTo-OpenAIWireJson $wire.tool_calls) : ('Tool result: ' + $wire.tool_call_id))
                     $wire.role = $wire.role -ceq 'tool' ? 'user' : 'assistant'
                     $wire.Remove('tool_calls')
                     $wire.Remove('tool_call_id')
                 }
+                if ($googleParts.Count) {
+                    foreach ($part in $googleParts) {
+                        $google = @{ thought = [bool]$part.Thought }
+                        if ($part.Signature) {
+                            $google.thought_signature = [string]$part.Signature
+                        }
+                        [ordered]@{ role = 'assistant'; content = [string]$part.Text; extra_content = @{ google = $google } }
+                    }
+                    if (-not $wire.Contains('tool_calls')) {
+                        continue
+                    }
+                    $wire.content = $null
+                    $wire.Remove('extra_content')
+                }
                 $wire
+                foreach ($reply in $proposalReplies) {
+                    @{ role = 'tool'; tool_call_id = $reply.Id; content = (ConvertTo-OpenAIWireJson @{ status = 'proposal_returned_for_review'; proposal = $reply.Proposal }) }
+                }
             })
     }
     if ($cache) {
@@ -392,8 +567,9 @@ function Get-OpenAIGatewayUri {
         throw $failure
     }
     $base = $BaseUrl.TrimEnd('/')
-    # Accept either a gateway root or its literal versioned API root; keep every preceding path segment.
-    if ($base.EndsWith('/v1', [StringComparison]::Ordinal) -and $Resource.StartsWith('/v1/', [StringComparison]::Ordinal)) {
+    # Google and Vertex expose compatible API roots with their own version/prefix. Match literal suffixes only.
+    $apiRoot = @('/v1', '/v1/openai', '/v1beta/openai', '/endpoints/openapi') | Where-Object { $base.EndsWith($_, [StringComparison]::Ordinal) }
+    if ($apiRoot -and $Resource.StartsWith('/v1/', [StringComparison]::Ordinal)) {
         $Resource = $Resource.Substring(3)
     }
     [uri]($base + $Resource)

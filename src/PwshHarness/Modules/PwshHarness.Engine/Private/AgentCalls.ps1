@@ -45,8 +45,22 @@ function Add-EngineAgentBatch {
 }
 function Request-EngineAgentCallRepair {
     [CmdletBinding()]
-    param($Loop, [string]$Message)
+    param($Loop, [string]$Message, [ValidateSet('InvalidNativeBatch', 'InvalidToolIdentity', 'UndeclaredTool', 'DuplicateCallId', 'ProtectedCredential')][string]$Kind = 'InvalidNativeBatch')
+    if ($Message -ceq 'Tool arguments contained a protected credential; reissue without secrets.') {
+        $Kind = 'ProtectedCredential'
+    }
     if ($Loop.ToolRepairs -ge 2) {
+        # Persist only host-owned categories, never rejected arguments, identities or provider error text.
+        $reasons = @{
+            InvalidNativeBatch = 'the native tool batch could not be decoded'; InvalidToolIdentity = 'a tool call had an invalid identity'
+            UndeclaredTool = 'a tool name was not advertised for this run'; DuplicateCallId = 'a tool call ID was reused'; ProtectedCredential = 'tool arguments contained a protected credential'
+        }
+        $summary = "The provider returned invalid tool calls after two correction attempts: $($reasons[$Kind])."
+        $Loop.FailureDetail = "Tool call validation: $Kind. $summary"
+        $Loop.Failure = @{ Message = $summary; RetryInput = $true; Resumable = $false }
+        if (-not $Loop['Delegating']) {
+            $Loop.Turn.Session.Status = $summary
+        }
         return $false
     }
     $Loop.ToolRepairs++
@@ -64,16 +78,25 @@ function ConvertTo-EngineAgentBatch {
     $errors = @{}
     $Loop.CallErrors.Clear()
     $Loop.CallRepairMessage = ''
+    $Loop.CallRepairKind = 'InvalidToolIdentity'
     $names = @($Fallback ? @($Loop.Tools.Values | Where-Object { -not $_.Runtime -or $_.Name -cin @($Store.AgentTools.Schemas.Name) } | ForEach-Object { $_.Name }) : $Loop.Schemas.Name)
     foreach ($call in $Calls) {
         try {
             Assert-HarnessToolCall $call
-            if ($call.Name -cnotin $names -or $Loop.Ids.Contains($call.Id) -or -not $ids.Add($call.Id)) {
+            if ($call.Name -cnotin $names) {
+                $Loop.CallRepairKind = 'UndeclaredTool'
+                $Loop.CallRepairMessage = 'Tool name was not advertised for this run. Use only the declared tools and fresh unique call IDs.'
+                return
+            }
+            if ($Loop.Ids.Contains($call.Id) -or -not $ids.Add($call.Id)) {
+                $Loop.CallRepairKind = 'DuplicateCallId'
+                $Loop.CallRepairMessage = 'Tool call ID was reused. Reissue the batch using fresh unique call IDs.'
                 return
             }
             $json = $call.Arguments | ConvertTo-Json -Depth 20 -Compress
             if ($json -cne $Store.Host.OperationControl.ProtectText($Loop.Turn.Session, $json, $false, $true)) {
                 $Loop.CallRepairMessage = 'Tool arguments contained a protected credential; reissue without secrets.'
+                $Loop.CallRepairKind = 'ProtectedCredential'
                 return
             }
         }

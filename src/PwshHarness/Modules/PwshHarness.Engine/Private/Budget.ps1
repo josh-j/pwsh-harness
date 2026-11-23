@@ -70,6 +70,7 @@ function Get-EngineBudgetedHistory {
         }
         $replay = $record.Replay
         $answer = $record.Text
+        $nativeAnswer = $null
         if ($replay) {
             try {
                 # The turn's messages as sent replace its prompt and steering notes, keeping the prefix cacheable.
@@ -83,12 +84,26 @@ function Get-EngineBudgetedHistory {
                 if ($saved.ContainsKey('Answer')) {
                     $answer = [string]$saved.Answer
                 }
+                if ($saved.ContainsKey('AnswerMessage')) {
+                    try {
+                        $restored = @(ConvertFrom-EngineMessageRecord @($saved.AnswerMessage))
+                        if ($restored.Count -ne 1 -or $restored[0].Role -cne 'assistant' -or $restored[0].Content -cne $answer -or
+                            -not $restored[0].PSObject.Properties['NativeBatch'] -or $restored[0].NativeBatch.Text -cne $answer -or
+                            $restored[0].NativeBatch.Calls.Count -or $restored[0].NativeBatch.Results.Count) {
+                            throw 'Invalid native answer record.'
+                        }
+                        $nativeAnswer = $restored[0]
+                    }
+                    catch {
+                        Write-Verbose 'Ignoring invalid native answer metadata; retaining the legacy answer.'
+                    }
+                }
             }
             catch {
                 Write-Verbose "Replaying the turn failed; using its prompt and answer: $($_.Exception.Message)"
             }
         }
-        $current.Add((New-HarnessMessage $record.Role $answer))
+        $current.Add(($nativeAnswer ? $nativeAnswer : (New-HarnessMessage $record.Role $answer)))
     }
     if ($current.Count) {
         $exchanges.Add($current.ToArray())

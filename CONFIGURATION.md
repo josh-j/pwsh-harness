@@ -33,13 +33,36 @@ relative paths resolve from the process working directory, not the JSON file.
 
 ## Provider and model compatibility
 
-The bundled network adapter is `OpenAICompatible`; `Mock` is the offline adapter.
+The bundled network adapters are `OpenAICompatible` and `Gemini`; `Mock` is the offline adapter.
 For a different service, keep `Provider=OpenAICompatible` and select that service's
 `BaseUrl`, exact `Model` identifier and credential. Base URLs may include the
 terminal `/v1` segment; the adapter adds that segment only once for versioned
-resources and preserves any preceding path prefix. The endpoint must implement
-OpenAI-style chat completions with SSE. Native vendor-specific request protocols
+resources and preserves any preceding path prefix. Google's `/v1beta/openai/`
+and Vertex `/endpoints/openapi` roots also retain their documented paths. The endpoint must implement
+OpenAI-style chat completions with SSE. Other vendor-specific request protocols
 and Responses-only endpoints need an adapter; changing a provider name is not enough.
+
+### Native Google API
+
+Use `Provider=Gemini` for Google's native [generateContent API](https://aistudio.google.com/api-reference/generate-content).
+It defaults to model `gemini-4-argon`, base URL `https://generativelanguage.googleapis.com/v1beta`
+and key variable `GEMINI_API_KEY`. `GEMINI_BASE_URL` supplies an otherwise unset base URL.
+`Gemini.ApiKeyEnvironment` selects a different key variable; the generic
+`ApiKeyEnvironment` setting belongs to the compatible adapter. Session `-ApiKey`,
+SecretManagement `SecretName` and saved origin-bound credentials retain their precedence.
+Native saved/session credential access is limited to the declared Google origin.
+
+`Gemini.Stream` defaults to `true` for SSE `streamGenerateContent`; `false` selects
+`generateContent`. Both support coding text, reviewable PowerShell proposals and the
+host's approved tool schemas. Native thinking levels follow the selected Gemini 3/4
+profile or explicit reasoning effort; older models use their API defaults and reject
+explicit thinking-level requests locally. Images, audio and Google-hosted tools are
+outside the harness's coding interface. Offline protocol tests do not qualify live model behavior.
+
+Thought signatures and hidden response parts stay in private provider state and survive
+an in-process reload. Journals contain opaque references. If that state is unavailable
+after process restart, historical signed tool exchanges become plain context with their
+results; the adapter does not invent signatures or send incomplete native exchanges.
 
 Known model names select their bundled profile automatically. Unlisted models use
 generic limits and omit profile-specific reasoning unless you explicitly choose

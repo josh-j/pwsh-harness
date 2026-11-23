@@ -1,7 +1,7 @@
 #Requires -Version 7.6
 function ConvertFrom-OpenAISseEvent {
     [CmdletBinding()]
-    param([string[]]$Data, [string[]]$Redact = @(), [switch]$Agent)
+    param([string[]]$Data, [string[]]$Redact = @(), [switch]$Agent, [string[]]$PrivatePatterns = @())
     if (-not $Data -or $Data.Count -eq 0) {
         return
     }
@@ -32,7 +32,7 @@ function ConvertFrom-OpenAISseEvent {
                 $document.Dispose()
             }
         }
-        $json = $payload | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        $json = $payload | ConvertFrom-Json -AsHashtable -DateKind String -ErrorAction Stop
         if ($json -isnot [Collections.IDictionary] -or ($json.choices -and $json.choices -isnot [Collections.IList])) {
             throw 'Invalid SSE envelope.'
         }
@@ -55,8 +55,8 @@ function ConvertFrom-OpenAISseEvent {
         $failure.Data['AgentStopReason'] = 'ProviderStall'; $failure.Data['FailureOrigin'] = 'ProviderStream'
         throw $failure
     }
-    $original = if ($Agent -and $Redact.Count) {
-        $payload | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+    $original = if ($Redact.Count) {
+        $payload | ConvertFrom-Json -AsHashtable -DateKind String -ErrorAction Stop
     }
     if ($Redact.Count) {
         $json = Protect-OpenAIProviderData $json $Redact
@@ -74,7 +74,7 @@ function ConvertFrom-OpenAISseEvent {
         else {
             [string]$json.error
         }
-        $message = Protect-HarnessText ([string]$message) $Redact -IncludeLabelled
+        $message = Protect-OpenAIPrivateText -Text (Protect-HarnessText ([string]$message) $Redact -IncludeLabelled) -PrivatePatterns $PrivatePatterns
         $failure = [InvalidOperationException]::new("Provider error: $message (received in provider error response).")
         $failure.Data['FailureOrigin'] = 'ProviderResponse'
         $providerStatus = 0
@@ -85,7 +85,7 @@ function ConvertFrom-OpenAISseEvent {
             $failure.Data['Usage'] = $usage
         }
         if ($json.id) {
-            $failure.Data['GenerationIds'] = @([string]$json.id)
+            $failure.Data['GenerationIds'] = @((Protect-OpenAIPrivateText -Text ([string]$json.id) -PrivatePatterns $PrivatePatterns))
         }
         if (-not $failure.Data.Contains('ProviderStatusCode') -and $message -match '(?i)aborted|overloaded|temporar|unavailable') {
             $failure.Data['ProviderStatusCode'] = 503
@@ -106,7 +106,10 @@ function ConvertFrom-OpenAISseEvent {
                 $choice.delta -and
                 $choice.delta.ContainsKey('content') -and
                 $null -ne $choice.delta.content) {
-                $text += [string]$choice.delta.content
+                if (-not ($choice.delta.extra_content -and $choice.delta.extra_content.google -and
+                        $choice.delta.extra_content.google.thought -is [bool] -and $choice.delta.extra_content.google.thought)) {
+                    $text += [string]$choice.delta.content
+                }
             }
         }
     }
@@ -125,6 +128,78 @@ function ConvertFrom-OpenAISseEvent {
         Usage        = $usage
         FinishReason = $finishReason
         Raw          = $raw
+    }
+}
+function Add-OpenAIGooglePart {
+    # Keep Google thought/text parts in provider-private order; public output contains visible text only.
+    [CmdletBinding()]
+    param($Parts, [hashtable]$State, $StreamEvent, [hashtable]$Calls, [string[]]$Redact)
+    if (-not $StreamEvent.Raw) {
+        return
+    }
+    foreach ($choice in @($StreamEvent.Raw.choices)) {
+        if (($choice.ContainsKey('index') -and $choice.index -ne 0) -or -not $choice.delta) {
+            continue
+        }
+        $delta = $choice.delta
+        # A terminal signature closes its text part. A subsequent new text part can omit
+        # thought=false; keep inheriting only while the preceding part remains unsigned.
+        if ($delta['content'] -and $Parts.Count -and $Parts[$Parts.Count - 1].Signature) {
+            $State.Thought = $false
+        }
+        $signature = ''
+        if ($delta.ContainsKey('extra_content')) {
+            $signature = Get-OpenAIThoughtSignature -Extra $delta.extra_content -Redact $Redact -AllowThought
+            if ($delta.extra_content.google.ContainsKey('thought')) {
+                $State.Thought = $delta.extra_content.google.thought
+                $State.Tracked = $true
+            }
+        }
+        $fragment = $delta.ContainsKey('content') -and $null -ne $delta.content ? [string]$delta.content : ''
+        $protected = Protect-HarnessText $fragment $Redact
+        $State.Protected = $State.Protected -or $protected -cne $fragment
+        if (($State.Tracked -or $signature) -and $State.Protected) {
+            $failure = [InvalidOperationException]::new('Google content contains a credential.')
+            $failure.Data['ProtectedCredential'] = $true
+            throw $failure
+        }
+        if ($State.Thought) {
+            $StreamEvent.Text = ''
+        }
+        if (-not $fragment -and -not $signature) {
+            continue
+        }
+        $last = $Parts.Count ? $Parts[$Parts.Count - 1] : $null
+        $append = $last -and $last.Thought -eq $State.Thought -and (-not $last.Signature -or -not $fragment)
+        if ($append -and $last.Signature -and $signature -and $last.Signature -cne $signature) {
+            throw 'Assistant signature changed.'
+        }
+        $growth = [Text.Encoding]::UTF8.GetByteCount($protected) + ($signature -and (-not $append -or -not $last.Signature) ? [Text.Encoding]::UTF8.GetByteCount($signature) : 0)
+        $total = $State.Bytes + $growth
+        foreach ($call in $Calls.Values) {
+            $total += $call.Bytes + $call.SignatureBytes
+        }
+        if ($total -gt 8388608 -or ($append ? $last.Bytes : 0) + $growth -gt 2097152 -or (-not $append -and $Parts.Count -ge 1024)) {
+            throw 'Google content exceeds the size limit.'
+        }
+        if (-not $append) {
+            $last = @{ Thought = $State.Thought; Text = [Text.StringBuilder]::new(); Signature = ''; Bytes = 0 }
+            $Parts.Add($last)
+        }
+        $null = $last.Text.Append($protected)
+        if ($signature) {
+            $last.Signature = $signature
+        }
+        $last.Bytes += $growth
+        $State.Bytes += $growth
+        $State.Tracked = $State.Tracked -or $Parts.Count -gt 1
+    }
+    $total = $State.Bytes
+    foreach ($call in $Calls.Values) {
+        $total += $call.Bytes + $call.SignatureBytes
+    }
+    if ($total -gt 8388608) {
+        throw 'Google content exceeds the size limit.'
     }
 }
 function ConvertFrom-OpenAISse {

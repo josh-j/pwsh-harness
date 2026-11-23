@@ -1,7 +1,18 @@
 #Requires -Version 7.6
+function Protect-OpenAIPrivateText {
+    # Error-only literal prefixes avoid expanding large opaque signatures into credential encodings or regexes.
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Text, [string[]]$PrivatePatterns = @())
+    foreach ($pattern in $PrivatePatterns) {
+        if ($pattern -and $Text.Contains($pattern.Substring(0, [Math]::Min(128, $pattern.Length)), [StringComparison]::Ordinal)) {
+            return 'Private provider response details omitted.'
+        }
+    }
+    $Text
+}
 function Get-OpenAIProviderFailureMessage {
     [CmdletBinding()]
-    param([Exception]$Exception, [string[]]$Redact)
+    param([Exception]$Exception, [string[]]$Redact, [string[]]$PrivatePatterns = @())
     $messages = [Collections.Generic.List[string]]::new()
     $tls = $false
     for ($depth = 0; $Exception -and $depth -lt 16; $depth++) {
@@ -18,6 +29,7 @@ function Get-OpenAIProviderFailureMessage {
         $Exception = $Exception.InnerException
     }
     $detail = Protect-HarnessText ($messages -join ' -> ') $Redact -IncludeLabelled
+    $detail = Protect-OpenAIPrivateText -Text $detail -PrivatePatterns $PrivatePatterns
     if ($detail.Length -gt 4096) {
         $detail = $detail.Substring(0, 4096) + '...'
     }
@@ -44,9 +56,9 @@ function Set-OpenAIProviderUserError {
 }
 function Protect-OpenAIProviderData {
     [CmdletBinding()]
-    param($Value, [string[]]$Redact, [switch]$PropertyNames, [string[]]$PreserveNames = @())
+    param($Value, [string[]]$Redact, [switch]$PropertyNames, [string[]]$PreserveNames = @(), [string[]]$PrivatePatterns = @())
     if ($Value -is [string]) {
-        return Protect-HarnessText $Value $Redact
+        return Protect-OpenAIPrivateText -Text (Protect-HarnessText $Value $Redact) -PrivatePatterns $PrivatePatterns
     }
     if ($Value -is [Collections.IDictionary]) {
         if ($PropertyNames) {
@@ -89,23 +101,23 @@ function Protect-OpenAIProviderData {
                         $childNames = @('reasoning_tokens')
                     }
                 }
-                $copy[$safeName] = Protect-OpenAIProviderData $Value[$name] $Redact -PropertyNames -PreserveNames $childNames
+                $copy[$safeName] = Protect-OpenAIProviderData $Value[$name] $Redact -PropertyNames -PreserveNames $childNames -PrivatePatterns $PrivatePatterns
             }
             return , $copy
         }
         foreach ($name in @($Value.psbase.Keys)) {
-            $Value[$name] = Protect-OpenAIProviderData $Value[$name] $Redact
+            $Value[$name] = Protect-OpenAIProviderData $Value[$name] $Redact -PrivatePatterns $PrivatePatterns
         }
     }
     elseif ($Value -is [Collections.IList]) {
         if ($PropertyNames) {
             $copy = @(foreach ($item in $Value) {
-                    Protect-OpenAIProviderData $item $Redact -PropertyNames -PreserveNames $PreserveNames
+                    Protect-OpenAIProviderData $item $Redact -PropertyNames -PreserveNames $PreserveNames -PrivatePatterns $PrivatePatterns
                 })
             return , $copy
         }
         for ($i = 0; $i -lt $Value.Count; $i++) {
-            $Value[$i] = Protect-OpenAIProviderData $Value[$i] $Redact
+            $Value[$i] = Protect-OpenAIProviderData $Value[$i] $Redact -PrivatePatterns $PrivatePatterns
         }
     }
     return , $Value

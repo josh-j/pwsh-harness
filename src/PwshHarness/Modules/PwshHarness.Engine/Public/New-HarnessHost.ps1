@@ -8,7 +8,7 @@ function New-HarnessHost {
     [OutputType([pscustomobject])]
     param([string]$ConfigDirectory, [string]$DataDirectory, [string]$ConfigPath, [hashtable]$Options = @{},
         [string[]]$ExtensionPaths = @(), [Parameter(Mandatory)][scriptblock]$ManifestReader, [string]$EnvironmentPrefix = 'HARNESS_', [string]$ProfileDirectory, [string]$BuiltinDirectory,
-        [string]$TrustedReaderDirectory, [scriptblock]$SavedCredentialFactory)
+        [string[]]$TrustedReaderDirectory, [scriptblock]$SavedCredentialFactory, [string]$PreferredProvider)
     if (-not $ConfigDirectory) {
         $ConfigDirectory = Join-Path $HOME '.config/harness'
     }
@@ -22,10 +22,13 @@ function New-HarnessHost {
     }
     $ConfigPath = Resolve-HarnessFileSystemPath -Path $ConfigPath -Purpose 'configuration file'
     $context = @{} + $PSBoundParameters
-    foreach ($name in @('ProfileDirectory', 'BuiltinDirectory', 'TrustedReaderDirectory')) {
+    foreach ($name in @('ProfileDirectory', 'BuiltinDirectory')) {
         if ($context[$name]) {
             $context[$name] = Resolve-HarnessFileSystemPath -Path $context[$name] -Purpose $name
         }
+    }
+    if ($TrustedReaderDirectory) {
+        $context.TrustedReaderDirectory = @($TrustedReaderDirectory | ForEach-Object { Resolve-HarnessFileSystemPath -Path $_ -Purpose 'TrustedReaderDirectory' })
     }
     $context.ConfigDirectory = $ConfigDirectory
     $context.DataDirectory = $DataDirectory

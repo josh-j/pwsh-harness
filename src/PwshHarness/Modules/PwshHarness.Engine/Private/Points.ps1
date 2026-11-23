@@ -8,7 +8,7 @@ function Invoke-EnginePoint {
     $external = Test-EngineExternalExtension $Store $Entry.Extension
     $oldScope = $Store.CredentialScope
     $Store.CredentialScope = $null
-    if ($Entry['Category'] -cin @('Providers', 'Embedders') -and $external) {
+    if ($Entry['Category'] -cin @('Providers', 'Embedders')) {
         $request = @($Arguments | Where-Object { $_ -and $_.PSObject.Properties['State'] -and $_.PSObject.Properties['Config'] }) | Select-Object -First 1
         if ($request -and $request.Config.BaseUrl) {
             $origin = ''

@@ -340,7 +340,7 @@ function Add-EngineCommitStage {
     else {
         'Ready'
     }
-    Add-EngineTranscript -State $Turn.Session -Role assistant -Text $Turn.Result.Text -Metadata @{
+    $metadata = @{
         Validation     = $Turn.Result.Validation
         Requests       = $Turn.Result.Requests
         Usage          = $Turn.Result.Usage
@@ -348,6 +348,14 @@ function Add-EngineCommitStage {
         CodeBlocks     = $Turn.Result.CodeBlocks
         Edits          = $Turn.Result.Edits
     }
+    $answer = New-EngineAgentAssistantMessage -Response $Turn.Response -Text $Turn.ResponseText
+    if ($answer.PSObject.Properties['NativeBatch'] -or @($Turn.Exchange | Where-Object { $_.PSObject.Properties['NativeBatch'] }).Count) {
+        $replay = Get-EngineAgentReplay -Loop @{ Turn = $Turn }
+        if ($replay) {
+            $metadata.Replay = $replay
+        }
+    }
+    Add-EngineTranscript -State $Turn.Session -Role assistant -Text $Turn.Result.Text -Metadata $metadata
     $Turn.Result | Add-Member NoteProperty SessionId $Turn.Session.SessionId
     Publish-EngineEvent -Store $Turn.Store -EventName TurnCompleted -Payload $Turn.Result
     $Turn.Result
@@ -427,11 +435,17 @@ function Set-EngineRepairMessage {
     else {
         $Turn.Response.Text
     }
+    # Signed continuations must retain each original fragment even when repair uses minimal context.
+    $native = @($Turn.Exchange | Where-Object { $_.PSObject.Properties['NativeBatch'] }).Count -gt 0
+    $prompt = New-HarnessMessage -Role user -Content $Turn.Prompt
+    if ($native) {
+        $prompt | Add-Member NoteProperty BudgetGroup task
+    }
     $Turn.MinimalMessages = @(
         (New-HarnessMessage -Role (Get-EngineInstructionRole $Turn.Config) -Content $Turn.Config.SystemPrompt)
-        (New-HarnessMessage user $Turn.Prompt)
-        (New-HarnessMessage assistant $failing)
-        (New-HarnessMessage user $Message))
+        $prompt) + ($native ? $Turn.Exchange.ToArray() : @(
+            (New-HarnessMessage assistant $failing)
+            (New-HarnessMessage user $Message)))
 }
 function New-EngineTurn {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'OnToken', Justification = 'Kept for signature parity with its sibling constructors; removal is tracked in ROADMAP.')]
@@ -521,7 +535,8 @@ function Invoke-EngineTurnRunner {
             if ($decision.Kind -eq 'Complete') {
                 break
             }
-            $Turn.Exchange.Add((New-HarnessMessage assistant ($decision.Kind -ceq 'Continue' ? $Turn.ResponseText : $Turn.Response.Text)))
+            $native = (Get-EngineResponseWireData -Response $Turn.Response).ProviderData -or @($Turn.Exchange | Where-Object { $_.PSObject.Properties['NativeBatch'] }).Count
+            $Turn.Exchange.Add((New-EngineAgentAssistantMessage -Response $Turn.Response -Text ($decision.Kind -ceq 'Continue' -or $native ? $Turn.ResponseText : $Turn.Response.Text)))
             $Turn.Exchange.Add((New-HarnessMessage user $decision.Message))
             $Turn.RequestKind = $decision.Kind
             if ($decision.Kind -eq 'Repair') {

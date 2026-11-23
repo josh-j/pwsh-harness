@@ -59,7 +59,7 @@ function New-HarnessHost {
     $hostInstance = PwshHarness.Engine\New-HarnessHost -ConfigDirectory $configDir -DataDirectory $dataDir `
         -ConfigPath $ConfigPath -Options $Options -ExtensionPaths @() `
         -ManifestReader $dataFileReader -EnvironmentPrefix 'PWSH_HARNESS_' -ProfileDirectory $ProfileDirectory -BuiltinDirectory $builtinDirectory `
-        -TrustedReaderDirectory (Join-Path $builtinDirectory 'openai-compatible') `
+        -TrustedReaderDirectory @((Join-Path $builtinDirectory 'openai-compatible'), (Join-Path $builtinDirectory 'google-gemini')) -PreferredProvider OpenAICompatible `
         -SavedCredentialFactory { param($service) New-HarnessCredentialStore $service }
     # One host-provided location for shipped prompts and skills, so extensions never walk relative paths to the data directory.
     $dataRoot = Join-Path $project 'Data'

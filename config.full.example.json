@@ -63,6 +63,8 @@
   "ExampleRetrieval": true,
   "ExampleScoreFloor": 11.0,
   "ExtensionPaths": [],
+  "Gemini.ApiKeyEnvironment": "GEMINI_API_KEY",
+  "Gemini.Stream": true,
   "Extensions": {
     "Disabled": []
   },

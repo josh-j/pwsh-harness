@@ -1,4 +1,32 @@
 #Requires -Version 7.6
+$script:HttpClient = $null
+$script:HttpRedirect = $true
+function Get-OpenAIHttpClient {
+    # One pooled client keeps the gateway connection warm between agent steps, as other harnesses do.
+    # Each request still carries its own credential header, cancellation and timeout; nothing is set on the client.
+    [CmdletBinding()]
+    param([switch]$NoRedirect)
+    if (-not $script:HttpClient) {
+        $handler = [Net.Http.SocketsHttpHandler]::new()
+        $handler.AllowAutoRedirect = -not $NoRedirect
+        $handler.PooledConnectionLifetime = [TimeSpan]::FromMinutes(5)
+        $handler.PooledConnectionIdleTimeout = [TimeSpan]::FromSeconds(90)
+        # HTTP/2 pings keep a long silent stream (reasoning, large tool arguments) alive through proxies.
+        $handler.KeepAlivePingDelay = [TimeSpan]::FromSeconds(30)
+        $handler.KeepAlivePingTimeout = [TimeSpan]::FromSeconds(20)
+        $handler.KeepAlivePingPolicy = [Net.Http.HttpKeepAlivePingPolicy]::WithActiveRequests
+        # A system proxy that requires sign-in, usual on corporate Windows networks, gets the user's own logon.
+        $handler.DefaultProxyCredentials = [Net.CredentialCache]::DefaultCredentials
+        $client = [Net.Http.HttpClient]::new($handler)
+        $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+        $script:HttpClient = $client
+        $script:HttpRedirect = -not $NoRedirect
+    }
+    elseif ($script:HttpRedirect -eq [bool]$NoRedirect) {
+        throw 'HTTP redirect policy cannot change for an existing provider client.'
+    }
+    $script:HttpClient
+}
 function Wait-OpenAITask {
     [CmdletBinding()]
     param([object]$Task, [System.Threading.CancellationToken]$CancellationToken, [object]$Context, [hashtable]$Progress, [hashtable]$Output)

@@ -17,6 +17,7 @@ function New-EngineHostStore {
         FaultSerials      = @{}
         BuiltinDirectory  = $Context['BuiltinDirectory']
         TrustedReader     = $Context['TrustedReaderDirectory']
+        PreferredProvider = $Context['PreferredProvider']
         ConfigDirectory   = $Context['ConfigDirectory']
         Calibrations      = @{}
         Clock             = $clock

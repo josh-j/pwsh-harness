@@ -37,10 +37,14 @@ function Test-EngineCredentialReader {
         else {
             [StringComparison]::Ordinal
         }
-        (Test-EngineBuiltinPath $Store $Directory) -and
-        (Test-EngineBuiltinPath $Store $Store.TrustedReader) -and
-        [string]::Equals((Resolve-EnginePhysicalPath $Directory), (Resolve-EnginePhysicalPath $Store.TrustedReader), $comparison) -and
-        (Test-EngineBuiltinPath $Store ([IO.Path]::GetFullPath($EntryPoint, $Directory)))
+        if ((Test-EngineBuiltinPath $Store $Directory) -and (Test-EngineBuiltinPath $Store ([IO.Path]::GetFullPath($EntryPoint, $Directory)))) {
+            foreach ($reader in @($Store.TrustedReader)) {
+                if ((Test-EngineBuiltinPath $Store $reader) -and [string]::Equals((Resolve-EnginePhysicalPath $Directory), (Resolve-EnginePhysicalPath $reader), $comparison)) {
+                    return $true
+                }
+            }
+        }
+        $false
     }
     catch {
         $false

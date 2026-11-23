@@ -494,7 +494,12 @@ function Get-EngineAgentReplay {
     if ($start -ge $request.Messages.Count) {
         return ''
     }
-    $json = @{ Version = 1; Messages = @(ConvertTo-EngineMessageRecord @($request.Messages | Select-Object -Skip $start)); Answer = $Loop.Turn.ResponseText } | ConvertTo-Json -Depth 64 -Compress
+    $saved = @{ Version = 1; Messages = @(ConvertTo-EngineMessageRecord @($request.Messages | Select-Object -Skip $start)); Answer = $Loop.Turn.ResponseText }
+    $answer = New-EngineAgentAssistantMessage -Response $Loop.Turn.Response -Text $Loop.Turn.ResponseText
+    if ($answer.PSObject.Properties['NativeBatch']) {
+        $saved.AnswerMessage = @(ConvertTo-EngineMessageRecord @($answer))[0]
+    }
+    $json = $saved | ConvertTo-Json -Depth 64 -Compress
     # Oversized turns fall back to the prompt and answer alone.
     $json.Length -le 4MB ? $json : ''
 }
@@ -846,7 +851,7 @@ function Invoke-EngineAgentContinuation {
             # Validate the entire batch before any effect or native history replay.
             $validated = @(ConvertTo-EngineAgentBatch -Store $Store -Loop $loop -Calls $calls -Fallback:$fallbackCalls)
             if (-not $validated.Count) {
-                if (-not (Request-EngineAgentCallRepair $loop ($loop.CallRepairMessage ? $loop.CallRepairMessage : 'Invalid tool identity. Use only the declared tools and fresh unique call IDs.'))) {
+                if (-not (Request-EngineAgentCallRepair -Loop $loop -Message ($loop.CallRepairMessage ? $loop.CallRepairMessage : 'Invalid tool identity. Use only the declared tools and fresh unique call IDs.') -Kind $loop.CallRepairKind)) {
                     return Complete-EngineAgentRun -Store $Store -Loop $loop -Reason InvalidToolCall
                 }
                 continue
@@ -1112,7 +1117,7 @@ function Invoke-EngineAgentDelegate {
             }
             $validated = $repair ? @() : @(ConvertTo-EngineAgentBatch -Store $Store -Loop $loop -Calls $calls)
             if (-not $validated.Count) {
-                if (-not (Request-EngineAgentCallRepair $loop ($repair ? $repair : 'Invalid tool identity. Use only the declared read-only tools and fresh unique call IDs.'))) {
+                if (-not (Request-EngineAgentCallRepair -Loop $loop -Message ($repair ? $repair : 'Invalid tool identity. Use only the declared read-only tools and fresh unique call IDs.') -Kind ($repair ? 'InvalidNativeBatch' : $loop.CallRepairKind))) {
                     $stop = 'InvalidToolCall'
                 }
                 continue

@@ -1,29 +1,7 @@
 . (Join-Path $PSScriptRoot 'Usage.ps1')
 #Requires -Version 7.6
-$script:HttpClient = $null
 foreach ($name in @('Request', 'ToolWire', 'ProviderErrors', 'Sse', 'HttpSupport')) {
     . (Join-Path $PSScriptRoot ($name + '.ps1'))
-}
-function Get-OpenAIHttpClient {
-    # One pooled client keeps the gateway connection warm between agent steps, as other harnesses do.
-    # Each request still carries its own credential header, cancellation and timeout; nothing is set on the client.
-    [CmdletBinding()]
-    param()
-    if (-not $script:HttpClient) {
-        $handler = [Net.Http.SocketsHttpHandler]::new()
-        $handler.PooledConnectionLifetime = [TimeSpan]::FromMinutes(5)
-        $handler.PooledConnectionIdleTimeout = [TimeSpan]::FromSeconds(90)
-        # HTTP/2 pings keep a long silent stream (reasoning, large tool arguments) alive through proxies.
-        $handler.KeepAlivePingDelay = [TimeSpan]::FromSeconds(30)
-        $handler.KeepAlivePingTimeout = [TimeSpan]::FromSeconds(20)
-        $handler.KeepAlivePingPolicy = [Net.Http.HttpKeepAlivePingPolicy]::WithActiveRequests
-        # A system proxy that requires sign-in, usual on corporate Windows networks, gets the user's own logon.
-        $handler.DefaultProxyCredentials = [Net.CredentialCache]::DefaultCredentials
-        $client = [Net.Http.HttpClient]::new($handler)
-        $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
-        $script:HttpClient = $client
-    }
-    $script:HttpClient
 }
 function Set-OpenAIStreamActivity {
     # Tells the frontend what a silent stream is producing (tool arguments or reasoning), at most four times a second.
@@ -64,7 +42,7 @@ function Invoke-OpenAIHttpProvider {
     $reasoningCache = $null
     $model = $Context.Model ? $Context.Model : $config.Model
     $cacheKey = $Context.PSObject.Properties['ProviderCacheKey'] -and $Context.ProviderCacheKey ? $Context.ProviderCacheKey : $Context.State
-    if ($agent -and $Context.State) {
+    if ($Context.State) {
         $scope = $config.BaseUrl + '|' + $model
         if (-not $script:ReasoningTurns.TryGetValue($cacheKey, [ref]$reasoningCache) -or -not (Test-OpenAIReasoningScope -Scope $reasoningCache.Scope -BaseUrl $config.BaseUrl -Model $model)) {
             $null = $script:ReasoningTurns.Remove($cacheKey)
@@ -87,6 +65,7 @@ function Invoke-OpenAIHttpProvider {
             $script:Credentials.GetSaved($Context.State, $config)
         } }
     $redact = Get-HarnessSecretPattern $key
+    $privatePatterns = @(Get-OpenAIPrivatePattern -Cache $reasoningCache)
     $client = Get-OpenAIHttpClient
     $linked = [Threading.CancellationTokenSource]::CreateLinkedTokenSource($CancellationToken)
     $requestTimeout = $agent ? ($config.'Agent.RequestTimeoutSeconds' ? $config.'Agent.RequestTimeoutSeconds' : 600) : $config.TimeoutSeconds
@@ -102,6 +81,9 @@ function Invoke-OpenAIHttpProvider {
     $generationIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $activity = @{ Text = ''; At = 0L }
     $progress = $agent ? @{ Clock = $script:Clock.Elapsed(); Last = 0.0; First = $true; FirstByteLimit = $config.TimeoutSeconds; Limit = $config.'Agent.StreamIdleSeconds' ? $config.'Agent.StreamIdleSeconds' : 60 } : $null
+    $toolCalls = @{}
+    $googleParts = @()
+    $reasoning = @{}
     try {
         for ($attempt = 0; ; $attempt++) {
             $output = $null
@@ -164,7 +146,7 @@ function Invoke-OpenAIHttpProvider {
                 if (-not $response.IsSuccessStatusCode) {
                     $body = Read-OpenAIErrorBody -Response $response -Context $Context -CancellationToken $attemptToken -Redact $redact -Progress $progress
                     try {
-                        $observed = ConvertFrom-OpenAISseEvent @($body) -Redact $redact
+                        $observed = ConvertFrom-OpenAISseEvent @($body) -Redact $redact -PrivatePatterns $privatePatterns
                         $usage = $observed.Usage
                         if ($observed.Raw.id) {
                             $null = $generationIds.Add([string]$observed.Raw.id)
@@ -180,11 +162,11 @@ function Invoke-OpenAIHttpProvider {
                     $observations[-1].Usage = $usage
                 }
                 if (-not $response.IsSuccessStatusCode) {
-                    $message = Protect-HarnessText $body $redact
+                    $message = Protect-OpenAIPrivateText -Text (Protect-HarnessText $body $redact) -PrivatePatterns $privatePatterns
                     $upstreamDetail = ''
                     try {
-                        $errorBody = Protect-OpenAIProviderData ($body | ConvertFrom-Json -AsHashtable) $redact
-                        $message = Protect-OpenAIProviderData $errorBody $redact -PropertyNames | ConvertTo-Json -Depth 30 -Compress
+                        $errorBody = Protect-OpenAIProviderData ($body | ConvertFrom-Json -AsHashtable) $redact -PrivatePatterns $privatePatterns
+                        $message = Protect-OpenAIProviderData $errorBody $redact -PropertyNames -PrivatePatterns $privatePatterns | ConvertTo-Json -Depth 30 -Compress
                         if ($errorBody.ContainsKey('error')) {
                             $message = if ($errorBody.error -is [System.Collections.IDictionary]) {
                                 $errorBody.error.message
@@ -217,14 +199,14 @@ function Invoke-OpenAIHttpProvider {
                                 }
                             }
                             if ($details.Count) {
-                                $detail = Protect-HarnessText ($details | ConvertTo-Json -Depth 3 -Compress) $redact
+                                $detail = Protect-OpenAIPrivateText -Text (Protect-HarnessText ($details | ConvertTo-Json -Depth 3 -Compress) $redact) -PrivatePatterns $privatePatterns
                                 $upstreamDetail = ' | Upstream: ' + $detail.Substring(0, [Math]::Min(1024, $detail.Length))
                             }
                         }
                     }
                     catch {
                         # Never expose a partial JSON envelope's private metadata as free text.
-                        $message = $body -match '^[\s\uFEFF]*(\{|\[|data:)' ? 'Gateway returned incomplete or invalid JSON.' : (Protect-HarnessText $body $redact)
+                        $message = $body -match '^[\s\uFEFF]*(\{|\[|data:)' ? 'Gateway returned incomplete or invalid JSON.' : (Protect-OpenAIPrivateText -Text (Protect-HarnessText $body $redact) -PrivatePatterns $privatePatterns)
                     }
                     if ($statusCode -in @(400, 404, 422) -and -not $toolsDisabled -and
                         [string]$message -match '(?i)\b(tools?|tool_choice|function calling)\b' -and
@@ -339,6 +321,9 @@ function Invoke-OpenAIHttpProvider {
                 $done = $false
                 $finishReason = ''
                 $toolCalls = @{}
+                $messageSignature = ''
+                $googleParts = [Collections.Generic.List[object]]::new()
+                $googleState = @{ Thought = $false; Tracked = $false; Protected = $false; Bytes = 0 }
                 $toolRepair = ''
                 $toolRepairMessage = $toolsDisabled ? 'Native tools are unavailable. Return a complete text proposal using the current workflow.' : 'Invalid native tool batch. Reissue complete calls with valid JSON. Use only the declared tools and fresh unique IDs. Shrink truncated calls or split them into smaller edits.'
                 $reasoning = [Collections.Specialized.OrderedDictionary]::new()
@@ -348,7 +333,10 @@ function Invoke-OpenAIHttpProvider {
                     if ($null -eq $line -or $line -eq '') {
                         if ($data.Count) {
                             try {
-                                $eventName = ConvertFrom-OpenAISseEvent $data.ToArray() -Redact $redact -Agent:$agent
+                                if ($data -match '"error"\s*:') {
+                                    $privatePatterns = @(Get-OpenAIPrivatePattern -Cache $reasoningCache -Calls $toolCalls -Parts $googleParts -Details $reasoning)
+                                }
+                                $eventName = ConvertFrom-OpenAISseEvent $data.ToArray() -Redact $redact -Agent:$agent -PrivatePatterns $privatePatterns
                             }
                             catch {
                                 if (-not $agent -or -not $_.Exception.GetBaseException().Data['ToolCallRepair']) {
@@ -370,11 +358,13 @@ function Invoke-OpenAIHttpProvider {
                             if (-not $toolRepair) {
                                 try {
                                     Add-OpenAIToolDelta -Calls $toolCalls -StreamEvent $eventName -Enabled (-not $toolsDisabled) -Agent:$agent
+                                    Add-OpenAIGooglePart -Parts $googleParts -State $googleState -StreamEvent $eventName -Calls $toolCalls -Redact $redact
                                 }
                                 catch {
                                     if (-not $agent) {
                                         throw
                                     }
+                                    $eventName.Text = ''
                                     $toolRepair = $_.Exception.GetBaseException().Data['ProtectedCredential'] ? 'Tool arguments contained a protected credential; reissue without secrets.' : $toolRepairMessage
                                 }
                             }
@@ -383,7 +373,13 @@ function Invoke-OpenAIHttpProvider {
                             }
                             $toolProgress = @($eventName.Raw.choices.delta.tool_calls | Where-Object { $_ -and ($_.id -or $_.function.name -or $_.function.arguments) }).Count
                             $reasoningProgress = @($eventName.Raw.choices.delta.reasoning_details | Where-Object { $_ -and ($_.text -or $_.summary -or $_.data -or $_.signature) }).Count
-                            if ($eventName.Text -or $toolProgress -or $reasoningProgress -or $eventName.Raw.choices.delta.reasoning) {
+                            # Accepted hidden thought content is model output even though public Text is empty.
+                            # Signature-only metadata, usage and empty chunks do not renew the idle allowance.
+                            $thoughtProgress = -not $toolRepair -and $googleState.Thought -and $eventName.Raw -and @($eventName.Raw.choices | Where-Object {
+                                    $_ -is [Collections.IDictionary] -and (-not $_.ContainsKey('index') -or $_.index -eq 0) -and $_['delta'] -is [Collections.IDictionary] -and
+                                    $_['delta']['content'] -is [string] -and $_['delta']['content'].Length
+                                }).Count
+                            if ($eventName.Text -or $toolProgress -or $reasoningProgress -or $thoughtProgress -or $eventName.Raw.choices.delta.reasoning) {
                                 $observations[-1].OutputBytes += [Text.Encoding]::UTF8.GetByteCount(($eventName.Raw.choices.delta | ConvertTo-Json -Depth 30 -Compress))
                                 $observations[-1].OutputChunks++
                                 if ($progress) {
@@ -393,12 +389,12 @@ function Invoke-OpenAIHttpProvider {
                                     $observations[-1].LastChunkMs = $progress.Clock.ElapsedMilliseconds
                                 }
                             }
-                            if ($progress -and ($eventName.Text -or $eventName.FinishReason -or $toolProgress -or $reasoningProgress -or $eventName.Raw.choices.delta.reasoning)) {
+                            if ($progress -and ($eventName.Text -or $eventName.FinishReason -or $toolProgress -or $reasoningProgress -or $thoughtProgress -or $eventName.Raw.choices.delta.reasoning)) {
                                 $progress.Last = $progress.Clock.Elapsed.TotalSeconds
                                 $progress.First = $false
                                 $progress.Thinking = -not ($eventName.Text -or $eventName.FinishReason -or $toolProgress)
                             }
-                            if ($agent -and ($toolProgress -or $reasoningProgress -or $eventName.Raw.choices.delta.reasoning)) {
+                            if ($agent -and ($toolProgress -or $reasoningProgress -or $thoughtProgress -or $eventName.Raw.choices.delta.reasoning)) {
                                 Set-OpenAIStreamActivity -Context $Context -Activity $activity -ToolCalls $toolCalls -Tool ([bool]$toolProgress)
                             }
                             if ($agent -and $OnToken -and $toolProgress) {
@@ -461,20 +457,57 @@ function Invoke-OpenAIHttpProvider {
                     $proposal = ConvertFrom-OpenAIToolProposal -Calls $toolCalls -FinishReason $finishReason -Redact $redact
                 }
                 $reasoningDetails = @($reasoning.Values)
+                $parts = @($googleState.Tracked -and -not $toolRepair ? @(foreach ($part in $googleParts) {
+                            @{ Thought = $part.Thought; Text = $part.Text.ToString(); Signature = $part.Signature }
+                        }) : @())
+                $messageSignature = -not $parts.Count -and -not $toolRepair -and $googleParts.Count ? $googleParts[0].Signature : ''
                 $reasoningJson = ConvertTo-Json -InputObject $reasoningDetails -Depth 10 -Compress
                 if ($reasoningJson -cne (Protect-HarnessText $reasoningJson $redact)) {
                     throw 'Reasoning details contain a known credential.'
                 }
-                $providerTurn = (($reasoningDetails.Count -or $agentCalls.Count) -and -not $toolRepair) ? [guid]::NewGuid().ToString('N') : ''
                 # The exact call arguments also travel in ProviderData, so a restored session replays them byte for byte.
                 $arguments = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
-                if ($providerTurn) {
+                $signatures = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+                $proposals = @()
+                $proposalReplay = -not $agent -and $proposal -and -not @($toolCalls.Values | Where-Object {
+                        -not $_.Id -or (Protect-HarnessText ($_.Id + $_.Arguments.ToString()) $redact) -cne ($_.Id + $_.Arguments.ToString())
+                    }).Count -and @($toolCalls.Values.Id | Select-Object -Unique).Count -eq $toolCalls.Count
+                if (-not $toolRepair -and ($agent -or $proposalReplay)) {
                     foreach ($call in $toolCalls.Values) {
                         $arguments[$call.Id] = $call.Arguments.ToString()
+                        if ($call.Signature) {
+                            $signatures[$call.Id] = $call.Signature
+                        }
                     }
                 }
+                if ($proposalReplay -and ($signatures.Count -or $reasoningDetails.Count -or $messageSignature -or $parts.Count)) {
+                    $proposals = @(foreach ($index in @($toolCalls.Keys | Sort-Object)) {
+                            $call = $toolCalls[$index]
+                            @{ Id = $call.Id; Proposal = (ConvertFrom-OpenAIToolProposal -Calls @{ 0 = $call } -FinishReason stop -Redact $redact) }
+                        })
+                }
+                $providerTurn = (($reasoningDetails.Count -or $agentCalls.Count -or $messageSignature -or $parts.Count -or $proposals.Count) -and -not $toolRepair) ? [guid]::NewGuid().ToString('N') : ''
                 if ($reasoningCache -and $providerTurn) {
-                    $reasoningCache.Turns[$providerTurn] = @{ Details = $reasoningDetails; Text = $text.ToString(); Arguments = $arguments }
+                    $reasoningCache.Turns[$providerTurn] = @{ Details = $reasoningDetails; Text = $text.ToString(); Arguments = $arguments; Signatures = $signatures; MessageSignature = $messageSignature; GoogleParts = $parts; Proposals = $proposals }
+                }
+                $opaqueJson = $reasoningJson
+                if ($signatures.Count) {
+                    $opaqueJson += ConvertTo-Json -InputObject @($signatures.Values | ForEach-Object { @{ extra_content = @{ google = @{ thought_signature = $_ } } } }) -Depth 5 -Compress
+                }
+                if ($messageSignature -and -not $toolRepair) {
+                    $opaqueJson += ConvertTo-Json -InputObject @{ extra_content = @{ google = @{ thought_signature = $messageSignature } } } -Depth 4 -Compress
+                }
+                if ($parts.Count) {
+                    # Visible text is already budgeted by NativeBatch.Text; add hidden text and all part metadata.
+                    $opaqueJson += ConvertTo-Json -InputObject @($parts | ForEach-Object { @{ Text = ($_.Thought ? $_.Text : ''); Thought = $_.Thought; Signature = $_.Signature } }) -Depth 5 -Compress
+                }
+                if ($proposals.Count) {
+                    # Proposal history replays a native call and review receipt, not only its rendered answer.
+                    $opaqueJson += ConvertTo-OpenAIWireJson @($proposals | ForEach-Object {
+                            @{ id = $_.Id; name = 'prepare_powershell'; arguments = $arguments[$_.Id]
+                                response = @{ status = 'proposal_returned_for_review'; proposal = $_.Proposal }
+                            }
+                        })
                 }
                 if ($proposal) {
                     Publish-OpenAIStreamText $output ("`n`n" + $proposal) -Force
@@ -494,8 +527,8 @@ function Invoke-OpenAIHttpProvider {
                     NativeToolCalls    = $toolCalls.Count
                     ToolArgumentDeltas = [int](($toolCalls.Values | Measure-Object ArgumentDeltas -Sum).Sum)
                     Metadata           = New-HarnessFrozen @{ ProviderUsage = $usage; ProviderAttempts = @(ConvertTo-OpenAIUsageAttempt $observations); GenerationIds = @($observations | ForEach-Object { $_.GenerationIds } | Select-Object -Unique); Upstream = @($observations | ForEach-Object { $_['Upstream'] } | Where-Object { $_ } | Select-Object -Unique) -join ','; ToolCalls = $agentCalls; FinishReason = $wireFinishReason; ToolFallback = [bool]($agent -and $toolsDisabled)
-                        ToolCallRepair = $toolRepair; ProviderData = @{ Turn = $providerTurn; Arguments = $arguments }; ReasoningDetailCount = $reasoningDetails.Count; ReasoningDetailBytes = $reasoningDetails.Count ? [Text.Encoding]::UTF8.GetByteCount($reasoningJson) : 0
-                        WireTokenOverhead = ($reasoningDetails.Count -and $Context.PSObject.Properties['EstimateWireTokens']) ? (& $Context.EstimateWireTokens $reasoningJson) : 0
+                        ToolCallRepair = $toolRepair; ProviderData = ($providerTurn ? @{ Turn = $providerTurn; Arguments = ($proposals.Count ? @{} : $arguments); HadSignature = [bool]($signatures.Count -or $messageSignature -or @($parts | Where-Object Signature).Count) } : $null); ReasoningDetailCount = $reasoningDetails.Count; ReasoningDetailBytes = $reasoningDetails.Count ? [Text.Encoding]::UTF8.GetByteCount($reasoningJson) : 0
+                        WireTokenOverhead = (($reasoningDetails.Count -or $signatures.Count -or $messageSignature -or $parts.Count) -and $Context.PSObject.Properties['EstimateWireTokens']) ? (& $Context.EstimateWireTokens $opaqueJson) : 0
                     }
                 }
             }
@@ -540,16 +573,17 @@ function Invoke-OpenAIHttpProvider {
     }
     catch {
         $cause = $_.Exception.GetBaseException()
+        $privatePatterns = @(Get-OpenAIPrivatePattern -Cache $reasoningCache -Calls $toolCalls -Parts $googleParts -Details $reasoning)
         $failure = if ($CancellationToken.IsCancellationRequested) {
             [OperationCanceledException]::new('Request cancelled.', $CancellationToken)
         }
         elseif ($cause.Data['AgentStopReason'] -ceq 'CallbackFailure') {
-            $localFailure = [InvalidOperationException]::new((Protect-HarnessText $cause.Message $redact))
+            $localFailure = [InvalidOperationException]::new((Protect-OpenAIPrivateText -Text (Protect-HarnessText $cause.Message $redact) -PrivatePatterns $privatePatterns))
             $localFailure.Data['AgentStopReason'] = 'CallbackFailure'
             $localFailure
         }
         elseif ($cause.Data['AgentStopReason'] -in @('StreamStalled', 'ProviderStall')) {
-            $safeMessage = Protect-HarnessText $cause.Message $redact
+            $safeMessage = Protect-OpenAIPrivateText -Text (Protect-HarnessText $cause.Message $redact) -PrivatePatterns $privatePatterns
             if ($safeMessage -cne $cause.Message) {
                 $safeCause = [InvalidOperationException]::new($safeMessage)
                 foreach ($name in @('AgentStopReason', 'FailureOrigin', 'TimeoutKind', 'ProviderStatusCode')) {
@@ -569,7 +603,7 @@ function Invoke-OpenAIHttpProvider {
             $timeout
         }
         else {
-            $errorCause = [InvalidOperationException]::new((Get-OpenAIProviderFailureMessage $_.Exception $redact))
+            $errorCause = [InvalidOperationException]::new((Get-OpenAIProviderFailureMessage -Exception $_.Exception -Redact $redact -PrivatePatterns $privatePatterns))
             if ($cause.Data['AgentStopReason'] -in @('CostLimit', 'InvalidToolCall', 'RateLimit', 'Deadline')) {
                 $errorCause.Data['AgentStopReason'] = $cause.Data['AgentStopReason']
             }

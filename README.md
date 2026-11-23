@@ -1,6 +1,6 @@
 # PwshHarness
 
-PowerShell 7.6 terminal assistant using an OpenAI-compatible gateway. Alpha: live gateway compatibility is unverified. `UseToolsApi` defaults to true; set `"UseToolsApi": false` for text proposals. Unsupported gateways fall back automatically.
+PowerShell 7.6 terminal assistant using an OpenAI-compatible gateway or Google's native Gemini API. Alpha: live gateway compatibility is unverified. `UseToolsApi` defaults to true; set `"UseToolsApi": false` for text proposals. Compatible gateways that reject tools fall back automatically.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ From a checkout or extracted package: `pwsh -NoProfile -File .\install.ps1`. Bui
 
 `pwsh-harness -BaseUrl https://gw.example -Model gemini-3.8-flash` asks for a missing key using hidden input. `Set-PwshHarnessConfig` configures once. `-ApiKey` accepts SecureString; `OPENAI_API_KEY` and SecretManagement `SecretName` also work. Defaults < JSON < environment < parameters.
 Saving is optional. Keys stay outside config.json, sessions and logs, bound to the gateway origin/provider. Windows uses DPAPI CurrentUser with an owner-only ACL; Linux/macOS use a 0600 plaintext credential file. `Remove-PwshHarnessCredential` removes saved keys.
-The gateway must support `/v1/chat/completions` and SSE. Use `Provider=OpenAICompatible` with its URL and exact model id; provider brand names are not adapter names. Unlisted models use generic defaults unless you explicitly choose a profile. Tool calling and reasoning support are endpoint-dependent; see [compatibility](CONFIGURATION.md#provider-and-model-compatibility).
+Use `Provider=OpenAICompatible` with the service's URL and exact model id for chat completions and SSE. Google's compatible route accepts `-BaseUrl https://generativelanguage.googleapis.com/v1beta/openai/`. For native Google requests, use `pwsh-harness -Provider Gemini -Model gemini-4-argon` with `GEMINI_API_KEY` or `-ApiKey`. It defaults to Google's `/v1beta` endpoint and supports coding text, proposals and host-approved function calls. `Gemini.Stream=false` selects `generateContent`; streaming uses `streamGenerateContent`. Unlisted models use generic defaults unless you explicitly choose a profile. See [compatibility and native Google configuration](CONFIGURATION.md#provider-and-model-compatibility).
 
 ## Use
 
