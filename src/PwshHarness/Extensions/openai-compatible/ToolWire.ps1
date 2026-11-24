@@ -1,4 +1,76 @@
 #Requires -Version 7.6
+function Get-OpenAIToolRepair {
+    # Decoder failures produce closed host-owned feedback, never rejected wire data or exception text.
+    [CmdletBinding()]
+    param([Exception]$Exception, [string]$Kind = '')
+    $messages = @{
+        InvalidNativeBatch   = 'Invalid native tool batch. Reissue complete calls with valid JSON, declared tools and fresh unique IDs.'
+        InvalidToolIdentity  = 'Tool call identity was invalid or changed. Reissue complete calls with fresh valid IDs and stable function names.'
+        UndeclaredTool       = 'A tool was not advertised for this run. Use only the declared tools.'
+        DuplicateCallId      = 'Tool call IDs were repeated. Reissue calls with fresh unique IDs.'
+        ProtectedCredential  = 'Tool arguments contained a protected credential; reissue without secrets.'
+        InvalidToolIndex     = 'Tool call indices were invalid or ambiguous. Reissue a contiguous batch with indices beginning at zero.'
+        InvalidToolArguments = 'Tool arguments were invalid. Reissue complete JSON objects matching the declared tool schemas.'
+        UnsupportedToolField = 'Tool call fields were unsupported. Use only the declared function-call fields.'
+        InvalidToolSignature = 'Native signature metadata was invalid. Reissue valid provider metadata without synthesizing or changing opaque signatures.'
+        ToolBatchLimit       = 'The native tool batch exceeded a size or count limit. Split the work into smaller complete calls.'
+        IncompleteToolCall   = 'Native tool calls were incomplete. Reissue complete calls with a stop or tool_calls finish reason.'
+        DuplicateJsonKey     = 'Tool JSON contained duplicate keys. Reissue JSON with each property appearing once.'
+    }
+    if ($Exception) {
+        $cause = $Exception.GetBaseException()
+        $reported = $cause.Data['ToolCallRepairKind']
+        if ($cause.Data['ProtectedCredential']) {
+            $Kind = 'ProtectedCredential'
+        }
+        elseif ($reported -is [string] -and $reported -cin @($messages.psbase.Keys)) {
+            $Kind = $reported
+        }
+        elseif ($null -ne $reported) {
+            $Kind = 'InvalidNativeBatch'
+        }
+        elseif (-not $Kind) {
+            if ($cause -is [Text.Json.JsonException]) {
+                $Kind = 'InvalidToolArguments'
+            }
+            else {
+                $guards = @{
+                    'Invalid or changed tool call ID.'                                   = 'InvalidToolIdentity'
+                    'Missing tool call ID.'                                              = 'InvalidToolIdentity'
+                    'Tool call ID changed.'                                              = 'InvalidToolIdentity'
+                    'Tool call name changed.'                                            = 'InvalidToolIdentity'
+                    'Unknown agent tool name.'                                           = 'UndeclaredTool'
+                    'Repeated tool call ID.'                                             = 'DuplicateCallId'
+                    'Invalid tool call index.'                                           = 'InvalidToolIndex'
+                    'Noncontiguous tool call indices.'                                   = 'InvalidToolIndex'
+                    'Ambiguous indexless tool call order.'                               = 'InvalidToolIndex'
+                    'Invalid tool arguments.'                                            = 'InvalidToolArguments'
+                    'Tool arguments must be an object.'                                  = 'InvalidToolArguments'
+                    'Unknown tool call field.'                                           = 'UnsupportedToolField'
+                    'Unsupported tool call type.'                                        = 'UnsupportedToolField'
+                    'Legacy function calls are unsupported.'                             = 'UnsupportedToolField'
+                    'Gateway returned tool calls while UseToolsApi is disabled.'         = 'UnsupportedToolField'
+                    'Invalid Google signature field.'                                    = 'InvalidToolSignature'
+                    'Tool signature changed.'                                            = 'InvalidToolSignature'
+                    'Assistant signature changed.'                                       = 'InvalidToolSignature'
+                    'Tool arguments exceed the size limit.'                              = 'ToolBatchLimit'
+                    'Tool call batch exceeds the call limit.'                            = 'ToolBatchLimit'
+                    'Google signature exceeds the size limit.'                           = 'ToolBatchLimit'
+                    'Google content exceeds the size limit.'                             = 'ToolBatchLimit'
+                    'Incomplete agent tool call response.'                               = 'IncompleteToolCall'
+                    'An indexless tool call must be complete and have a fresh identity.' = 'IncompleteToolCall'
+                    'Duplicate tool argument key.'                                       = 'DuplicateJsonKey'
+                    'Duplicate native tool wire key.'                                    = 'DuplicateJsonKey'
+                }
+                $Kind = $cause.Message -cin @($guards.psbase.Keys) ? $guards[$cause.Message] : 'InvalidNativeBatch'
+            }
+        }
+    }
+    if ($Kind -cnotin @($messages.psbase.Keys)) {
+        $Kind = 'InvalidNativeBatch'
+    }
+    @{ Kind = $Kind; Message = $messages[$Kind] }
+}
 function Get-OpenAIThoughtSignature {
     [CmdletBinding()]
     param($Extra, [string[]]$Redact = @(), [switch]$AllowThought)
@@ -85,8 +157,11 @@ function Add-OpenAIToolDelta {
                 $inferred = $true
             }
             if ($delta -isnot [Collections.IDictionary] -or
-                $delta.index -isnot [long] -and $delta.index -isnot [int] -or $delta.index -lt 0 -or $delta.index -ge ($Agent ? 8 : 64)) {
+                $delta.index -isnot [long] -and $delta.index -isnot [int] -or $delta.index -lt 0) {
                 throw 'Invalid tool call index.'
+            }
+            if ($delta.index -ge ($Agent ? 8 : 64)) {
+                throw 'Tool call batch exceeds the call limit.'
             }
             $index = [int]$delta.index
             if (-not $Calls.ContainsKey($index)) {
@@ -195,8 +270,14 @@ function ConvertFrom-OpenAIAgentCall {
             throw 'Noncontiguous tool call indices.'
         }
         $call = $Calls[$index]
-        if ($call.Name -cnotin $Names -or -not $call.Id -or -not $ids.Add($call.Id)) {
-            throw 'Unknown tool or duplicate/missing tool call ID.'
+        if ($call.Name -cnotin $Names) {
+            throw 'Unknown agent tool name.'
+        }
+        if (-not $call.Id) {
+            throw 'Missing tool call ID.'
+        }
+        if (-not $ids.Add($call.Id)) {
+            throw 'Repeated tool call ID.'
         }
         $json = $call.Arguments.ToString()
         $protected = $call.Id + $call.Name + $json + $call['Signature']

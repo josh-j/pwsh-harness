@@ -45,16 +45,24 @@ function Add-EngineAgentBatch {
 }
 function Request-EngineAgentCallRepair {
     [CmdletBinding()]
-    param($Loop, [string]$Message, [ValidateSet('InvalidNativeBatch', 'InvalidToolIdentity', 'UndeclaredTool', 'DuplicateCallId', 'ProtectedCredential')][string]$Kind = 'InvalidNativeBatch')
+    param($Loop, [string]$Message, [string]$Kind = 'InvalidNativeBatch')
+    # Provider metadata is untrusted. Only these host-owned categories may reach the journal or frontend.
+    $reasons = @{
+        InvalidNativeBatch = 'the native tool batch could not be decoded'; InvalidToolIdentity = 'a tool call had an invalid identity'
+        UndeclaredTool = 'a tool name was not advertised for this run'; DuplicateCallId = 'a tool call ID was reused'; ProtectedCredential = 'tool arguments contained a protected credential'
+        InvalidToolIndex = 'tool-call fragments could not be correlated'; InvalidToolArguments = 'tool arguments were not a valid JSON object'
+        UnsupportedToolField = 'a tool call contained unsupported fields or a call type'; InvalidToolSignature = 'provider signature metadata was invalid or changed'
+        ToolBatchLimit = 'the tool batch exceeded a size or count limit'; IncompleteToolCall = 'the response ended before complete tool calls were available'
+        DuplicateJsonKey = 'the tool response contained duplicate JSON keys'
+    }
+    if ($Kind -cnotin @($reasons.psbase.Keys)) {
+        $Kind = 'InvalidNativeBatch'
+    }
     if ($Message -ceq 'Tool arguments contained a protected credential; reissue without secrets.') {
         $Kind = 'ProtectedCredential'
     }
     if ($Loop.ToolRepairs -ge 2) {
         # Persist only host-owned categories, never rejected arguments, identities or provider error text.
-        $reasons = @{
-            InvalidNativeBatch = 'the native tool batch could not be decoded'; InvalidToolIdentity = 'a tool call had an invalid identity'
-            UndeclaredTool = 'a tool name was not advertised for this run'; DuplicateCallId = 'a tool call ID was reused'; ProtectedCredential = 'tool arguments contained a protected credential'
-        }
         $summary = "The provider returned invalid tool calls after two correction attempts: $($reasons[$Kind])."
         $Loop.FailureDetail = "Tool call validation: $Kind. $summary"
         $Loop.Failure = @{ Message = $summary; RetryInput = $true; Resumable = $false }
@@ -64,6 +72,9 @@ function Request-EngineAgentCallRepair {
         return $false
     }
     $Loop.ToolRepairs++
+    Add-EngineTranscript -State $Loop.Turn.Session -Role 'agent-tool-repair' -Text '' -Metadata @{
+        RunId = $Loop.Run.Id; Step = $Loop.Steps; Attempt = $Loop.ToolRepairs; ValidationKind = $Kind
+    }
     # An invalid native batch has no trustworthy correlation identity to replay.
     $Loop.Turn.Exchange.Add((New-HarnessMessage assistant $Loop.Turn.ResponseText))
     $Loop.Turn.Exchange.Add((New-HarnessMessage user $Message))

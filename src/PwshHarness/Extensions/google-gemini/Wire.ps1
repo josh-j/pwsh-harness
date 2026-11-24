@@ -236,14 +236,14 @@ function New-GeminiRequestBody {
 function New-GeminiResponseState {
     [CmdletBinding()]
     param()
-    @{ Parts = [Collections.Generic.List[object]]::new(); Calls = @{}; NativeIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); Text = [Text.StringBuilder]::new(); Finish = ''; Repair = ''; Usage = $null; Bytes = 0L; Chunks = 0; Progress = 0; Thinking = $false; SignatureBytes = 0L; Prefix = [guid]::NewGuid().ToString('N') }
+    @{ Parts = [Collections.Generic.List[object]]::new(); Calls = @{}; NativeIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); Text = [Text.StringBuilder]::new(); Finish = ''; Repair = ''; RepairKind = ''; Usage = $null; Bytes = 0L; Chunks = 0; Progress = 0; Thinking = $false; SignatureBytes = 0L; Prefix = [guid]::NewGuid().ToString('N') }
 }
 function Assert-GeminiPrivateValue {
     [CmdletBinding()]
     param($Value, [string[]]$Redact)
     if ($Value -is [string]) {
         if ((Protect-HarnessText $Value $Redact) -cne $Value) {
-            $failure = New-GeminiWireFailure -Message 'Gemini response part contains a protected credential.'; $failure.Data['ProtectedCredential'] = $true; throw $failure
+            throw (New-GeminiWireFailure -Message 'Gemini response part contains a protected credential.' -Kind ProtectedCredential)
         }
     }
     elseif ($Value -is [Collections.IDictionary]) {
@@ -259,9 +259,13 @@ function Assert-GeminiPrivateValue {
 }
 function New-GeminiWireFailure {
     [CmdletBinding()]
-    param([string]$Message)
+    param([string]$Message, [string]$Kind = 'InvalidNativeBatch')
     $failure = [IO.InvalidDataException]::new($Message)
     $failure.Data['ToolCallRepair'] = $true
+    $failure.Data['ToolCallRepairKind'] = (Get-OpenAIToolRepair -Kind $Kind).Kind
+    if ($failure.Data['ToolCallRepairKind'] -ceq 'ProtectedCredential') {
+        $failure.Data['ProtectedCredential'] = $true
+    }
     $failure
 }
 function ConvertFrom-GeminiEvent {
@@ -277,7 +281,8 @@ function ConvertFrom-GeminiEvent {
         Assert-OpenAIToolJson -Value $document.RootElement
     }
     catch {
-        throw (New-GeminiWireFailure -Message 'Invalid Gemini response JSON.')
+        $kind = $_.Exception.GetBaseException() -is [Text.Json.JsonException] ? 'InvalidNativeBatch' : (Get-OpenAIToolRepair -Exception $_.Exception.GetBaseException()).Kind
+        throw (New-GeminiWireFailure -Message 'Invalid Gemini response JSON.' -Kind $kind)
     }
     finally {
         if ($document) {
@@ -318,36 +323,47 @@ function ConvertFrom-GeminiEvent {
                 ($part.ContainsKey('thought') -and $part.thought -isnot [bool]) -or ($part.ContainsKey('text') -and $part.text -isnot [string]) -or
                 ($part.ContainsKey('functionCall') -and ($part.functionCall -isnot [Collections.IDictionary] -or $part.ContainsKey('text'))) -or
                 -not ($part.ContainsKey('text') -or $part.ContainsKey('functionCall') -or $part.ContainsKey('thoughtSignature'))) {
-                throw (New-GeminiWireFailure -Message 'Unsupported Gemini response part.')
+                throw (New-GeminiWireFailure -Message 'Unsupported Gemini response part.' -Kind UnsupportedToolField)
             }
             if ($part.ContainsKey('thoughtSignature')) {
                 $signature = $part.thoughtSignature
-                if ($signature -isnot [string] -or -not $signature.Length -or [Text.Encoding]::UTF8.GetByteCount($signature) -gt 2097152 -or (Protect-HarnessText $signature $Redact) -cne $signature) {
-                    throw (New-GeminiWireFailure -Message 'Invalid Gemini thought signature.')
+                if ($signature -isnot [string] -or -not $signature.Length) {
+                    throw (New-GeminiWireFailure -Message 'Invalid Gemini thought signature.' -Kind InvalidToolSignature)
+                }
+                if ([Text.Encoding]::UTF8.GetByteCount($signature) -gt 2097152) {
+                    throw (New-GeminiWireFailure -Message 'Gemini thought signature exceeds its bound.' -Kind ToolBatchLimit)
                 }
                 $State.SignatureBytes += [Text.Encoding]::UTF8.GetByteCount($signature)
                 if ($State.SignatureBytes -gt 8388608) {
-                    throw (New-GeminiWireFailure -Message 'Gemini thought signatures exceed their bound.')
+                    throw (New-GeminiWireFailure -Message 'Gemini thought signatures exceed their bound.' -Kind ToolBatchLimit)
                 }
             }
             if ($part.functionCall) {
                 $call = $part.functionCall
-                if ($call -isnot [Collections.IDictionary] -or @($call.psbase.Keys | Where-Object { $_ -cnotin @('name', 'args', 'id') }).Count -or $call.name -isnot [string] -or
-                    ($call.ContainsKey('args') -and $call.args -isnot [Collections.IDictionary]) -or ($call.ContainsKey('id') -and ($call.id -isnot [string] -or -not $call.id.Length -or $call.id.Length -gt 4096 -or -not $State.NativeIds.Add($call.id)))) {
-                    throw (New-GeminiWireFailure -Message 'Invalid Gemini function call.')
+                if ($call -isnot [Collections.IDictionary] -or @($call.psbase.Keys | Where-Object { $_ -cnotin @('name', 'args', 'id') }).Count) {
+                    throw (New-GeminiWireFailure -Message 'Unsupported Gemini function call field.' -Kind UnsupportedToolField)
+                }
+                if ($call.name -isnot [string] -or ($call.ContainsKey('id') -and ($call.id -isnot [string] -or -not $call.id.Length -or $call.id.Length -gt 4096))) {
+                    throw (New-GeminiWireFailure -Message 'Invalid Gemini function call identity.' -Kind InvalidToolIdentity)
+                }
+                if ($call.ContainsKey('args') -and $call.args -isnot [Collections.IDictionary]) {
+                    throw (New-GeminiWireFailure -Message 'Invalid Gemini function call arguments.' -Kind InvalidToolArguments)
+                }
+                if ($call.ContainsKey('id') -and -not $State.NativeIds.Add($call.id)) {
+                    throw (New-GeminiWireFailure -Message 'Duplicate Gemini function call identity.' -Kind DuplicateCallId)
                 }
                 $index = $State.Calls.Count
                 $id = 'gemini_' + $State.Prefix + '_' + $index
                 $arguments = ConvertTo-OpenAIWireJson ($call.ContainsKey('args') ? $call.args : @{})
                 if ([Text.Encoding]::UTF8.GetByteCount($arguments) + [Text.Encoding]::UTF8.GetByteCount([string]$part.thoughtSignature) -gt 2097152) {
-                    throw (New-GeminiWireFailure -Message 'Gemini function arguments and signature exceed their combined bound.')
+                    throw (New-GeminiWireFailure -Message 'Gemini function arguments and signature exceed their combined bound.' -Kind ToolBatchLimit)
                 }
                 $delta = @{ Raw = @{ choices = @(@{ delta = @{ tool_calls = @(@{ index = $index; id = $id; type = 'function'; function = @{ name = $call.name; arguments = $arguments } }) } }) } }
                 try {
                     Add-OpenAIToolDelta -Calls $State.Calls -StreamEvent $delta -Enabled $true -Agent
                 }
                 catch {
-                    throw (New-GeminiWireFailure -Message 'Invalid Gemini function call arguments.')
+                    throw (New-GeminiWireFailure -Message 'Invalid Gemini function call arguments.' -Kind (Get-OpenAIToolRepair -Exception $_.Exception.GetBaseException()).Kind)
                 }
             }
             if ($part.text -and -not $part.thought) {

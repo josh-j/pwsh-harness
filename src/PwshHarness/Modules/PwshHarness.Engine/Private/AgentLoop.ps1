@@ -792,7 +792,8 @@ function Invoke-EngineAgentContinuation {
             $calls = ($metadata -and $metadata.ToolCalls) ? @($metadata.ToolCalls) : @()
             $repair = ($metadata -and $metadata.PSObject.Properties['ToolCallRepair']) ? [string]$metadata.ToolCallRepair : ''
             if ($repair) {
-                if (-not (Request-EngineAgentCallRepair $loop $repair)) {
+                $kind = $metadata.PSObject.Properties['ToolCallRepairKind'] -and $metadata.ToolCallRepairKind -is [string] ? $metadata.ToolCallRepairKind : 'InvalidNativeBatch'
+                if (-not (Request-EngineAgentCallRepair -Loop $loop -Message $repair -Kind $kind)) {
                     return Complete-EngineAgentRun -Store $Store -Loop $loop -Reason InvalidToolCall
                 }
                 continue
@@ -1109,6 +1110,7 @@ function Invoke-EngineAgentDelegate {
             $metadata = $turn.Response.PSObject.Properties['Metadata'] ? $turn.Response.Metadata : $null
             $calls = ($metadata -and $metadata.ToolCalls) ? @($metadata.ToolCalls) : @()
             $repair = ($metadata -and $metadata.PSObject.Properties['ToolCallRepair']) ? [string]$metadata.ToolCallRepair : ''
+            $repairKind = $metadata -and $metadata.PSObject.Properties['ToolCallRepairKind'] -and $metadata.ToolCallRepairKind -is [string] ? $metadata.ToolCallRepairKind : 'InvalidNativeBatch'
             if (-not $repair -and -not $calls.Count) {
                 break
             }
@@ -1117,7 +1119,7 @@ function Invoke-EngineAgentDelegate {
             }
             $validated = $repair ? @() : @(ConvertTo-EngineAgentBatch -Store $Store -Loop $loop -Calls $calls)
             if (-not $validated.Count) {
-                if (-not (Request-EngineAgentCallRepair -Loop $loop -Message ($repair ? $repair : 'Invalid tool identity. Use only the declared read-only tools and fresh unique call IDs.') -Kind ($repair ? 'InvalidNativeBatch' : $loop.CallRepairKind))) {
+                if (-not (Request-EngineAgentCallRepair -Loop $loop -Message ($repair ? $repair : 'Invalid tool identity. Use only the declared read-only tools and fresh unique call IDs.') -Kind ($repair ? $repairKind : $loop.CallRepairKind))) {
                     $stop = 'InvalidToolCall'
                 }
                 continue

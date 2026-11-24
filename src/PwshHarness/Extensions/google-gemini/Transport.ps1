@@ -111,7 +111,10 @@ function Invoke-GeminiProvider {
                             if (-not $agent -or -not $_.Exception.GetBaseException().Data['ToolCallRepair']) {
                                 throw
                             }
-                            $state.Repair = 'Invalid native tool batch. Reissue complete valid calls using only declared tools and fresh unique IDs.'
+                            $detail = Get-OpenAIToolRepair -Exception $_.Exception.GetBaseException()
+                            if (-not $state.Repair -or $detail.Kind -ceq 'ProtectedCredential') {
+                                $state.Repair = $detail.Message; $state.RepairKind = $detail.Kind
+                            }
                             $fragment = ''
                         }
                         $data.Clear()
@@ -134,23 +137,21 @@ function Invoke-GeminiProvider {
                     $failure.Data['FailureOrigin'] = 'ProviderStream'; $failure.Data['AgentStopReason'] = 'ProviderStall'
                     throw $failure
                 }
-                $calls = @(); $repair = $state.Repair; $proposalReplies = @()
-                if ($agent) {
+                $calls = @(); $repair = $state.Repair; $repairKind = $state.RepairKind; $proposalReplies = @()
+                if ($agent -and -not $repair) {
                     try {
-                        if ($repair) {
-                            throw 'Invalid native call batch.'
-                        }
                         if ($state.Calls.Count -and (-not $config.UseToolsApi -or ($Context.PSObject.Properties['ToolChoice'] -and $Context.ToolChoice -ceq 'none'))) {
-                            throw 'Native tools are disabled for this request.'
+                            throw (New-GeminiWireFailure -Message 'Native tools are disabled for this request.')
                         }; $calls = @(ConvertFrom-OpenAIAgentCall -Calls $state.Calls -FinishReason $state.Finish -Redact $redact -Names @($Context.AgentTools.Name)); if ($state.Finish -ceq 'malformed') {
-                            throw 'Malformed function call.'
+                            throw (New-GeminiWireFailure -Message 'Malformed function call.' -Kind IncompleteToolCall)
                         }
                     }
                     catch {
-                        $repair = 'Invalid native tool batch. Reissue complete valid calls using only declared tools and fresh unique IDs.'
+                        $detail = Get-OpenAIToolRepair -Exception $_.Exception.GetBaseException()
+                        $repair = $detail.Message; $repairKind = $detail.Kind; $calls = @()
                     }
                 }
-                elseif ($state.Calls.Count) {
+                elseif (-not $agent -and $state.Calls.Count) {
                     if (-not $config.UseToolsApi) {
                         throw 'Native tools are disabled for this request.'
                     }
@@ -158,7 +159,7 @@ function Invoke-GeminiProvider {
                     Publish-OpenAIStreamText -Output $output -Fragment ("`n`n" + $proposal) -Force
                     $proposalReplies = @(New-GeminiProposalReply -Parts $state.Parts)
                 }
-                elseif ($state.Finish -ceq 'malformed') {
+                elseif (-not $agent -and $state.Finish -ceq 'malformed') {
                     throw 'Gemini returned a malformed function call.'
                 }
                 $turnId = ($repair -or -not ($state.SignatureBytes -or $state.Calls.Count -or @($state.Parts | Where-Object { $_.thought }).Count)) ? '' : [guid]::NewGuid().ToString('N')
@@ -172,7 +173,7 @@ function Invoke-GeminiProvider {
                 $overhead = $turnId ? ($Context.PSObject.Properties['EstimateWireTokens'] -and $Context.EstimateWireTokens ? (& $Context.EstimateWireTokens $opaque) : [Math]::Ceiling($opaque.Length / 4)) : 0
                 Complete-OpenAIEstimatedUsage -Observations $attempts -Bodies $bodies -Context $Context
                 $result = New-HarnessChatResponse -Text $output.Text.ToString() -Usage (ConvertFrom-OpenAIWireUsage (Get-OpenAIAttemptUsage $attempts)) -FinishReason ($state.Finish -ceq 'tool_calls' -and -not $agent ? 'stop' : $state.Finish)
-                $metadata = @{ ProviderUsage = $state.Usage; ProviderAttempts = @(ConvertTo-OpenAIUsageAttempt $attempts); ToolCalls = $calls; FinishReason = $state.Finish; ToolCallRepair = $repair; ToolFallback = [bool]($agent -and -not $config.UseToolsApi); ProviderData = $turnId ? @{ Turn = $turnId } : $null; WireTokenOverhead = $overhead }
+                $metadata = @{ ProviderUsage = $state.Usage; ProviderAttempts = @(ConvertTo-OpenAIUsageAttempt $attempts); ToolCalls = $calls; FinishReason = $state.Finish; ToolCallRepair = $repair; ToolCallRepairKind = $repairKind; ToolFallback = [bool]($agent -and -not $config.UseToolsApi); ProviderData = $turnId ? @{ Turn = $turnId } : $null; WireTokenOverhead = $overhead }
                 $result | Add-Member NoteProperty Metadata (New-HarnessFrozen $metadata)
                 return $result
             }

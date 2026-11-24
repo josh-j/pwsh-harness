@@ -1,7 +1,7 @@
 #Requires -Version 7.6
 function ConvertFrom-OpenAISseEvent {
     [CmdletBinding()]
-    param([string[]]$Data, [string[]]$Redact = @(), [switch]$Agent, [string[]]$PrivatePatterns = @())
+    param([string[]]$Data, [string[]]$Redact = @(), [switch]$Agent, [string[]]$PrivatePatterns = @(), [switch]$PrivateWire)
     if (-not $Data -or $Data.Count -eq 0) {
         return
     }
@@ -55,7 +55,9 @@ function ConvertFrom-OpenAISseEvent {
         $failure.Data['AgentStopReason'] = 'ProviderStall'; $failure.Data['FailureOrigin'] = 'ProviderStream'
         throw $failure
     }
-    $original = if ($Redact.Count) {
+    # Public Raw is a redacted diagnostic. Only provider-local decoding opts into the exact
+    # original needed to validate credentials and replay opaque signatures without changing bytes.
+    $original = if ($PrivateWire -and $Redact.Count) {
         $payload | ConvertFrom-Json -AsHashtable -DateKind String -ErrorAction Stop
     }
     if ($Redact.Count) {

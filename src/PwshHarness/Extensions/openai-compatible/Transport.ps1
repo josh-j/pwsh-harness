@@ -274,7 +274,7 @@ function Invoke-OpenAIHttpProvider {
                         throw $limitFailure
                     }
                     try {
-                        $complete = ConvertFrom-OpenAISseEvent @($body) -Redact $redact -Agent
+                        $complete = ConvertFrom-OpenAISseEvent @($body) -Redact $redact -Agent -PrivateWire
                     }
                     catch {
                         if (-not $_.Exception.GetBaseException().Data['ToolCallRepair']) {
@@ -325,7 +325,8 @@ function Invoke-OpenAIHttpProvider {
                 $googleParts = [Collections.Generic.List[object]]::new()
                 $googleState = @{ Thought = $false; Tracked = $false; Protected = $false; Bytes = 0 }
                 $toolRepair = ''
-                $toolRepairMessage = $toolsDisabled ? 'Native tools are unavailable. Return a complete text proposal using the current workflow.' : 'Invalid native tool batch. Reissue complete calls with valid JSON. Use only the declared tools and fresh unique IDs. Shrink truncated calls or split them into smaller edits.'
+                $toolRepairKind = ''
+                $toolRepairMessage = 'Native tools are unavailable. Return a complete text proposal using the current workflow.'
                 $reasoning = [Collections.Specialized.OrderedDictionary]::new()
                 $lines = New-OpenAIStreamLineState
                 while (-not $done) {
@@ -336,13 +337,17 @@ function Invoke-OpenAIHttpProvider {
                                 if ($data -match '"error"\s*:') {
                                     $privatePatterns = @(Get-OpenAIPrivatePattern -Cache $reasoningCache -Calls $toolCalls -Parts $googleParts -Details $reasoning)
                                 }
-                                $eventName = ConvertFrom-OpenAISseEvent $data.ToArray() -Redact $redact -Agent:$agent -PrivatePatterns $privatePatterns
+                                $eventName = ConvertFrom-OpenAISseEvent $data.ToArray() -Redact $redact -Agent:$agent -PrivatePatterns $privatePatterns -PrivateWire
                             }
                             catch {
                                 if (-not $agent -or -not $_.Exception.GetBaseException().Data['ToolCallRepair']) {
                                     throw
                                 }
-                                $toolRepair = $_.Exception.GetBaseException().Data['ProtectedCredential'] ? 'Tool arguments contained a protected credential; reissue without secrets.' : $toolRepairMessage
+                                if (-not $toolRepair) {
+                                    $repair = Get-OpenAIToolRepair -Exception $_.Exception
+                                    $toolRepairKind = $repair.Kind
+                                    $toolRepair = $toolsDisabled -and $repair.Kind -cne 'ProtectedCredential' ? $toolRepairMessage : $repair.Message
+                                }
                                 $data.Clear()
                                 continue
                             }
@@ -365,7 +370,9 @@ function Invoke-OpenAIHttpProvider {
                                         throw
                                     }
                                     $eventName.Text = ''
-                                    $toolRepair = $_.Exception.GetBaseException().Data['ProtectedCredential'] ? 'Tool arguments contained a protected credential; reissue without secrets.' : $toolRepairMessage
+                                    $repair = Get-OpenAIToolRepair -Exception $_.Exception
+                                    $toolRepairKind = $repair.Kind
+                                    $toolRepair = $toolsDisabled -and $repair.Kind -cne 'ProtectedCredential' ? $toolRepairMessage : $repair.Message
                                 }
                             }
                             if ($agent -and $eventName.Raw) {
@@ -449,7 +456,9 @@ function Invoke-OpenAIHttpProvider {
                             $agentCalls = @(ConvertFrom-OpenAIAgentCall -Calls $toolCalls -FinishReason $finishReason -Redact $redact -Names @($Context.AgentTools.Name))
                         }
                         catch {
-                            $toolRepair = $_.Exception.GetBaseException().Data['ProtectedCredential'] ? 'Tool arguments contained a protected credential; reissue without secrets.' : $toolRepairMessage
+                            $repair = Get-OpenAIToolRepair -Exception $_.Exception
+                            $toolRepairKind = $repair.Kind
+                            $toolRepair = $toolsDisabled -and $repair.Kind -cne 'ProtectedCredential' ? $toolRepairMessage : $repair.Message
                         }
                     }
                 }
@@ -527,7 +536,7 @@ function Invoke-OpenAIHttpProvider {
                     NativeToolCalls    = $toolCalls.Count
                     ToolArgumentDeltas = [int](($toolCalls.Values | Measure-Object ArgumentDeltas -Sum).Sum)
                     Metadata           = New-HarnessFrozen @{ ProviderUsage = $usage; ProviderAttempts = @(ConvertTo-OpenAIUsageAttempt $observations); GenerationIds = @($observations | ForEach-Object { $_.GenerationIds } | Select-Object -Unique); Upstream = @($observations | ForEach-Object { $_['Upstream'] } | Where-Object { $_ } | Select-Object -Unique) -join ','; ToolCalls = $agentCalls; FinishReason = $wireFinishReason; ToolFallback = [bool]($agent -and $toolsDisabled)
-                        ToolCallRepair = $toolRepair; ProviderData = ($providerTurn ? @{ Turn = $providerTurn; Arguments = ($proposals.Count ? @{} : $arguments); HadSignature = [bool]($signatures.Count -or $messageSignature -or @($parts | Where-Object Signature).Count) } : $null); ReasoningDetailCount = $reasoningDetails.Count; ReasoningDetailBytes = $reasoningDetails.Count ? [Text.Encoding]::UTF8.GetByteCount($reasoningJson) : 0
+                        ToolCallRepair = $toolRepair; ToolCallRepairKind = $toolRepairKind; ProviderData = ($providerTurn ? @{ Turn = $providerTurn; Arguments = ($proposals.Count ? @{} : $arguments); HadSignature = [bool]($signatures.Count -or $messageSignature -or @($parts | Where-Object Signature).Count) } : $null); ReasoningDetailCount = $reasoningDetails.Count; ReasoningDetailBytes = $reasoningDetails.Count ? [Text.Encoding]::UTF8.GetByteCount($reasoningJson) : 0
                         WireTokenOverhead = (($reasoningDetails.Count -or $signatures.Count -or $messageSignature -or $parts.Count) -and $Context.PSObject.Properties['EstimateWireTokens']) ? (& $Context.EstimateWireTokens $opaqueJson) : 0
                     }
                 }
